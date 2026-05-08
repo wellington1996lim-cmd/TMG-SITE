@@ -1,6 +1,7 @@
 streamlit
 pillow
 numpy
+pandas
 opencv-python-headless
 rasterio
 geopandas

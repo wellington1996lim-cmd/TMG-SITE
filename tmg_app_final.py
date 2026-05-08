@@ -18,6 +18,8 @@ import warnings
 import hashlib
 from datetime import datetime, date
 
+APP_ROOT = Path(__file__).resolve().parent
+
 # NOVO - Configurações para suportar imagens grandes e formatos variados
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -142,15 +144,15 @@ st.markdown("""
 # ==========================================
 # DIRETÓRIOS DE ASSETS[cite: 1]
 # ==========================================
-LOGO_DIR = Path("tmg_assets/logo")
+LOGO_DIR = APP_ROOT / "tmg_assets/logo"
 LOGO_DIR.mkdir(parents=True, exist_ok=True)
 LOGO_PATH = LOGO_DIR / "logo_tmg_referencia.png"
 
-LOGIN_BG_DIR = Path("tmg_assets/login")
+LOGIN_BG_DIR = APP_ROOT / "tmg_assets/login"
 LOGIN_BG_DIR.mkdir(parents=True, exist_ok=True)
 LOGIN_BG_PATH = LOGIN_BG_DIR / "login_bg_referencia.png"
 
-SYSTEM_CONFIG_DIR = Path("tmg_config")
+SYSTEM_CONFIG_DIR = APP_ROOT / "tmg_config"
 SYSTEM_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 SYSTEM_CONFIG_PATH = SYSTEM_CONFIG_DIR / "system_config.json"
 
@@ -174,15 +176,34 @@ def app_image(image, **kwargs):
     except TypeError:
         return st.image(image, use_column_width=True, **kwargs)
 
+def _streamlit_secret(name: str, default: str = "") -> str:
+    try:
+        return str(st.secrets.get(name, default) or default)
+    except Exception:
+        return default
+
+def _configured_database_dir() -> str:
+    return (
+        os.getenv("TMG_DATABASE_DIR", "").strip()
+        or _streamlit_secret("TMG_DATABASE_DIR").strip()
+        or _streamlit_secret("database_dir").strip()
+    )
+
+def _looks_like_windows_drive_path(raw: str) -> bool:
+    return len(raw) > 2 and raw[1] == ":" and raw[2:3] in ("\\", "/")
+
 def _resolve_system_path(value: str) -> Path:
     raw = os.path.expandvars(str(value or "").strip())
+    if os.name != "nt" and _looks_like_windows_drive_path(raw):
+        raw = "tmg_data"
     path = Path(raw).expanduser() if raw else Path("tmg_data")
     if not path.is_absolute():
-        path = (Path.cwd() / path).resolve()
+        path = (APP_ROOT / path).resolve()
     return path
 
 def _load_system_config() -> dict:
-    default_dir = _resolve_system_path("tmg_data")
+    configured_dir = _configured_database_dir()
+    default_dir = _resolve_system_path(configured_dir or "tmg_data")
     default = {
         "database_dir": str(default_dir),
         "updated_at": "",
@@ -198,6 +219,10 @@ def _load_system_config() -> dict:
     data.setdefault("database_dir", str(default_dir))
     data.setdefault("updated_at", "")
     data.setdefault("tema", "padrao")
+    if configured_dir:
+        data["database_dir"] = str(default_dir)
+    else:
+        data["database_dir"] = str(_resolve_system_path(data.get("database_dir", "tmg_data")))
     return data
 
 def _save_system_config(data: dict) -> None:
@@ -851,6 +876,9 @@ TV_GRIDS_DIR = TV_ROOT / "grids"
 TV_IMPORTS_DIR = TV_ROOT / "importacoes"
 TV_RETURNS_DIR = TV_ROOT / "retornos"
 TV_MANIFEST_PATH = TV_ROOT / "manifest.json"
+MOSAIC_LIBRARY_DIR = SYSTEM_DATABASE_DIR / "mosaicos_importados"
+MOSAIC_MANIFEST_PATH = MOSAIC_LIBRARY_DIR / "manifest.json"
+MOSAIC_UPLOAD_TYPES = ["png", "jpg", "jpeg", "tif", "tiff", "geotiff", "img", "ecw", "jp2"]
 
 def _tv_safe_name(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(value).strip())
@@ -876,6 +904,111 @@ def _tv_hash_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+def _mosaic_default_manifest() -> dict:
+    return {"mosaics": []}
+
+def _mosaic_ensure_storage() -> None:
+    MOSAIC_LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
+    if not MOSAIC_MANIFEST_PATH.exists():
+        MOSAIC_MANIFEST_PATH.write_text(json.dumps(_mosaic_default_manifest(), indent=2, ensure_ascii=False), encoding="utf-8")
+
+def _mosaic_load_manifest() -> dict:
+    _mosaic_ensure_storage()
+    try:
+        data = json.loads(MOSAIC_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        data = _mosaic_default_manifest()
+    data.setdefault("mosaics", [])
+    return data
+
+def _mosaic_save_manifest(data: dict) -> None:
+    _mosaic_ensure_storage()
+    MOSAIC_MANIFEST_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def _mosaic_option_label(record: dict) -> str:
+    size = record.get("tamanho_fmt") or _tv_human_size(record.get("tamanho", 0))
+    origem = record.get("origem", "Importado")
+    return f"{record.get('mosaic_id')} · {record.get('nome')} · {size} · {origem}"
+
+def _mosaic_records() -> list:
+    manifest = _mosaic_load_manifest()
+    records = []
+    for record in manifest.get("mosaics", []):
+        if Path(record.get("path", "")).exists():
+            records.append(record)
+    return records
+
+def _mosaic_single_select(label: str, key: str) -> str:
+    options = [""] + [_mosaic_option_label(record) for record in _mosaic_records()]
+    if len(options) == 1:
+        st.caption("Biblioteca de mosaicos vazia. Envie uma ortofoto para deixá-la disponível nos outros visualizadores.")
+        return ""
+    return st.selectbox(label, options, key=key)
+
+def _mosaic_multi_select(label: str, key: str, max_items: int = 10) -> list:
+    options = [_mosaic_option_label(record) for record in _mosaic_records()]
+    if not options:
+        st.caption("Biblioteca de mosaicos vazia. Os uploads feitos nos visualizadores ficam disponíveis aqui.")
+        return []
+    selected = st.multiselect(label, options, key=key, max_selections=max_items)
+    return selected or []
+
+def _mosaic_find(option: str) -> dict:
+    mosaic_id = option.split(" · ")[0] if option else ""
+    if not mosaic_id:
+        return {}
+    for record in _mosaic_records():
+        if record.get("mosaic_id") == mosaic_id:
+            return record
+    return {}
+
+def _mosaic_register_bytes(raw: bytes, filename: str, origem: str) -> dict:
+    if not raw:
+        return {}
+    manifest = _mosaic_load_manifest()
+    file_hash = _tv_hash_bytes(raw)
+    for record in manifest.get("mosaics", []):
+        if record.get("sha256") == file_hash and Path(record.get("path", "")).exists():
+            return record
+
+    mosaic_id = f"MOSAICO_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    safe_name = Path(filename or mosaic_id).name
+    mosaic_dir = MOSAIC_LIBRARY_DIR / mosaic_id
+    mosaic_dir.mkdir(parents=True, exist_ok=True)
+    target = mosaic_dir / safe_name
+    if target.exists():
+        target = mosaic_dir / f"{target.stem}_{datetime.now().strftime('%H%M%S%f')}{target.suffix}"
+    target.write_bytes(raw)
+    record = {
+        "mosaic_id": mosaic_id,
+        "nome": safe_name,
+        "path": str(target),
+        "tamanho": len(raw),
+        "tamanho_fmt": _tv_human_size(len(raw)),
+        "sha256": file_hash,
+        "ext": target.suffix.lower(),
+        "origem": origem,
+        "importado_em": _tv_now()
+    }
+    manifest.setdefault("mosaics", []).insert(0, record)
+    manifest["mosaics"] = manifest["mosaics"][:200]
+    _mosaic_save_manifest(manifest)
+    return record
+
+def _mosaic_bytes_from_selection(option: str) -> tuple:
+    record = _mosaic_find(option)
+    path = Path(record.get("path", ""))
+    if record and path.exists():
+        return path.read_bytes(), record.get("nome") or path.name
+    return None, ""
+
+def _mosaic_input_bytes(uploaded, selected_option: str, origem: str) -> tuple:
+    if uploaded is not None:
+        raw = uploaded.getbuffer().tobytes()
+        _mosaic_register_bytes(raw, uploaded.name, origem)
+        return raw, uploaded.name
+    return _mosaic_bytes_from_selection(selected_option)
 
 def _tv_default_manifest() -> dict:
     return {
@@ -1272,6 +1405,7 @@ def _tv_render_orthos(manifest: dict) -> None:
                 if item["ext"] in [".tif", ".tiff", ".png", ".jpg", ".jpeg"]:
                     try:
                         raw = Path(item["path"]).read_bytes()
+                        _mosaic_register_bytes(raw, item["nome"], "Transferencia de Voos")
                         _, dims, _, spatial = processar_ortofoto(raw, item["nome"])
                         thumb_dims = f"{dims[0]}x{dims[1]}" if dims else ""
                     except Exception:
@@ -2399,6 +2533,7 @@ def _vd_render_ortofotos(manifest: dict) -> None:
             dims, spatial_meta, preview_error = None, {}, ""
             if item["ext"] != ".zip":
                 raw = Path(item["path"]).read_bytes()
+                _mosaic_register_bytes(raw, item["nome"], "Voos Direcionados")
                 _, dims, preview_error, spatial_meta = processar_ortofoto(raw, item["nome"])
             record = {
                 "ortho_id": ortho_id,
@@ -2988,12 +3123,13 @@ with main_container:
             key="chk_orto_uploader",
             help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW"
         )
+        chk_library = _mosaic_single_select("Ou usar mosaico já importado", key="chk_mosaic_library")
+        chk_bytes, chk_name = _mosaic_input_bytes(chk_file, chk_library, "Checklist")
 
-        if chk_file:
+        if chk_bytes:
             with st.spinner("Carregando ortofoto..."):
-                chk_bytes = chk_file.read()
                 # Atualizado Unpack para o spatial_meta
-                chk_b64, chk_dims, chk_err, chk_spatial = processar_ortofoto(chk_bytes, chk_file.name)
+                chk_b64, chk_dims, chk_err, chk_spatial = processar_ortofoto(chk_bytes, chk_name)
 
             if chk_err:
                 st.error(f"Erro: {chk_err}")
@@ -3001,7 +3137,7 @@ with main_container:
                 cw, ch = chk_dims
                 st.markdown(
                     f"<p style='color:#666;font-size:0.78rem;margin-bottom:6px;'>"
-                    f"📐 {chk_file.name} · {cw}×{ch} px</p>",
+                    f"📐 {chk_name} · {cw}×{ch} px</p>",
                     unsafe_allow_html=True
                 )
 
@@ -4103,26 +4239,28 @@ updateGridSelect();
 
         orto_file = st.file_uploader(
             "Selecione a ortofoto",
-            type=["png", "jpg", "jpeg", "tif", "tiff", "img", "ecw", "jp2"],
+            type=MOSAIC_UPLOAD_TYPES,
             key="orto_uploader",
             help="Formatos suportados: PNG, JPG, TIF/GeoTIFF, JP2, IMG"
         )
+        grid_library = _mosaic_single_select("Ou usar mosaico já importado", key="grid_mosaic_library")
 
         grid_prefill_path = st.session_state.get("grid_prefill_ortho_path", "")
         grid_prefill_name = st.session_state.get("grid_prefill_ortho_name", "")
         grid_prefill_available = bool(grid_prefill_path and Path(grid_prefill_path).exists())
-        if grid_prefill_available and not orto_file:
+        if grid_prefill_available and not orto_file and not grid_library:
             st.info(f"Ortofoto recebida do módulo Voos Direcionados: {grid_prefill_name or Path(grid_prefill_path).name}")
             if st.button("Limpar ortofoto recebida", key="btn_clear_grid_prefill"):
                 st.session_state.pop("grid_prefill_ortho_path", None)
                 st.session_state.pop("grid_prefill_ortho_name", None)
                 app_rerun()
 
-        if orto_file or grid_prefill_available:
+        if orto_file or grid_library or grid_prefill_available:
             with st.spinner("Carregando ortofoto de alta resolução... (Isso pode levar alguns segundos)"):
                 if orto_file:
-                    file_bytes = orto_file.read()
-                    orto_nome_exibicao = orto_file.name
+                    file_bytes, orto_nome_exibicao = _mosaic_input_bytes(orto_file, "", "Grid")
+                elif grid_library:
+                    file_bytes, orto_nome_exibicao = _mosaic_input_bytes(None, grid_library, "Grid")
                 else:
                     file_bytes = Path(grid_prefill_path).read_bytes()
                     orto_nome_exibicao = grid_prefill_name or Path(grid_prefill_path).name
@@ -4955,9 +5093,10 @@ window.addEventListener('resize', resize);
             "Pasta atual": str(atual),
             "Padrão do sistema": str(_resolve_system_path("tmg_data")),
             "Documentos": str(Path.home() / "Documents" / "TMG_Banco_Dados"),
-            "Área de trabalho": str(Path.home() / "Desktop" / "TMG_Banco_Dados"),
-            "Disco C": "C:/TMG/Banco_Dados_Sistema"
+            "Área de trabalho": str(Path.home() / "Desktop" / "TMG_Banco_Dados")
         }
+        if os.name == "nt":
+            sugestoes["Disco C"] = "C:/TMG/Banco_Dados_Sistema"
 
         s1, s2 = st.columns([1, 2])
         with s1:
@@ -5117,15 +5256,16 @@ window.addEventListener('resize', resize);
             # NOVO - Upload de imagem para contagem (mesmo formato do Checklist)
             cnt_file = st.file_uploader(
                 "📷 Carregar Ortofoto para Contagem",
-                type=["png","jpg","jpeg","tif","tiff","img","ecw","jp2"],
+                type=MOSAIC_UPLOAD_TYPES,
                 key="cnt_orto_uploader",
                 help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW"
             )
+            cnt_library = _mosaic_single_select("Ou usar mosaico já importado", key="cnt_mosaic_library")
+            cnt_bytes, cnt_name = _mosaic_input_bytes(cnt_file, cnt_library, "Contagem")
 
-            if cnt_file:
+            if cnt_bytes:
                 with st.spinner("Carregando ortofoto..."):
-                    cnt_bytes = cnt_file.read()
-                    cnt_b64, cnt_dims, cnt_err, cnt_spatial = processar_ortofoto(cnt_bytes, cnt_file.name)
+                    cnt_b64, cnt_dims, cnt_err, cnt_spatial = processar_ortofoto(cnt_bytes, cnt_name)
 
                 if cnt_err:
                     st.error(f"Erro: {cnt_err}")
@@ -5133,7 +5273,7 @@ window.addEventListener('resize', resize);
                     cw_cnt, ch_cnt = cnt_dims
                     st.markdown(
                         f"<p style='color:#666;font-size:0.78rem;margin-bottom:6px;'>"
-                        f"📐 {cnt_file.name} · {cw_cnt}×{ch_cnt} px</p>",
+                        f"📐 {cnt_name} · {cw_cnt}×{ch_cnt} px</p>",
                         unsafe_allow_html=True
                     )
 
@@ -5943,15 +6083,16 @@ new ResizeObserver(() => drawAll()).observe(vc);
 
             pend_file = st.file_uploader(
                 "📷 Carregar Ortofoto para Pendoamento",
-                type=["png","jpg","jpeg","tif","tiff","img","ecw","jp2"],
+                type=MOSAIC_UPLOAD_TYPES,
                 key="pend_orto_uploader",
                 help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW"
             )
+            pend_library = _mosaic_single_select("Ou usar mosaico já importado", key="pend_mosaic_library")
+            pend_bytes, pend_name = _mosaic_input_bytes(pend_file, pend_library, "Pendoamento")
 
-            if pend_file:
+            if pend_bytes:
                 with st.spinner("Carregando ortofoto para pendoamento..."):
-                    pend_bytes = pend_file.read()
-                    pend_b64, pend_dims, pend_err, pend_spatial = processar_ortofoto(pend_bytes, pend_file.name)
+                    pend_b64, pend_dims, pend_err, pend_spatial = processar_ortofoto(pend_bytes, pend_name)
 
                 if pend_err:
                     st.error(f"Erro: {pend_err}")
@@ -5959,7 +6100,7 @@ new ResizeObserver(() => drawAll()).observe(vc);
                     pw, ph = pend_dims
                     st.markdown(
                         f"<p style='color:#666;font-size:0.78rem;margin-bottom:6px;'>"
-                        f"📐 {pend_file.name} · {pw}×{ph} px · análise sobre ortofoto e grid</p>",
+                        f"📐 {pend_name} · {pw}×{ph} px · análise sobre ortofoto e grid</p>",
                         unsafe_allow_html=True
                     )
 
@@ -6898,32 +7039,43 @@ new ResizeObserver(()=>drawAll()).observe(vc);
 
             cron_files = st.file_uploader(
                 "📷 Anexar ortofotos cronológicas de pendoamento (até 10)",
-                type=["png", "jpg", "jpeg", "tif", "tiff"],
+                type=MOSAIC_UPLOAD_TYPES,
                 accept_multiple_files=True,
                 key="pend_cron_ortos",
                 help="Use ortofotos da mesma área, em datas diferentes. O grid marcado será mantido fixo em todas."
             )
+            cron_library = _mosaic_multi_select("Ou usar mosaicos já importados na análise cronológica", key="pend_cron_mosaic_library", max_items=10)
 
-            if cron_files:
-                selected_cron_files = list(cron_files)[:10]
-                if len(cron_files) > 10:
+            cron_items = []
+            for cron_file in cron_files or []:
+                raw = cron_file.getbuffer().tobytes()
+                _mosaic_register_bytes(raw, cron_file.name, "Pendoamento cronológico")
+                cron_items.append({"name": cron_file.name, "raw": raw})
+            for selected_mosaic in cron_library:
+                raw, name = _mosaic_bytes_from_selection(selected_mosaic)
+                if raw:
+                    cron_items.append({"name": name, "raw": raw})
+
+            if cron_items:
+                selected_cron_items = cron_items[:10]
+                if len(cron_items) > 10:
                     st.warning("Foram anexadas mais de 10 ortofotos. A análise cronológica usará somente as 10 primeiras.")
 
                 st.caption("Revise a data de cada ortofoto. A ordem cronológica será organizada automaticamente pela data informada.")
-                date_cols = st.columns(min(5, len(selected_cron_files)))
+                date_cols = st.columns(min(5, len(selected_cron_items)))
                 cron_entries = []
-                for idx, cron_file in enumerate(selected_cron_files):
-                    key_hash = hashlib.md5(f"{idx}-{cron_file.name}".encode("utf-8")).hexdigest()[:8]
+                for idx, cron_item in enumerate(selected_cron_items):
+                    key_hash = hashlib.md5(f"{idx}-{cron_item['name']}".encode("utf-8")).hexdigest()[:8]
                     with date_cols[idx % len(date_cols)]:
                         cron_date = st.date_input(
                             f"Data {idx + 1}",
                             value=date.today(),
                             key=f"pend_cron_date_{key_hash}"
                         )
-                    cron_entries.append({"idx": idx, "file": cron_file, "date": cron_date.isoformat()})
+                    cron_entries.append({"idx": idx, "name": cron_item["name"], "raw": cron_item["raw"], "date": cron_date.isoformat()})
 
                 ordem_preview = [
-                    {"Ordem": pos + 1, "Ortofoto": item["file"].name, "Data": item["date"]}
+                    {"Ordem": pos + 1, "Ortofoto": item["name"], "Data": item["date"]}
                     for pos, item in enumerate(sorted(cron_entries, key=lambda it: (it["date"], it["idx"])))
                 ]
                 st.dataframe(ordem_preview, use_container_width=True, hide_index=True)
@@ -6932,16 +7084,16 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                 cron_errors = []
                 with st.spinner("Preparando ortofotos cronológicas para o visualizador de pendoamento..."):
                     for item in cron_entries:
-                        cron_file = item["file"]
+                        cron_name = item["name"]
                         try:
-                            raw = cron_file.getvalue()
-                            b64, dims, err, spatial = processar_ortofoto(raw, cron_file.name)
+                            raw = item["raw"]
+                            b64, dims, err, spatial = processar_ortofoto(raw, cron_name)
                             if err:
-                                cron_errors.append(f"{cron_file.name}: {err}")
+                                cron_errors.append(f"{cron_name}: {err}")
                                 continue
                             cron_orthos.append({
                                 "order": int(item["idx"]),
-                                "name": cron_file.name,
+                                "name": cron_name,
                                 "date": item["date"],
                                 "b64": b64,
                                 "width": int(dims[0]),
@@ -6950,7 +7102,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                                 "orig_height": int(spatial.get("orig_height", dims[1]) or dims[1]) if spatial else int(dims[1]),
                             })
                         except Exception as exc:
-                            cron_errors.append(f"{cron_file.name}: {exc}")
+                            cron_errors.append(f"{cron_name}: {exc}")
 
                 for message in cron_errors:
                     st.warning(message)
@@ -7993,15 +8145,16 @@ new ResizeObserver(() => drawAll()).observe(viewer);
 
             qual_file = st.file_uploader(
                 "📷 Carregar Ortofoto para Análise de Qualidade",
-                type=["png","jpg","jpeg","tif","tiff","img","ecw","jp2"],
+                type=MOSAIC_UPLOAD_TYPES,
                 key="qual_orto_uploader",
                 help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW"
             )
+            qual_library = _mosaic_single_select("Ou usar mosaico já importado", key="qual_mosaic_library")
+            qual_bytes, qual_name = _mosaic_input_bytes(qual_file, qual_library, "Qualidade")
 
-            if qual_file:
+            if qual_bytes:
                 with st.spinner("Carregando ortofoto..."):
-                    qual_bytes = qual_file.read()
-                    qual_b64, qual_dims, qual_err, qual_spatial = processar_ortofoto(qual_bytes, qual_file.name)
+                    qual_b64, qual_dims, qual_err, qual_spatial = processar_ortofoto(qual_bytes, qual_name)
 
                 if qual_err:
                     st.error(f"Erro: {qual_err}")
@@ -8009,7 +8162,7 @@ new ResizeObserver(() => drawAll()).observe(viewer);
                     qw, qh = qual_dims
                     st.markdown(
                         f"<p style='color:#666;font-size:0.78rem;margin-bottom:6px;'>"
-                        f"📐 {qual_file.name} · {qw}×{qh} px</p>",
+                        f"📐 {qual_name} · {qw}×{qh} px</p>",
                         unsafe_allow_html=True
                     )
 

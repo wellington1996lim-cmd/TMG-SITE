@@ -57,6 +57,7 @@ cover/
 
 # Django stuff:
 *.log
+streamlit*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -216,3 +217,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# TMG runtime uploads generated inside the deployed app
+tmg_data/mosaicos_importados/
+tmg_data/voos_direcionados/
+tmg_data/transferencia_voos/projetos/
+tmg_data/transferencia_voos/ortofotos/
+tmg_data/transferencia_voos/grids/
+tmg_data/transferencia_voos/importacoes/
+tmg_data/transferencia_voos/retornos/
