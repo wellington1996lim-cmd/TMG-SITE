@@ -1,0 +1,33 @@
+{
+  "projects": [],
+  "orthos": [],
+  "grids": [],
+  "imports": [],
+  "history": [],
+  "config": {
+    "provider": "Servidor local",
+    "destination": "tmg_data\\transferencia_voos\\sync",
+    "sync_mode": "Manual",
+    "checksum": true,
+    "resumable": true,
+    "encryption": true,
+    "auth_mode": "Token/OAuth"
+  },
+  "users": [
+    {
+      "usuario": "admin",
+      "perfil": "Administrador",
+      "permissao": "Leitura, envio, analise, configuracao"
+    },
+    {
+      "usuario": "operador",
+      "perfil": "Operador de Campo",
+      "permissao": "Envio e download"
+    },
+    {
+      "usuario": "analista",
+      "perfil": "Analista Tecnico",
+      "permissao": "Grid, parcelas e relatorios"
+    }
+  ]
+}
