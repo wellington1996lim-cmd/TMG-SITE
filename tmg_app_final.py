@@ -189,6 +189,26 @@ def _configured_database_dir() -> str:
         or _streamlit_secret("database_dir").strip()
     )
 
+def _int_setting(name: str, default: int, min_value: int, max_value: int) -> int:
+    raw = os.getenv(name, "").strip() or _streamlit_secret(name).strip()
+    try:
+        value = int(raw) if raw else int(default)
+    except Exception:
+        value = int(default)
+    return max(min_value, min(max_value, value))
+
+def _preview_max_dim() -> int:
+    return _int_setting("TMG_PREVIEW_MAX_DIM", 4096, 1024, 8192)
+
+def _preview_jpeg_quality() -> int:
+    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 90, 70, 97)
+
+def _import_preview_limit_bytes() -> int:
+    return _int_setting("TMG_IMPORT_PREVIEW_LIMIT_MB", 80, 1, 1024) * 1024 * 1024
+
+def _can_generate_import_preview(file_size: int) -> bool:
+    return int(file_size or 0) <= _import_preview_limit_bytes()
+
 def _looks_like_windows_drive_path(raw: str) -> bool:
     return len(raw) > 2 and raw[1] == ":" and raw[2:3] in ("\\", "/")
 
@@ -413,7 +433,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
     elif img.mode != 'RGB':
         img = img.convert('RGB')
 
-    MAX_DIM = 8192
+    MAX_DIM = _preview_max_dim()
     if max(img.size) > MAX_DIM:
         ratio = MAX_DIM / max(img.size)
         spatial_meta["ratio"] = ratio
@@ -421,7 +441,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         img = img.resize((int(img.width * ratio), int(img.height * ratio)), resample_filter)
 
     buf = BytesIO()
-    img.save(buf, format='JPEG', quality=97, subsampling=0, optimize=True)
+    img.save(buf, format='JPEG', quality=_preview_jpeg_quality(), subsampling=0, optimize=True)
     b64 = base64.b64encode(buf.getvalue()).decode()
     
     return b64, img.size, None, spatial_meta
@@ -996,6 +1016,32 @@ def _mosaic_register_bytes(raw: bytes, filename: str, origem: str) -> dict:
     _mosaic_save_manifest(manifest)
     return record
 
+def _mosaic_register_file(path_value, filename: str, origem: str, file_hash: str = "", file_size: int = 0) -> dict:
+    path = Path(path_value)
+    if not path.exists():
+        return {}
+    manifest = _mosaic_load_manifest()
+    file_hash = file_hash or _tv_hash_file(path)
+    for record in manifest.get("mosaics", []):
+        if record.get("sha256") == file_hash and Path(record.get("path", "")).exists():
+            return record
+
+    record = {
+        "mosaic_id": f"MOSAICO_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}",
+        "nome": Path(filename or path.name).name,
+        "path": str(path),
+        "tamanho": int(file_size or path.stat().st_size),
+        "tamanho_fmt": _tv_human_size(int(file_size or path.stat().st_size)),
+        "sha256": file_hash,
+        "ext": path.suffix.lower(),
+        "origem": origem,
+        "importado_em": _tv_now()
+    }
+    manifest.setdefault("mosaics", []).insert(0, record)
+    manifest["mosaics"] = manifest["mosaics"][:200]
+    _mosaic_save_manifest(manifest)
+    return record
+
 def _mosaic_bytes_from_selection(option: str) -> tuple:
     record = _mosaic_find(option)
     path = Path(record.get("path", ""))
@@ -1384,13 +1430,19 @@ def _tv_render_receber_voos(manifest: dict) -> None:
 def _tv_render_orthos(manifest: dict) -> None:
     st.markdown("#### Ortofotos Geradas")
     st.caption("Receba a ortofoto gerada externamente e encaminhe para ajuste/marcação de grid.")
+    tv_message = st.session_state.pop("tv_ortho_success_message", "")
+    if tv_message:
+        st.success(tv_message)
+        st.info("Próximo passo: abra Grid e Parcelas para ajustar a ortofoto e marcar o grid.")
+    if "tv_ortho_upload_seq" not in st.session_state:
+        st.session_state.tv_ortho_upload_seq = 0
     options = _tv_project_options(manifest)
     selected_project = st.selectbox("Projeto vinculado", [""] + options, key="tv_ortho_project")
     ortho_files = st.file_uploader(
         "Enviar ortofoto processada",
         type=["tif", "tiff", "geotiff", "jpg", "jpeg", "png", "zip"],
         accept_multiple_files=True,
-        key="tv_ortho_upload"
+        key=f"tv_ortho_upload_{st.session_state.tv_ortho_upload_seq}"
     )
     if st.button("Registrar ortofoto recebida", type="primary", key="tv_register_ortho", use_container_width=True):
         if not ortho_files:
@@ -1404,10 +1456,13 @@ def _tv_render_orthos(manifest: dict) -> None:
                 thumb_dims = ""
                 if item["ext"] in [".tif", ".tiff", ".png", ".jpg", ".jpeg"]:
                     try:
-                        raw = Path(item["path"]).read_bytes()
-                        _mosaic_register_bytes(raw, item["nome"], "Transferencia de Voos")
-                        _, dims, _, spatial = processar_ortofoto(raw, item["nome"])
-                        thumb_dims = f"{dims[0]}x{dims[1]}" if dims else ""
+                        _mosaic_register_file(item["path"], item["nome"], "Transferencia de Voos", item.get("sha256", ""), item.get("tamanho", 0))
+                        if _can_generate_import_preview(item.get("tamanho", 0)):
+                            raw = Path(item["path"]).read_bytes()
+                            _, dims, _, spatial = processar_ortofoto(raw, item["nome"])
+                            thumb_dims = f"{dims[0]}x{dims[1]}" if dims else ""
+                        else:
+                            thumb_dims = "Pronta para abrir no visualizador"
                     except Exception:
                         pass
                 manifest.setdefault("orthos", []).insert(0, {
@@ -1431,10 +1486,10 @@ def _tv_render_orthos(manifest: dict) -> None:
                 project["ortofoto_recebida_em"] = _tv_now()
             _tv_add_history(manifest, f"Ortofoto(s) recebida(s): {len(saved)}", project_id)
             _tv_save_manifest(manifest)
-            st.success(f"{len(saved)} ortofoto(s) registrada(s).")
-            st.info("Próximo passo: abra Grid e Parcelas para ajustar a ortofoto e marcar o grid.")
-            if duplicates:
-                st.warning("Duplicados ignorados: " + ", ".join(duplicates[:8]))
+            duplicate_text = f" Duplicados ignorados: {', '.join(duplicates[:8])}." if duplicates else ""
+            st.session_state.tv_ortho_success_message = f"{len(saved)} ortofoto(s) registrada(s).{duplicate_text}"
+            st.session_state.tv_ortho_upload_seq += 1
+            app_rerun()
 
     ortho_rows = [{
         "ID": o.get("ortho_id"),
@@ -2516,12 +2571,19 @@ def _vd_render_envio(manifest: dict) -> None:
 
 def _vd_render_ortofotos(manifest: dict) -> None:
     st.markdown("#### PASSO 2 — Receber Ortofotos")
+    vd_message = st.session_state.pop("vd_ortho_success_message", "")
+    if vd_message:
+        st.success(vd_message)
+        st.info("A ortofoto foi registrada. Abra a pré-visualização somente quando quiser carregar o visualizador.")
+    if "vd_ortho_file_seq" not in st.session_state:
+        st.session_state.vd_ortho_file_seq = 0
+
     project_options = _vd_project_options(manifest)
     selected_voo = st.selectbox("Voo vinculado", [""] + project_options, key="vd_ortho_voo")
     ortho_file = st.file_uploader(
         "Buscar/Importar Ortofoto Gerada",
         type=["tif", "tiff", "geotiff", "png", "jpg", "jpeg", "jp2", "img", "zip"],
-        key="vd_ortho_file"
+        key=f"vd_ortho_file_{st.session_state.vd_ortho_file_seq}"
     )
     if st.button("Importar Ortofoto", type="primary", key="vd_attach_ortho", use_container_width=True):
         if ortho_file is None:
@@ -2532,9 +2594,12 @@ def _vd_render_ortofotos(manifest: dict) -> None:
             item = saved[0]
             dims, spatial_meta, preview_error = None, {}, ""
             if item["ext"] != ".zip":
-                raw = Path(item["path"]).read_bytes()
-                _mosaic_register_bytes(raw, item["nome"], "Voos Direcionados")
-                _, dims, preview_error, spatial_meta = processar_ortofoto(raw, item["nome"])
+                _mosaic_register_file(item["path"], item["nome"], "Voos Direcionados", item.get("sha256", ""), item.get("tamanho", 0))
+                if _can_generate_import_preview(item.get("tamanho", 0)):
+                    raw = Path(item["path"]).read_bytes()
+                    _, dims, preview_error, spatial_meta = processar_ortofoto(raw, item["nome"])
+                else:
+                    preview_error = "Preview será gerado ao abrir a pré-visualização."
             record = {
                 "ortho_id": ortho_id,
                 "lote_id": _vd_id_from_option(selected_voo),
@@ -2558,7 +2623,28 @@ def _vd_render_ortofotos(manifest: dict) -> None:
                 voo["ortho_id"] = ortho_id
             _vd_add_history(manifest, f"Ortofoto anexada: {item['nome']}", record["lote_id"])
             _vd_save_manifest(manifest)
-            st.success(f"Ortofoto `{ortho_id}` anexada.")
+            st.session_state.vd_ortho_file_seq += 1
+            st.session_state.vd_ortho_selected = f"{ortho_id} · {item['nome']}"
+            st.session_state.vd_ortho_success_message = f"Ortofoto `{ortho_id}` anexada."
+            st.session_state.pop("vd_preview_ortho_id", None)
+            app_rerun()
+
+    rows = [{
+        "ID": o.get("ortho_id"),
+        "Voo": o.get("lote_id"),
+        "Arquivo": o.get("nome"),
+        "Tipo": o.get("tipo"),
+        "Resolução": o.get("resolucao_preview"),
+        "CRS": (o.get("crs") or "")[:80],
+        "Tamanho": o.get("tamanho_fmt"),
+        "Status": o.get("status")
+    } for o in manifest.get("orthos", [])]
+    st.markdown("#### Ortofotos recebidas")
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhuma ortofoto anexada ainda.")
+        return
 
     st.markdown("#### Pré-visualizador de Ortofoto")
     ortho_options = _vd_ortho_options(manifest)
@@ -2571,6 +2657,21 @@ def _vd_render_ortofotos(manifest: dict) -> None:
     ortho = _vd_find_ortho(manifest, ortho_id)
     if not ortho or not Path(ortho.get("path", "")).exists():
         st.warning("Arquivo da ortofoto não encontrado.")
+        return
+
+    open_col, grid_col = st.columns(2)
+    with open_col:
+        if st.button("Abrir pré-visualização", type="primary", key="vd_open_ortho_preview", use_container_width=True):
+            st.session_state["vd_preview_ortho_id"] = ortho_id
+            app_rerun()
+    with grid_col:
+        if st.button("Marcar Grid", key="vd_go_grid_selected", use_container_width=True):
+            st.session_state["vd_pending_grid_ortho_id"] = ortho_id
+            st.session_state["vd_next_tab"] = "ETAPA 3"
+            app_rerun()
+
+    if st.session_state.get("vd_preview_ortho_id") != ortho_id:
+        st.info("Pré-visualização em espera. Clique em Abrir pré-visualização para carregar o mosaico no navegador.")
         return
 
     raw = Path(ortho["path"]).read_bytes()
@@ -2611,23 +2712,9 @@ def _vd_render_ortofotos(manifest: dict) -> None:
                 use_container_width=True
             )
         with c4:
-            if st.button("Marcar Grid", type="primary", key="vd_go_grid", use_container_width=True):
-                st.session_state["vd_pending_grid_ortho_id"] = ortho_id
-                st.session_state["vd_next_tab"] = "ETAPA 3"
+            if st.button("Fechar pré-visualização", key="vd_close_ortho_preview", use_container_width=True):
+                st.session_state.pop("vd_preview_ortho_id", None)
                 app_rerun()
-
-    rows = [{
-        "ID": o.get("ortho_id"),
-        "Voo": o.get("lote_id"),
-        "Arquivo": o.get("nome"),
-        "Tipo": o.get("tipo"),
-        "Resolução": o.get("resolucao_preview"),
-        "CRS": (o.get("crs") or "")[:80],
-        "Tamanho": o.get("tamanho_fmt"),
-        "Status": o.get("status")
-    } for o in manifest.get("orthos", [])]
-    st.markdown("#### Ortofotos recebidas")
-    st.dataframe(rows, use_container_width=True, hide_index=True)
 
 def _vd_render_grid(manifest: dict) -> None:
     st.markdown("#### Grid, Parcelas e Salvamento no Sistema")
@@ -4505,7 +4592,8 @@ function bilerp(p0,p1,p2,p3, u,v) {{
   return {{ x:(1-v)*tx + v*bx, y:(1-v)*ty + v*by }};
 }}
 
-// Helper Injetor com Streamlit (Python)
+// Mantém o payload dentro do iframe. Alterar inputs internos do Streamlit pelo
+// window.parent pode quebrar a árvore React durante rerender no Streamlit Cloud.
 function syncToPython() {{
     if (points.length === 4) {{
         const data = {{ 
@@ -4513,15 +4601,9 @@ function syncToPython() {{
             rows: parseInt(inpRows.value)||1, 
             cols: parseInt(inpCols.value)||1 
         }};
-        const payloadStr = JSON.stringify(data);
         try {{
-            const target = window.parent.document.querySelector('input[aria-label="grid_payload"]');
-            if (target && target.value !== payloadStr) {{
-                let nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                nativeInputValueSetter.call(target, payloadStr);
-                target.dispatchEvent(new Event('input', {{ bubbles: true }}));
-            }}
-        }} catch(e) {{ console.log("Sincronização passiva...", e); }}
+            window.localStorage.setItem('tmg_grid_payload', JSON.stringify(data));
+        }} catch(e) {{ console.log("Sincronização local indisponível", e); }}
     }}
 }}
 
