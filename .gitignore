@@ -217,6 +217,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.chrome-streamlit-profile/
 
 # TMG runtime uploads generated inside the deployed app
 tmg_data/mosaicos_importados/
