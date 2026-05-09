@@ -55,31 +55,48 @@ components.html(
     """
 <script>
 (function () {
+  function protectOneDocument(doc) {
+    const root = doc.documentElement;
+    root.setAttribute("lang", "pt-BR");
+    root.setAttribute("translate", "no");
+    root.classList.add("notranslate");
+    root.classList.remove("translated-ltr", "translated-rtl");
+
+    if (doc.body) {
+      doc.body.setAttribute("translate", "no");
+      doc.body.classList.add("notranslate");
+      doc.body.classList.remove("translated-ltr", "translated-rtl");
+    }
+
+    doc.querySelectorAll("body, #root, .stApp, [data-testid='stAppViewContainer']").forEach((el) => {
+      el.setAttribute("translate", "no");
+      el.classList.add("notranslate");
+    });
+
+    if (!doc.head.querySelector('meta[name="google"][content="notranslate"]')) {
+      const meta = doc.createElement("meta");
+      meta.setAttribute("name", "google");
+      meta.setAttribute("content", "notranslate");
+      doc.head.appendChild(meta);
+    }
+
+    if (!doc.head.querySelector("#tmg-notranslate-style")) {
+      const style = doc.createElement("style");
+      style.id = "tmg-notranslate-style";
+      style.textContent = ".goog-te-banner-frame,.skiptranslate{display:none!important;}body{top:0!important;}";
+      doc.head.appendChild(style);
+    }
+  }
+
   function protectDocument() {
     try {
-      const doc = window.parent.document;
-      const root = doc.documentElement;
-      root.setAttribute("lang", "pt-BR");
-      root.setAttribute("translate", "no");
-      root.classList.add("notranslate");
-
-      if (doc.body) {
-        doc.body.setAttribute("translate", "no");
-        doc.body.classList.add("notranslate");
-      }
-
-      if (!doc.head.querySelector('meta[name="google"][content="notranslate"]')) {
-        const meta = doc.createElement("meta");
-        meta.setAttribute("name", "google");
-        meta.setAttribute("content", "notranslate");
-        doc.head.appendChild(meta);
-      }
-
-      if (!doc.head.querySelector("#tmg-notranslate-style")) {
-        const style = doc.createElement("style");
-        style.id = "tmg-notranslate-style";
-        style.textContent = ".goog-te-banner-frame,.skiptranslate{display:none!important;}body{top:0!important;}";
-        doc.head.appendChild(style);
+      let current = window;
+      for (let i = 0; i < 4; i += 1) {
+        protectOneDocument(current.document);
+        if (current === current.parent) {
+          break;
+        }
+        current = current.parent;
       }
     } catch (err) {
       // Cross-frame access can be blocked in some hosted contexts; the app still works without it.
