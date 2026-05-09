@@ -1063,6 +1063,43 @@ def _mosaic_find(option: str) -> dict:
             return record
     return {}
 
+def _mosaic_path_inside_library(path: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(MOSAIC_LIBRARY_DIR.resolve())
+    except Exception:
+        return False
+
+def _mosaic_delete(option: str) -> tuple:
+    record = _mosaic_find(option)
+    if not record:
+        return False, "Mosaico não encontrado na biblioteca."
+
+    mosaic_id = record.get("mosaic_id", "")
+    mosaic_name = record.get("nome") or mosaic_id or "mosaico"
+    path = Path(record.get("path", ""))
+    manifest = _mosaic_load_manifest()
+    manifest["mosaics"] = [
+        item for item in manifest.get("mosaics", [])
+        if item.get("mosaic_id") != mosaic_id
+    ]
+    _mosaic_save_manifest(manifest)
+
+    removed_file = False
+    if path.exists() and _mosaic_path_inside_library(path):
+        try:
+            target = path.parent if path.parent.name == mosaic_id else path
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            removed_file = True
+        except Exception as exc:
+            return True, f"Mosaico removido da lista, mas não foi possível apagar o arquivo: {exc}"
+
+    if removed_file:
+        return True, f"Mosaico `{mosaic_name}` excluído da biblioteca."
+    return True, f"Mosaico `{mosaic_name}` removido da biblioteca. O arquivo original foi preservado."
+
 def _mosaic_register_bytes(raw: bytes, filename: str, origem: str) -> dict:
     if not raw:
         return {}
@@ -3275,6 +3312,16 @@ with main_container:
             help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW"
         )
         chk_library = _mosaic_single_select("Ou usar mosaico já importado", key="chk_mosaic_library")
+        if chk_library:
+            _, delete_mosaic_col = st.columns([3, 1])
+            with delete_mosaic_col:
+                if st.button("🗑️ Excluir mosaico", key="chk_delete_mosaic", use_container_width=True):
+                    ok, msg = _mosaic_delete(chk_library)
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.warning(msg)
+                    app_rerun()
         chk_bytes, chk_name = _mosaic_input_bytes(chk_file, chk_library, "Checklist")
 
         if chk_bytes:
@@ -3286,6 +3333,7 @@ with main_container:
                 st.error(f"Erro: {chk_err}")
             else:
                 cw, ch = chk_dims
+                chk_storage_id = json.dumps(_tv_hash_bytes(chk_bytes)[:32])
                 st.markdown(
                     f"<p style='color:#666;font-size:0.78rem;margin-bottom:6px;'>"
                     f"📐 {chk_name} · {cw}×{ch} px</p>",
@@ -3528,7 +3576,8 @@ const btnExport = document.getElementById('btnExport');
 const annotPopup = document.getElementById('annotPopup');
 const assessmentSummary = document.getElementById('assessmentSummary');
 const gridAllStatus = document.getElementById('gridAllStatus');
-const STORAGE_KEY = 'tmg_checklist_notas_grids_' + String(IMG_B64 || '').slice(0, 80);
+const ORTHO_STORAGE_ID = {chk_storage_id};
+const STORAGE_KEY = 'tmg_checklist_notas_grids_' + ORTHO_STORAGE_ID;
 let suppressPersist = false;
 
 let gridMode = false;
@@ -4301,69 +4350,6 @@ updateGridSelect();
 </html>
 """
                 components.html(chk_viewer, height=980, scrolling=True)
-
-                # NOVO - PAINEL FIXO PARA NOTAR PARCELAS (abaixo do viewer)
-                st.markdown("---")
-                st.markdown("""
-                <div style='color:#ff8c00;font-weight:700;font-size:1rem;letter-spacing:2px;
-                            text-transform:uppercase;margin-bottom:10px;'>
-                    📊 Painel da Avaliação de Parcelas
-                </div>""", unsafe_allow_html=True)
-
-                # Inicializar session_state para notas de parcelas
-                if "notas_parcelas" not in st.session_state:
-                    st.session_state.notas_parcelas = {}
-
-                col_sel, col_nota, col_obs = st.columns([1, 1, 2])
-
-                with col_sel:
-                    st.markdown("<p style='color:#888;font-size:0.82rem;letter-spacing:1px;text-transform:uppercase;'>Selecionar Parcela</p>", unsafe_allow_html=True)
-                    nota_grid_nome = st.text_input("Nome do Grid", value="Grid 1", key="nota_grid_nome_input")
-                    nota_tiro = st.number_input("Tiro (coluna)", min_value=1, max_value=500, value=1, key="nota_tiro_input")
-                    nota_disparo = st.number_input("Disparo (linha)", min_value=1, max_value=500, value=1, key="nota_disparo_input")
-
-                with col_nota:
-                    st.markdown("<p style='color:#888;font-size:0.82rem;letter-spacing:1px;text-transform:uppercase;'>Nota (1 a 9)</p>", unsafe_allow_html=True)
-                    nota_valor = st.selectbox(
-                        "Nota",
-                        options=list(range(1, 10)),
-                        index=4,
-                        key="nota_valor_select",
-                        label_visibility="collapsed"
-                    )
-
-                with col_obs:
-                    st.markdown("<p style='color:#888;font-size:0.82rem;letter-spacing:1px;text-transform:uppercase;'>Observação</p>", unsafe_allow_html=True)
-                    nota_obs = st.text_area("Observação", placeholder="Digite a observação da parcela...", key="nota_obs_area", height=80, label_visibility="collapsed")
-
-                col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
-                with col_btn1:
-                    if st.button("💾 Salvar Nota", type="primary", key="btn_salvar_nota_parcela"):
-                        chave = f"{nota_grid_nome}_T{nota_tiro}_D{nota_disparo}"
-                        st.session_state.notas_parcelas[chave] = {
-                            "Nome do Grid": nota_grid_nome,
-                            "Tiro": nota_tiro,
-                            "Disparo": nota_disparo,
-                            "Parcela": f"D{nota_disparo} T{nota_tiro}",
-                            "Nota": nota_valor,
-                            "Observação": nota_obs
-                        }
-                        st.success(f"✅ Nota salva para parcela T{nota_tiro} D{nota_disparo} — Nota: {nota_valor}")
-
-                with col_btn2:
-                    if st.button("📋 Ver Notas Salvas", key="btn_ver_notas"):
-                        st.session_state["_mostrar_notas"] = not st.session_state.get("_mostrar_notas", False)
-
-                # Exibir tabela de notas salvas
-                st.markdown("<p style='color:#ff8c00;font-weight:700;font-size:0.9rem;'>📊 Resumo de Notas de Parcelas:</p>", unsafe_allow_html=True)
-                if st.session_state.notas_parcelas:
-                    import pandas as pd
-                    df_notas = pd.DataFrame(list(st.session_state.notas_parcelas.values()))
-                    df_notas = df_notas[["Nome do Grid", "Tiro", "Disparo", "Parcela", "Nota", "Observação"]]
-                    st.dataframe(df_notas, use_container_width=True, hide_index=True)
-                else:
-                    st.info("Nenhuma nota manual salva ainda. As notas feitas no visualizador aparecem no painel integrado logo abaixo da imagem.")
-                # FIM NOVO - PAINEL FIXO PARA NOTAR PARCELAS
 
         else:
             st.markdown("""
