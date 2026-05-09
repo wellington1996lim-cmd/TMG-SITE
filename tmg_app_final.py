@@ -17,6 +17,7 @@ import cv2
 import warnings
 import hashlib
 from datetime import datetime, date
+import pandas as pd
 
 APP_ROOT = Path(__file__).resolve().parent
 
@@ -356,6 +357,430 @@ SYSTEM_DATABASE_DIR = _resolve_system_path(SYSTEM_CONFIG.get("database_dir", "tm
 SYSTEM_DATABASE_DIR.mkdir(parents=True, exist_ok=True)
 
 # ==========================================
+# MODULO ISOLADO - USUARIOS E PARCEIROS
+# ==========================================
+AUTH_USERS_PATH = SYSTEM_DATABASE_DIR / "usuarios_sistema.json"
+PARTNERS_ROOT = SYSTEM_DATABASE_DIR / "parceiros_controle_voos_dados"
+PARTNERS_STATE_PATH = PARTNERS_ROOT / "parceiros_estado.json"
+PARTNER_KEYS = {"eiwa": "Eiwa", "alvaz": "Alvaz"}
+PARTNER_STATUS_OPTIONS = ["Executado", "Não Executado", "Pendente", "Em andamento"]
+PARTNER_TREATMENT_STATUS = ["Aberto", "Em andamento", "Resolvido", "Atrasado"]
+PARTNER_INTERNAL_COLUMNS = ["Status de Execução", "Descrição / Observação", "Última Alteração", "Usuário Responsável"]
+PARTNER_ROW_ID = "__tmg_row_id"
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+def _now_human() -> str:
+    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+def _default_permissions(all_access: bool = True) -> dict:
+    return {
+        "culturas": bool(all_access),
+        "soja": bool(all_access),
+        "milho": bool(all_access),
+        "algodao": bool(all_access),
+        "parceiros": bool(all_access),
+        "eiwa": bool(all_access),
+        "alvaz": bool(all_access),
+    }
+
+def _auth_default_users() -> dict:
+    return {
+        "users": [
+            {
+                "nome": "Wellington",
+                "usuario": "Wellington",
+                "senha": "123",
+                "ativo": True,
+                "admin": True,
+                "permissoes": _default_permissions(True),
+                "criado_em": _now_iso(),
+                "atualizado_em": _now_iso(),
+            },
+            {
+                "nome": "Acesso legado",
+                "usuario": "123",
+                "senha": "123",
+                "ativo": True,
+                "admin": False,
+                "permissoes": _default_permissions(True),
+                "criado_em": _now_iso(),
+                "atualizado_em": _now_iso(),
+            },
+        ]
+    }
+
+def _auth_ensure_users() -> None:
+    AUTH_USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not AUTH_USERS_PATH.exists():
+        AUTH_USERS_PATH.write_text(json.dumps(_auth_default_users(), indent=2, ensure_ascii=False), encoding="utf-8")
+        return
+    data = _auth_load_users()
+    users = data.setdefault("users", [])
+    if not any(str(u.get("usuario", "")).lower() == "wellington" for u in users):
+        users.insert(0, _auth_default_users()["users"][0])
+    _auth_save_users(data)
+
+def _auth_load_users() -> dict:
+    try:
+        data = json.loads(AUTH_USERS_PATH.read_text(encoding="utf-8")) if AUTH_USERS_PATH.exists() else _auth_default_users()
+    except Exception:
+        data = _auth_default_users()
+    data.setdefault("users", [])
+    for user in data["users"]:
+        user.setdefault("nome", user.get("usuario", "Usuário"))
+        user.setdefault("usuario", "")
+        user.setdefault("senha", "")
+        user.setdefault("ativo", True)
+        user.setdefault("admin", False)
+        user.setdefault("permissoes", _default_permissions(False))
+        for key, value in _default_permissions(False).items():
+            user["permissoes"].setdefault(key, value)
+    return data
+
+def _auth_save_users(data: dict) -> None:
+    AUTH_USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    AUTH_USERS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def _auth_find_user(usuario: str, senha: str) -> dict:
+    _auth_ensure_users()
+    usuario_norm = str(usuario or "").strip().lower()
+    senha_text = str(senha or "")
+    for user in _auth_load_users().get("users", []):
+        if str(user.get("usuario", "")).strip().lower() == usuario_norm and str(user.get("senha", "")) == senha_text:
+            if bool(user.get("ativo", True)):
+                return user
+            return {}
+    return {}
+
+def _auth_current_user() -> dict:
+    user = st.session_state.get("auth_user")
+    if isinstance(user, dict) and user.get("usuario"):
+        return user
+    return _auth_default_users()["users"][0]
+
+def _auth_user_name() -> str:
+    user = _auth_current_user()
+    return str(user.get("nome") or user.get("usuario") or "Usuário")
+
+def _auth_is_admin(user: dict = None) -> bool:
+    user = user or _auth_current_user()
+    return bool(user.get("admin")) or str(user.get("usuario", "")).strip().lower() == "wellington"
+
+def _auth_permissions(user: dict = None) -> dict:
+    user = user or _auth_current_user()
+    if _auth_is_admin(user):
+        return _default_permissions(True)
+    perms = user.get("permissoes", {}) if isinstance(user, dict) else {}
+    normalized = _default_permissions(False)
+    normalized.update({k: bool(v) for k, v in perms.items()})
+    return normalized
+
+def _auth_allowed_cultures(user: dict = None) -> list:
+    perms = _auth_permissions(user)
+    if not perms.get("culturas"):
+        return []
+    allowed = []
+    if perms.get("soja"):
+        allowed.append("SOJA")
+    if perms.get("milho"):
+        allowed.append("MILHO")
+    if perms.get("algodao"):
+        allowed.append("ALGODÃO")
+    return allowed
+
+def _auth_can_partners(user: dict = None) -> bool:
+    return bool(_auth_permissions(user).get("parceiros"))
+
+def _auth_allowed_partners(user: dict = None) -> list:
+    perms = _auth_permissions(user)
+    if not perms.get("parceiros"):
+        return []
+    allowed = []
+    if perms.get("eiwa"):
+        allowed.append("eiwa")
+    if perms.get("alvaz"):
+        allowed.append("alvaz")
+    return allowed
+
+def _partners_default_partner() -> dict:
+    return {
+        "link": "",
+        "rows": [],
+        "columns": [],
+        "last_import": {},
+        "last_update": {},
+        "diff_rows": [],
+        "chat": [],
+        "history": [],
+    }
+
+def _partners_default_state() -> dict:
+    return {
+        "partners": {key: _partners_default_partner() for key in PARTNER_KEYS},
+        "history_general": [],
+    }
+
+def _partners_ensure_storage() -> None:
+    PARTNERS_ROOT.mkdir(parents=True, exist_ok=True)
+    if not PARTNERS_STATE_PATH.exists():
+        PARTNERS_STATE_PATH.write_text(json.dumps(_partners_default_state(), indent=2, ensure_ascii=False), encoding="utf-8")
+
+def _partners_load_state() -> dict:
+    _partners_ensure_storage()
+    try:
+        state = json.loads(PARTNERS_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        state = _partners_default_state()
+    state.setdefault("partners", {})
+    state.setdefault("history_general", [])
+    for key in PARTNER_KEYS:
+        state["partners"].setdefault(key, _partners_default_partner())
+        partner = state["partners"][key]
+        partner.setdefault("link", "")
+        partner.setdefault("rows", [])
+        partner.setdefault("columns", [])
+        partner.setdefault("last_import", {})
+        partner.setdefault("last_update", {})
+        partner.setdefault("diff_rows", [])
+        partner.setdefault("chat", [])
+        partner.setdefault("history", [])
+    return state
+
+def _partners_save_state(state: dict) -> None:
+    PARTNERS_ROOT.mkdir(parents=True, exist_ok=True)
+    PARTNERS_STATE_PATH.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def _partners_add_history(state: dict, partner_key: str, acao: str, detalhes: str = "") -> None:
+    item = {
+        "data_hora": _now_human(),
+        "usuario": _auth_user_name(),
+        "parceira": PARTNER_KEYS.get(partner_key, "Geral") if partner_key else "Geral",
+        "acao": acao,
+        "detalhes": detalhes,
+    }
+    state.setdefault("history_general", []).insert(0, item)
+    state["history_general"] = state["history_general"][:1000]
+    if partner_key in state.get("partners", {}):
+        state["partners"][partner_key].setdefault("history", []).insert(0, item)
+        state["partners"][partner_key]["history"] = state["partners"][partner_key]["history"][:1000]
+
+def _partners_normalize_sheet_url(link: str) -> str:
+    raw = str(link or "").strip()
+    if "docs.google.com/spreadsheets" in raw and "/edit" in raw:
+        base = raw.split("/edit", 1)[0]
+        gid = ""
+        if "gid=" in raw:
+            gid = raw.split("gid=", 1)[1].split("&", 1)[0].split("#", 1)[0]
+        return f"{base}/export?format=xlsx" + (f"&gid={gid}" if gid else "")
+    return raw
+
+def _partners_clean_dataframe(df) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    df = df.copy()
+    df.columns = [str(col).strip() or f"Coluna {idx + 1}" for idx, col in enumerate(df.columns)]
+    df = df.replace({np.nan: ""})
+    for col in df.columns:
+        df[col] = df[col].map(lambda value: value.isoformat() if hasattr(value, "isoformat") else str(value) if value is not None else "")
+    return df
+
+def _partners_read_online_sheet(link: str) -> tuple:
+    url = _partners_normalize_sheet_url(link)
+    if not url:
+        return None, "Cole o link da planilha online."
+    try:
+        lower = url.lower()
+        if lower.endswith(".csv") or "format=csv" in lower or "output=csv" in lower:
+            df = pd.read_csv(url)
+        else:
+            df = pd.read_excel(url)
+        return _partners_clean_dataframe(df), ""
+    except Exception as exc:
+        return None, f"Falha ao importar planilha online: {exc}"
+
+def _partners_ensure_row_ids(rows: list) -> list:
+    prepared = []
+    for idx, row in enumerate(rows or []):
+        item = dict(row)
+        item.setdefault(PARTNER_ROW_ID, hashlib.sha1(f"{idx}-{json.dumps(item, ensure_ascii=False, sort_keys=True)}".encode("utf-8")).hexdigest()[:12])
+        prepared.append(item)
+    return prepared
+
+def _partners_rows_to_df(partner_data: dict) -> pd.DataFrame:
+    rows = _partners_ensure_row_ids(partner_data.get("rows", []))
+    columns = [col for col in partner_data.get("columns", []) if col != PARTNER_ROW_ID]
+    df = pd.DataFrame(rows)
+    if df.empty:
+        df = pd.DataFrame(columns=[PARTNER_ROW_ID] + columns + PARTNER_INTERNAL_COLUMNS)
+    if PARTNER_ROW_ID not in df.columns:
+        df[PARTNER_ROW_ID] = [hashlib.sha1(f"row-{i}".encode()).hexdigest()[:12] for i in range(len(df))]
+    for col in columns + PARTNER_INTERNAL_COLUMNS:
+        if col not in df.columns:
+            df[col] = "Pendente" if col == "Status de Execução" else ""
+    ordered = [PARTNER_ROW_ID] + [col for col in columns if col in df.columns] + [col for col in PARTNER_INTERNAL_COLUMNS if col in df.columns]
+    ordered += [col for col in df.columns if col not in ordered]
+    return df[ordered].replace({np.nan: ""})
+
+def _partners_prepare_import_df(df: pd.DataFrame, current_user: str) -> tuple:
+    df = _partners_clean_dataframe(df)
+    original_columns = [col for col in df.columns if col != PARTNER_ROW_ID]
+    df.insert(0, PARTNER_ROW_ID, [hashlib.sha1(f"{current_user}-{_now_iso()}-{i}".encode()).hexdigest()[:12] for i in range(len(df))])
+    for col in PARTNER_INTERNAL_COLUMNS:
+        if col not in df.columns:
+            df[col] = "Pendente" if col == "Status de Execução" else ""
+    if "Usuário Responsável" in df.columns:
+        df["Usuário Responsável"] = df["Usuário Responsável"].replace("", current_user)
+    return df, original_columns
+
+def _partners_compare_dataframes(old_df: pd.DataFrame, new_df: pd.DataFrame, columns: list) -> tuple:
+    old = old_df[[col for col in columns if col in old_df.columns]].reset_index(drop=True)
+    new = new_df[[col for col in columns if col in new_df.columns]].reset_index(drop=True)
+    max_len = max(len(old), len(new))
+    preview = []
+    changed_rows = 0
+    new_rows = 0
+    removed_rows = 0
+    for idx in range(max_len):
+        if idx >= len(old):
+            row = new.iloc[idx].to_dict()
+            row["__ALTERAÇÃO__"] = "Linha nova"
+            row["__CELULAS__"] = ""
+            preview.append(row)
+            new_rows += 1
+            continue
+        if idx >= len(new):
+            row = old.iloc[idx].to_dict()
+            row["__ALTERAÇÃO__"] = "Linha removida"
+            row["__CELULAS__"] = ""
+            preview.append(row)
+            removed_rows += 1
+            continue
+        changed_cells = [col for col in columns if str(old.at[idx, col] if col in old.columns else "") != str(new.at[idx, col] if col in new.columns else "")]
+        row = new.iloc[idx].to_dict()
+        row["__ALTERAÇÃO__"] = "Célula alterada" if changed_cells else "Sem alteração"
+        row["__CELULAS__"] = ", ".join(changed_cells)
+        preview.append(row)
+        if changed_cells:
+            changed_rows += 1
+    return {
+        "linhas_novas": new_rows,
+        "linhas_alteradas": changed_rows,
+        "linhas_removidas": removed_rows,
+        "data_hora": _now_human(),
+        "usuario": _auth_user_name(),
+    }, preview
+
+def _partners_style_diff(df: pd.DataFrame):
+    def _style(row):
+        marker = row.get("__ALTERAÇÃO__", "")
+        if marker == "Linha nova":
+            return ["background-color: rgba(255, 76, 76, .24); color:#fff;"] * len(row)
+        if marker == "Linha removida":
+            return ["background-color: rgba(130, 130, 130, .30); color:#ddd;"] * len(row)
+        if marker == "Célula alterada":
+            changed = [part.strip() for part in str(row.get("__CELULAS__", "")).split(",") if part.strip()]
+            return ["background-color: rgba(255, 221, 64, .30); color:#fff;" if col in changed else "" for col in row.index]
+        return [""] * len(row)
+    return df.style.apply(_style, axis=1)
+
+def _partners_merge_edited_rows(base_df: pd.DataFrame, visible_ids: list, edited_df: pd.DataFrame, original_columns: list) -> tuple:
+    current_user = _auth_user_name()
+    now = _now_human()
+    base = base_df.copy().replace({np.nan: ""})
+    edited = edited_df.copy().replace({np.nan: ""})
+    if PARTNER_ROW_ID not in edited.columns:
+        edited[PARTNER_ROW_ID] = ""
+    logs = []
+    visible_set = {str(row_id) for row_id in visible_ids}
+    edited_ids = {str(row.get(PARTNER_ROW_ID, "")) for _, row in edited.iterrows() if str(row.get(PARTNER_ROW_ID, "")).strip()}
+    keep_rows = []
+    for _, row in base.iterrows():
+        row_id = str(row.get(PARTNER_ROW_ID, ""))
+        if row_id in visible_set and row_id not in edited_ids:
+            logs.append(("Linha excluída", row_id))
+            continue
+        keep_rows.append(row.to_dict())
+    merged = pd.DataFrame(keep_rows)
+    if merged.empty:
+        merged = pd.DataFrame(columns=base.columns)
+    merged = merged.set_index(PARTNER_ROW_ID, drop=False) if PARTNER_ROW_ID in merged.columns else merged
+    for _, row in edited.iterrows():
+        row_dict = row.to_dict()
+        row_id = str(row_dict.get(PARTNER_ROW_ID, "")).strip()
+        if not row_id or row_id not in merged.index:
+            row_id = hashlib.sha1(f"{current_user}-{_now_iso()}-{len(merged)}".encode()).hexdigest()[:12]
+            row_dict[PARTNER_ROW_ID] = row_id
+            row_dict["Última Alteração"] = now
+            row_dict["Usuário Responsável"] = current_user
+            logs.append(("Linha criada", row_id))
+            merged.loc[row_id, list(row_dict.keys())] = list(row_dict.values())
+            continue
+        previous_status = str(merged.at[row_id, "Status de Execução"]) if "Status de Execução" in merged.columns else ""
+        new_status = str(row_dict.get("Status de Execução", previous_status))
+        changed_cols = []
+        for col, value in row_dict.items():
+            if col not in merged.columns:
+                merged[col] = ""
+            if str(merged.at[row_id, col]) != str(value):
+                merged.at[row_id, col] = value
+                if col != PARTNER_ROW_ID:
+                    changed_cols.append(col)
+        if changed_cols:
+            merged.at[row_id, "Última Alteração"] = now
+            merged.at[row_id, "Usuário Responsável"] = current_user
+            logs.append(("Linha alterada", f"{row_id}: {', '.join(changed_cols)}"))
+        if previous_status != new_status:
+            logs.append(("Status alterado", f"{row_id}: {previous_status} -> {new_status}"))
+    merged = merged.reset_index(drop=True).replace({np.nan: ""})
+    columns = [col for col in original_columns if col in merged.columns]
+    for col in PARTNER_INTERNAL_COLUMNS:
+        if col not in merged.columns:
+            merged[col] = "Pendente" if col == "Status de Execução" else ""
+    ordered = [PARTNER_ROW_ID] + columns + [col for col in PARTNER_INTERNAL_COLUMNS if col in merged.columns]
+    ordered += [col for col in merged.columns if col not in ordered]
+    return merged[ordered], logs
+
+def _partners_filter_dataframe(df: pd.DataFrame, search: str, statuses: list) -> pd.DataFrame:
+    filtered = df.copy()
+    if statuses and "Status de Execução" in filtered.columns:
+        filtered = filtered[filtered["Status de Execução"].isin(statuses)]
+    query = str(search or "").strip().lower()
+    if query:
+        mask = filtered.apply(lambda row: query in " ".join(str(v).lower() for v in row.values), axis=1)
+        filtered = filtered[mask]
+    return filtered
+
+def _partners_deadline_alerts(chat_rows: list) -> list:
+    alerts = []
+    today = date.today()
+    for item in chat_rows or []:
+        status = item.get("status", "Aberto")
+        prazo_raw = item.get("prazo", "")
+        if status == "Resolvido":
+            alerts.append(("Verde", "Tratativa resolvida", item))
+            continue
+        if not prazo_raw:
+            alerts.append(("Cinza", "Tratativa sem prazo", item))
+            continue
+        try:
+            prazo = date.fromisoformat(str(prazo_raw))
+        except Exception:
+            alerts.append(("Cinza", "Prazo inválido ou ausente", item))
+            continue
+        delta = (prazo - today).days
+        if delta < 0:
+            alerts.append(("Vermelho", "Prazo vencido", item))
+        elif delta == 0:
+            alerts.append(("Amarelo", "Prazo vence hoje", item))
+        elif delta == 1:
+            alerts.append(("Amarelo", "Prazo vence amanhã", item))
+        elif status in ("Aberto", "Em andamento"):
+            alerts.append(("Cinza", "Tratativa pendente", item))
+    return alerts
+
+# ==========================================
 # TEMA — CSS APLICADO CONFORME CONFIGURAÇÃO
 # ==========================================
 if SYSTEM_CONFIG.get("tema", "padrao") == "tmg_azul":
@@ -585,6 +1010,9 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
+if "auth_user" not in st.session_state:
+    st.session_state.auth_user = None
+
 if "login_cfg_open" not in st.session_state:
     st.session_state.login_cfg_open = False
 
@@ -743,8 +1171,13 @@ if not st.session_state.logged_in:
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
         if st.button("⟶  ENTRAR", type="primary", key="btn_entrar"):
-            if usuario == "123" and senha == "123":
+            auth_user = _auth_find_user(usuario, senha)
+            if auth_user:
                 st.session_state.logged_in = True
+                st.session_state.auth_user = auth_user
+                state_login = _partners_load_state()
+                _partners_add_history(state_login, "", "Login realizado", f"Usuário: {auth_user.get('nome', auth_user.get('usuario', ''))}")
+                _partners_save_state(state_login)
                 app_rerun()
             else:
                 st.markdown("""
@@ -808,6 +1241,9 @@ if not st.session_state.logged_in:
 # TELA DE SELEÇÃO DE CULTURA (PÓS-LOGIN)[cite: 1]
 # ==========================================
 if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
+    current_user = _auth_current_user()
+    allowed_cultures = _auth_allowed_cultures(current_user)
+    can_open_partners = _auth_can_partners(current_user)
 
     st.markdown("""
     <style>
@@ -943,7 +1379,7 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
 
         st.markdown("<div class='cultura-title'>Selecione a Cultura</div>", unsafe_allow_html=True)
         st.markdown(
-            "<div class='cultura-subtitle'>Escolha a cultura para iniciar a análise</div>",
+            "<div class='cultura-subtitle'>Escolha somente os módulos liberados para seu usuário</div>",
             unsafe_allow_html=True
         )
         st.markdown("<hr class='cultura-hr'>", unsafe_allow_html=True)
@@ -952,15 +1388,14 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
     _, gcol, _ = st.columns([0.15, 2.7, 0.15])
 
     with gcol:
-        c1, c2, c3 = st.columns(3, gap="large")
-
-        culturas = [
+        all_culturas = [
             ("🌱", "SOJA",    "Glycine max",       "#4caf50"),
             ("🌽", "MILHO",   "Zea mays",          "#ffb300"),
             ("🌿", "ALGODÃO", "Gossypium hirsutum", "#80cbc4"),
         ]
+        culturas = [item for item in all_culturas if item[1] in allowed_cultures]
 
-        cols = [c1, c2, c3]
+        cols = st.columns(max(1, min(3, len(culturas))), gap="large") if culturas else []
         for col, (icon, nome, cientifico, cor) in zip(cols, culturas):
             with col:
                 st.markdown(f"""
@@ -978,6 +1413,28 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
                 if st.button(f"Selecionar {nome}", key=f"btn_cultura_{nome}", type="primary"):
                     st.session_state.cultura_selecionada = nome
                     app_rerun()
+
+        if can_open_partners:
+            st.markdown("<div style='height:22px'></div>", unsafe_allow_html=True)
+            pcol1, pcol2, pcol3 = st.columns([0.5, 1.4, 0.5])
+            with pcol2:
+                st.markdown("""
+                <div class='cultura-card'>
+                    <span class='cultura-icon'>🤝</span>
+                    <div class='cultura-nome' style='color:#42a5f5;text-shadow:1px 1px 0 rgba(0,0,0,.8),0 0 12px #42a5f555;'>
+                        PARCEIROS
+                    </div>
+                    <div class='cultura-desc'>Controle de Voos e Dados</div>
+                </div>
+                """, unsafe_allow_html=True)
+                st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+                if st.button("Abrir Parceiros / Controle de Voos e Dados", key="btn_open_partners_home", type="primary", use_container_width=True):
+                    st.session_state.cultura_selecionada = "PARCEIROS"
+                    st.session_state.pagina_ativa = "Parceiros"
+                    app_rerun()
+
+        if not culturas and not can_open_partners:
+            st.warning("Seu usuário não possui módulos liberados. Solicite permissão ao administrador Wellington.")
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     _, fcol, _ = st.columns([1, 2, 1])
@@ -3289,12 +3746,392 @@ def render_voos_direcionados() -> None:
         _vd_render_historico(manifest)
 
 
+def _render_manage_users() -> None:
+    if not _auth_is_admin():
+        st.warning("Apenas o administrador Wellington pode acessar o gerenciamento de usuários.")
+        return
+
+    users_data = _auth_load_users()
+    users = users_data.get("users", [])
+    st.markdown("#### Gerenciar Usuários")
+    st.caption("Somente Wellington pode cadastrar, editar, excluir, ativar/desativar e definir permissões.")
+
+    if users:
+        rows = []
+        for user in users:
+            rows.append({
+                "Nome": user.get("nome", ""),
+                "Usuário": user.get("usuario", ""),
+                "Status": "Ativo" if user.get("ativo", True) else "Inativo",
+                "Admin": "Sim" if _auth_is_admin(user) else "Não",
+                "Culturas": ", ".join(_auth_allowed_cultures(user)) or "-",
+                "Parceiros": ", ".join(PARTNER_KEYS[p] for p in _auth_allowed_partners(user)) or "-",
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    options = ["Novo usuário"] + [f"{u.get('usuario')} · {u.get('nome')}" for u in users]
+    selected = st.selectbox("Usuário para cadastro/edição", options, key="cfg_user_select")
+    editing = {}
+    if selected != "Novo usuário":
+        login = selected.split(" · ", 1)[0]
+        editing = next((u for u in users if u.get("usuario") == login), {})
+
+    with st.form("form_manage_users"):
+        c1, c2 = st.columns(2)
+        with c1:
+            nome = st.text_input("Nome completo", value=editing.get("nome", ""))
+            usuario = st.text_input("Usuário de login", value=editing.get("usuario", ""))
+            senha = st.text_input("Senha", value=editing.get("senha", ""), type="password")
+            ativo = st.checkbox("Usuário ativo", value=bool(editing.get("ativo", True)))
+        with c2:
+            admin = st.checkbox("Administrador", value=bool(editing.get("admin", False)))
+            perms_current = editing.get("permissoes", _default_permissions(False))
+            perm_culturas = st.checkbox("Acessar seleção de culturas", value=bool(perms_current.get("culturas", True)))
+            p_soja, p_milho, p_alg = st.columns(3)
+            with p_soja:
+                perm_soja = st.checkbox("Soja", value=bool(perms_current.get("soja", True)))
+            with p_milho:
+                perm_milho = st.checkbox("Milho", value=bool(perms_current.get("milho", True)))
+            with p_alg:
+                perm_algodao = st.checkbox("Algodão", value=bool(perms_current.get("algodao", True)))
+            perm_parceiros = st.checkbox("Acessar módulo Parceiros / Controle de Voos e Dados", value=bool(perms_current.get("parceiros", False)))
+            p_eiwa, p_alvaz = st.columns(2)
+            with p_eiwa:
+                perm_eiwa = st.checkbox("Eiwa", value=bool(perms_current.get("eiwa", False)))
+            with p_alvaz:
+                perm_alvaz = st.checkbox("Alvaz", value=bool(perms_current.get("alvaz", False)))
+
+        save_user = st.form_submit_button("💾 Salvar usuário", type="primary", use_container_width=True)
+
+    if save_user:
+        usuario = usuario.strip()
+        if not nome.strip() or not usuario or not senha:
+            st.error("Preencha nome, usuário e senha.")
+        else:
+            record = {
+                "nome": nome.strip(),
+                "usuario": usuario,
+                "senha": senha,
+                "ativo": ativo,
+                "admin": admin,
+                "permissoes": {
+                    "culturas": perm_culturas,
+                    "soja": perm_soja,
+                    "milho": perm_milho,
+                    "algodao": perm_algodao,
+                    "parceiros": perm_parceiros,
+                    "eiwa": perm_eiwa,
+                    "alvaz": perm_alvaz,
+                },
+                "criado_em": editing.get("criado_em", _now_iso()),
+                "atualizado_em": _now_iso(),
+            }
+            replaced = False
+            for idx, user in enumerate(users):
+                if user.get("usuario") == editing.get("usuario") or user.get("usuario") == usuario:
+                    users[idx] = record
+                    replaced = True
+                    break
+            if not replaced:
+                users.append(record)
+            users_data["users"] = users
+            _auth_save_users(users_data)
+            state = _partners_load_state()
+            _partners_add_history(state, "", "Usuário salvo", f"{usuario} · {nome.strip()}")
+            _partners_save_state(state)
+            st.success("Usuário salvo com sucesso.")
+            app_rerun()
+
+    if editing and not _auth_is_admin(editing):
+        if st.button("🗑️ Excluir usuário selecionado", key="btn_delete_cfg_user", use_container_width=True):
+            users_data["users"] = [u for u in users if u.get("usuario") != editing.get("usuario")]
+            _auth_save_users(users_data)
+            state = _partners_load_state()
+            _partners_add_history(state, "", "Usuário excluído", editing.get("usuario", ""))
+            _partners_save_state(state)
+            st.success("Usuário excluído.")
+            app_rerun()
+
+def _render_partner_alerts(partner_data: dict) -> None:
+    alerts = _partners_deadline_alerts(partner_data.get("chat", []))
+    if not alerts:
+        st.caption("Sem notificações de prazo no momento.")
+        return
+    color_map = {
+        "Vermelho": ("#ff5252", "rgba(255,82,82,.13)"),
+        "Amarelo": ("#ffd54f", "rgba(255,213,79,.13)"),
+        "Verde": ("#66bb6a", "rgba(102,187,106,.13)"),
+        "Cinza": ("#9e9e9e", "rgba(158,158,158,.10)"),
+    }
+    for color_name, label, item in alerts[:8]:
+        fg, bg = color_map.get(color_name, ("#ccc", "rgba(255,255,255,.06)"))
+        st.markdown(
+            f"<div style='border:1px solid {fg};background:{bg};border-radius:8px;padding:8px 10px;margin-bottom:6px;'>"
+            f"<b style='color:{fg};'>{label}</b><br>"
+            f"<span style='color:#ddd;font-size:.82rem;'>{item.get('assunto','Sem assunto')} · {item.get('status','')}</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
+    partner = state["partners"][partner_key]
+    partner_name = PARTNER_KEYS[partner_key]
+    st.markdown("##### Importação da planilha online")
+    link = st.text_input("Link da planilha Excel online", value=partner.get("link", ""), key=f"partner_link_{partner_key}")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        import_clicked = st.button("📥 Importar Planilha", key=f"partner_import_{partner_key}", use_container_width=True)
+    with c2:
+        update_clicked = st.button("🔄 Atualizar Planilha", key=f"partner_update_{partner_key}", use_container_width=True)
+    with c3:
+        save_internal_clicked = st.button("💾 Salvar Dados Internos", key=f"partner_save_internal_top_{partner_key}", use_container_width=True)
+
+    if import_clicked:
+        df, err = _partners_read_online_sheet(link)
+        if err:
+            st.error(err)
+        else:
+            prepared, original_columns = _partners_prepare_import_df(df, _auth_user_name())
+            partner["link"] = link.strip()
+            partner["columns"] = original_columns
+            partner["rows"] = prepared.to_dict(orient="records")
+            partner["last_import"] = {"data_hora": _now_human(), "usuario": _auth_user_name(), "linhas": len(prepared)}
+            partner["diff_rows"] = []
+            _partners_add_history(state, partner_key, "Planilha importada", f"{partner_name}: {len(prepared)} linhas")
+            _partners_save_state(state)
+            st.success("Planilha importada e espelhada no sistema.")
+            app_rerun()
+
+    if update_clicked:
+        df, err = _partners_read_online_sheet(link or partner.get("link", ""))
+        if err:
+            st.error(err)
+        else:
+            old_df = _partners_rows_to_df(partner)
+            new_clean = _partners_clean_dataframe(df)
+            original_columns = [col for col in new_clean.columns if col != PARTNER_ROW_ID]
+            summary, diff_rows = _partners_compare_dataframes(old_df, new_clean, original_columns)
+            prepared, _ = _partners_prepare_import_df(new_clean, _auth_user_name())
+            for idx in range(min(len(old_df), len(prepared))):
+                for col in PARTNER_INTERNAL_COLUMNS:
+                    if col in old_df.columns:
+                        prepared.at[idx, col] = old_df.iloc[idx].get(col, prepared.at[idx, col])
+            partner["link"] = (link or partner.get("link", "")).strip()
+            partner["columns"] = original_columns
+            partner["rows"] = prepared.to_dict(orient="records")
+            partner["last_update"] = summary
+            partner["diff_rows"] = diff_rows[:500]
+            _partners_add_history(
+                state,
+                partner_key,
+                "Planilha atualizada",
+                f"Novas: {summary['linhas_novas']} · Alteradas: {summary['linhas_alteradas']} · Removidas: {summary['linhas_removidas']}"
+            )
+            _partners_save_state(state)
+            st.success("Planilha atualizada e comparada com a versão anterior.")
+            app_rerun()
+
+    if save_internal_clicked:
+        partner["last_update"] = {
+            "data_hora": _now_human(),
+            "usuario": _auth_user_name(),
+            "linhas_novas": 0,
+            "linhas_alteradas": 0,
+            "linhas_removidas": 0,
+        }
+        _partners_add_history(state, partner_key, "Dados internos salvos", partner_name)
+        _partners_save_state(state)
+        st.success("Dados internos salvos.")
+
+def _render_partner_table(state: dict, partner_key: str) -> None:
+    partner = state["partners"][partner_key]
+    df = _partners_rows_to_df(partner)
+    if df.empty or len(df) == 0:
+        st.info("Importe uma planilha online para iniciar a tabela espelhada.")
+        return
+
+    st.markdown("##### Tabela espelhada estilo Excel")
+    f1, f2, f3 = st.columns([1.4, 1, 1.2])
+    with f1:
+        search = st.text_input("Buscar informações", key=f"partner_search_{partner_key}")
+    with f2:
+        statuses = st.multiselect("Filtrar status", PARTNER_STATUS_OPTIONS, key=f"partner_status_filter_{partner_key}")
+    with f3:
+        hidable = [col for col in df.columns if col != PARTNER_ROW_ID]
+        hidden_cols = st.multiselect("Ocultar colunas", hidable, key=f"partner_hidden_cols_{partner_key}")
+
+    filtered = _partners_filter_dataframe(df, search, statuses)
+    visible_ids = [str(v) for v in filtered.get(PARTNER_ROW_ID, [])]
+    display_cols = [PARTNER_ROW_ID] + [col for col in df.columns if col not in hidden_cols and col != PARTNER_ROW_ID]
+    disabled_cols = [col for col in [PARTNER_ROW_ID, "Última Alteração", "Usuário Responsável"] if col in display_cols]
+    edited = st.data_editor(
+        filtered[display_cols],
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        key=f"partner_editor_{partner_key}_{len(df)}_{len(visible_ids)}",
+        disabled=disabled_cols,
+        column_config={
+            PARTNER_ROW_ID: st.column_config.TextColumn("ID", width="small"),
+            "Status de Execução": st.column_config.SelectboxColumn(
+                "Status de Execução",
+                options=PARTNER_STATUS_OPTIONS,
+                required=False,
+            ),
+            "Descrição / Observação": st.column_config.TextColumn("Descrição / Observação", width="large"),
+        },
+    )
+
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        if st.button("💾 Salvar alterações da tabela", key=f"partner_save_editor_{partner_key}", type="primary", use_container_width=True):
+            merged, logs = _partners_merge_edited_rows(df, visible_ids, edited, partner.get("columns", []))
+            partner["rows"] = merged.to_dict(orient="records")
+            for acao, detalhes in logs:
+                _partners_add_history(state, partner_key, acao, detalhes)
+            if not logs:
+                _partners_add_history(state, partner_key, "Dados internos salvos", "Sem alterações detectadas")
+            _partners_save_state(state)
+            st.success("Alterações salvas.")
+            app_rerun()
+    export_df = df.drop(columns=[PARTNER_ROW_ID], errors="ignore")
+    with s2:
+        st.download_button(
+            "⬇️ Exportar CSV",
+            data=export_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"{PARTNER_KEYS[partner_key]}_controle.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with s3:
+        excel_buf = BytesIO()
+        export_df.to_excel(excel_buf, index=False)
+        st.download_button(
+            "⬇️ Exportar Excel",
+            data=excel_buf.getvalue(),
+            file_name=f"{PARTNER_KEYS[partner_key]}_controle.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    last_update = partner.get("last_update") or {}
+    if last_update:
+        st.markdown("##### Resumo da atualização")
+        st.json({
+            "Última atualização": last_update.get("data_hora", ""),
+            "Usuário que atualizou": last_update.get("usuario", ""),
+            "Linhas novas": last_update.get("linhas_novas", 0),
+            "Linhas alteradas": last_update.get("linhas_alteradas", 0),
+            "Linhas removidas": last_update.get("linhas_removidas", 0),
+        })
+    diff_rows = partner.get("diff_rows", [])
+    if diff_rows:
+        st.markdown("##### Destaques visuais da última atualização")
+        diff_df = pd.DataFrame(diff_rows).drop(columns=[PARTNER_ROW_ID], errors="ignore")
+        st.dataframe(_partners_style_diff(diff_df), use_container_width=True, hide_index=True)
+
+def _render_partner_chat(state: dict, partner_key: str) -> None:
+    partner = state["partners"][partner_key]
+    st.markdown("##### Histórico de Tratativas")
+    with st.form(f"partner_chat_form_{partner_key}"):
+        c1, c2 = st.columns(2)
+        with c1:
+            assunto = st.text_input("Assunto")
+            prazo = st.date_input("Prazo", value=date.today())
+        with c2:
+            status = st.selectbox("Status da tratativa", PARTNER_TREATMENT_STATUS)
+            st.text_input("Usuário logado", value=_auth_user_name(), disabled=True)
+        mensagem = st.text_area("Mensagem")
+        send = st.form_submit_button("💬 Enviar tratativa", type="primary", use_container_width=True)
+    if send:
+        if not mensagem.strip():
+            st.error("Digite uma mensagem para registrar a tratativa.")
+        else:
+            item = {
+                "id": hashlib.sha1(f"{partner_key}-{_now_iso()}-{_auth_user_name()}".encode()).hexdigest()[:12],
+                "usuario": _auth_user_name(),
+                "assunto": assunto.strip() or "Sem assunto",
+                "mensagem": mensagem.strip(),
+                "data": date.today().isoformat(),
+                "hora": datetime.now().strftime("%H:%M:%S"),
+                "prazo": prazo.isoformat() if prazo else "",
+                "status": status,
+            }
+            partner.setdefault("chat", []).insert(0, item)
+            _partners_add_history(state, partner_key, "Mensagem enviada", f"{item['assunto']} · prazo {item['prazo']}")
+            _partners_save_state(state)
+            st.success("Tratativa registrada.")
+            app_rerun()
+
+    for item in partner.get("chat", [])[:30]:
+        color = "#66bb6a" if item.get("status") == "Resolvido" else "#ffd54f" if item.get("status") == "Em andamento" else "#ff8c00"
+        st.markdown(
+            f"<div style='background:#151515;border:1px solid #333;border-left:4px solid {color};border-radius:10px;padding:10px 12px;margin:8px 0;'>"
+            f"<div style='color:{color};font-weight:700;'>{item.get('assunto','Sem assunto')} · {item.get('status','')}</div>"
+            f"<div style='color:#aaa;font-size:.78rem;'>{item.get('usuario','')} · {item.get('data','')} {item.get('hora','')} · Prazo: {item.get('prazo','')}</div>"
+            f"<div style='color:#eee;margin-top:6px;'>{item.get('mensagem','')}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+def _render_partner_history(state: dict, partner_key: str) -> None:
+    partner = state["partners"][partner_key]
+    h1, h2 = st.columns(2)
+    with h1:
+        st.markdown(f"##### Histórico {PARTNER_KEYS[partner_key]}")
+        st.dataframe(partner.get("history", []), use_container_width=True, hide_index=True)
+    with h2:
+        st.markdown("##### Histórico Geral")
+        st.dataframe(state.get("history_general", []), use_container_width=True, hide_index=True)
+
+def _render_single_partner(state: dict, partner_key: str) -> None:
+    partner_name = PARTNER_KEYS[partner_key]
+    partner = state["partners"][partner_key]
+    st.markdown(f"### {partner_name}")
+    _render_partner_alerts(partner)
+    tabs = st.tabs(["Planilha", "Tratativas", "Histórico"])
+    with tabs[0]:
+        _render_partner_sheet_controls(state, partner_key)
+        _render_partner_table(state, partner_key)
+    with tabs[1]:
+        _render_partner_chat(state, partner_key)
+    with tabs[2]:
+        _render_partner_history(state, partner_key)
+
+def render_parceiros_controle() -> None:
+    user = _auth_current_user()
+    allowed = _auth_allowed_partners(user)
+    if not allowed:
+        st.warning("Seu usuário não possui permissão para acessar Eiwa ou Alvaz.")
+        return
+    state = _partners_load_state()
+    st.markdown("""
+    <div style='background:#111b2a;border:1px solid #1e3a5f;border-top:2px solid #42a5f5;border-radius:10px;
+                padding:18px 20px;margin-bottom:14px;box-shadow:0 8px 22px rgba(0,0,0,.45);'>
+        <div style='color:#42a5f5;font-weight:900;letter-spacing:3px;text-transform:uppercase;font-size:1.25rem;'>
+            Parceiros / Controle de Voos e Dados
+        </div>
+        <div style='color:#b8c7d9;font-size:.86rem;margin-top:6px;'>
+            Módulo isolado para Eiwa e Alvaz: planilhas, execução, tratativas, prazos, histórico e exportações.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    tabs = st.tabs([PARTNER_KEYS[key] for key in allowed])
+    for tab, partner_key in zip(tabs, allowed):
+        with tab:
+            _render_single_partner(state, partner_key)
+
 
 
 
 # ==========================================
 # SIDEBAR[cite: 1]
 # ==========================================
+current_user = _auth_current_user()
+show_culture_modules = bool(_auth_allowed_cultures(current_user))
+show_partners_module = _auth_can_partners(current_user)
+show_admin_config = _auth_is_admin(current_user)
+
 with st.sidebar:
 
     st.markdown("""
@@ -3302,34 +4139,47 @@ with st.sidebar:
     <hr class='separator-glow'>
     """, unsafe_allow_html=True)
 
-    if st.button("📋 Checklist Notas", key="btn_check"):
-        ir_para('Checklist')
+    if show_culture_modules:
+        if st.button("📋 Checklist Notas", key="btn_check"):
+            ir_para('Checklist')
 
-    if st.button("📊 Marcador de Grid", key="btn_grid"):
-        ir_para('Grid')
+        if st.button("📊 Marcador de Grid", key="btn_grid"):
+            ir_para('Grid')
 
-    if st.button("📤 Upload de Imagens", key="btn_upload"):
-        ir_para('Upload')
+        if st.button("📤 Upload de Imagens", key="btn_upload"):
+            ir_para('Upload')
 
-    if st.button("🗂️ Banco de Dados Sistema", key="btn_bases"):
-        ir_para('Bases')
+        if st.button("🗂️ Banco de Dados Sistema", key="btn_bases"):
+            ir_para('Bases')
 
-    if st.button("🔄 Sincronizar Dados", key="btn_sync"):
-        ir_para('Sync')
+        if st.button("🔄 Sincronizar Dados", key="btn_sync"):
+            ir_para('Sync')
 
-    if st.button("🛰️ Gerar Ortomosaicos", key="btn_orto"):
-        ir_para('Ortomosaicos')
+        if st.button("🛰️ Gerar Ortomosaicos", key="btn_orto"):
+            ir_para('Ortomosaicos')
 
-    # NOVO - Botão Análises de Fenotipagem
-    if st.button("📈 Análises de Fenotipagem", key="btn_visualizador"):
-        ir_para('Visualizador')
+        # NOVO - Botão Análises de Fenotipagem
+        if st.button("📈 Análises de Fenotipagem", key="btn_visualizador"):
+            ir_para('Visualizador')
 
-    # NOVO - Botão isolado para fluxo passo a passo de voos para análise
-    if st.button("🛰️ Processos de Voos para Análise", key="btn_processos_voos_analise"):
-        ir_para('VoosDirecionados')
+        # NOVO - Botão isolado para fluxo passo a passo de voos para análise
+        if st.button("🛰️ Processos de Voos para Análise", key="btn_processos_voos_analise"):
+            ir_para('VoosDirecionados')
 
-    if st.button("⚙️ Configurações", key="btn_config"):
-        ir_para('Config')
+    if show_partners_module:
+        if st.button("🤝 Parceiros / Controle de Voos e Dados", key="btn_parceiros_controle"):
+            ir_para('Parceiros')
+
+    if show_culture_modules or show_admin_config:
+        if st.button("⚙️ Configurações", key="btn_config"):
+            ir_para('Config')
+
+    if st.button("🚪 Sair", key="btn_logout"):
+        st.session_state.logged_in = False
+        st.session_state.auth_user = None
+        st.session_state.cultura_selecionada = None
+        st.session_state.pagina_ativa = "Checklist"
+        app_rerun()
 
     st.markdown("---")
     st.caption("TMG v2.0 - 2026")
@@ -3363,6 +4213,12 @@ with main_container:
     # ==========================================
     elif st.session_state.pagina_ativa == 'VoosDirecionados':
         render_voos_direcionados()
+
+    # ==========================================
+    # PARCEIROS / CONTROLE DE VOOS E DADOS
+    # ==========================================
+    elif st.session_state.pagina_ativa == 'Parceiros':
+        render_parceiros_controle()
 
     # ==========================================
     # CHECKLIST[cite: 1]
@@ -5246,6 +6102,14 @@ window.addEventListener('resize', resize);
         with st.expander("Caminhos de Diretório"):
             st.text_input("Diretório de Banco de Dados", value=str(SYSTEM_DATABASE_DIR), disabled=True)
             st.caption("Altere esta pasta pelo menu Banco de Dados Sistema.")
+
+        if _auth_is_admin():
+            with st.expander("Gerenciar Usuários", expanded=False):
+                _render_manage_users()
+
+            with st.expander("Histórico Geral do Sistema", expanded=False):
+                state_hist = _partners_load_state()
+                st.dataframe(state_hist.get("history_general", []), use_container_width=True, hide_index=True)
 
     # BASES[cite: 1]
     elif st.session_state.pagina_ativa == 'Bases':

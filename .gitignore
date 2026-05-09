@@ -221,6 +221,8 @@ __marimo__/
 
 # TMG runtime uploads generated inside the deployed app
 tmg_data/mosaicos_importados/
+tmg_data/usuarios_sistema.json
+tmg_data/parceiros_controle_voos_dados/
 tmg_data/voos_direcionados/
 tmg_data/transferencia_voos/projetos/
 tmg_data/transferencia_voos/ortofotos/

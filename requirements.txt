@@ -2,6 +2,7 @@ streamlit==1.40.2
 pillow==10.4.0
 numpy
 pandas
+openpyxl
 opencv-python-headless
 rasterio
 geopandas
