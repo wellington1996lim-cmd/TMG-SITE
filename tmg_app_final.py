@@ -182,6 +182,12 @@ def app_image(image, **kwargs):
         return st.image(image, use_column_width=True, **kwargs)
 
 def _streamlit_secret(name: str, default: str = "") -> str:
+    secrets_paths = [
+        Path.home() / ".streamlit" / "secrets.toml",
+        APP_ROOT / ".streamlit" / "secrets.toml",
+    ]
+    if not any(path.exists() for path in secrets_paths):
+        return default
     try:
         return str(st.secrets.get(name, default) or default)
     except Exception:
