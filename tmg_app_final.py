@@ -46,6 +46,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+st.markdown(
+    '<meta name="google" content="notranslate"><meta name="robots" content="notranslate">',
+    unsafe_allow_html=True
+)
+
 # ==========================================
 # ESTILO CSS PERSONALIZADO (DARK SAAS 3D)[cite: 1]
 # ==========================================
@@ -592,7 +597,6 @@ if not st.session_state.logged_in:
                 app_image(str(LOGO_PATH))
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-        st.markdown("<div class='login-card'>", unsafe_allow_html=True)
         st.markdown("<div class='login-title'>TMG</div>", unsafe_allow_html=True)
         st.markdown(
             "<div class='login-subtitle'>Sistema de Análise &nbsp;·&nbsp; Acesso Seguro</div>",
@@ -625,7 +629,6 @@ if not st.session_state.logged_in:
                 """, unsafe_allow_html=True)
 
         st.markdown("<div class='login-footer'>TMG v2.0 &nbsp;·&nbsp; 2026</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
@@ -633,7 +636,6 @@ if not st.session_state.logged_in:
             st.session_state.login_cfg_open = not st.session_state.login_cfg_open
 
         if st.session_state.login_cfg_open:
-            st.markdown("<div class='login-cfg-panel'>", unsafe_allow_html=True)
             st.markdown(
                 "<div class='cfg-panel-title'>&#9881; Identidade Visual &nbsp;·&nbsp; Tela de Login</div>",
                 unsafe_allow_html=True
@@ -665,8 +667,6 @@ if not st.session_state.logged_in:
                     LOGIN_BG_PATH.unlink()
                     st.success("Imagem de fundo removida.")
                     app_rerun()
-
-            st.markdown("</div>", unsafe_allow_html=True)
 
     st.stop()
 
@@ -1696,7 +1696,7 @@ def _tv_render_analises(manifest: dict) -> None:
     c1.metric("Projetos em análise", len([p for p in manifest.get("projects", []) if p.get("status")]))
     c2.metric("Grids disponíveis", len(manifest.get("grids", [])))
     c3.metric("Ortofotos prontas", len(manifest.get("orthos", [])))
-    st.markdown("<div class='card'><h4 style='color:#ff8c00;margin-top:0;'>Fila técnica</h4>", unsafe_allow_html=True)
+    st.markdown("<h4 style='color:#ff8c00;margin-top:0;'>Fila técnica</h4>", unsafe_allow_html=True)
     rows = []
     for p in manifest.get("projects", []):
         rows.append({
@@ -1707,7 +1707,6 @@ def _tv_render_analises(manifest: dict) -> None:
             "Relatórios": "Contagem · Falhas · Parcelas"
         })
     st.dataframe(rows, use_container_width=True, hide_index=True)
-    st.markdown("</div>", unsafe_allow_html=True)
     if st.button("Reenviar pacote selecionado para análise", type="primary", key="tv_send_analysis", use_container_width=True):
         _tv_add_history(manifest, "Pacote reenviado para análise técnica", status="ENVIADO")
         _tv_save_manifest(manifest)
@@ -2360,9 +2359,12 @@ def _vd_render_login() -> None:
       }
       .vd-login-sub { color:#aaa; font-size:.82rem; letter-spacing:1px; margin-bottom:16px; }
     </style>
-    <div class="vd-login-wrap"><div class="vd-login-card">
+    """, unsafe_allow_html=True)
+    st.markdown("""
+    <div class="vd-login-card">
       <div class="vd-login-title">Processos de Voos para Análise</div>
       <div class="vd-login-sub">Acesso dedicado para envio de fotos, recebimento de ortofotos, marcador de grid e retorno dos dados.</div>
+    </div>
     """, unsafe_allow_html=True)
     usuario = st.text_input("Login", key="vd_login_user")
     senha = st.text_input("Senha", type="password", key="vd_login_pass")
@@ -2372,7 +2374,6 @@ def _vd_render_login() -> None:
             app_rerun()
         else:
             st.error("Login ou senha incorretos para Processos de Voos para Análise.")
-    st.markdown("</div></div>", unsafe_allow_html=True)
 
 def _vd_render_envio(manifest: dict) -> None:
     st.markdown("""
@@ -2415,7 +2416,7 @@ def _vd_render_envio(manifest: dict) -> None:
     """, unsafe_allow_html=True)
 
     st.markdown("#### PASSO 1 — Enviar Fotos de Voos")
-    st.markdown("<div class='vd-clean-card'><div class='vd-section-title'>Dados principais do voo</div>", unsafe_allow_html=True)
+    st.markdown("<div class='vd-section-title'>Dados principais do voo</div>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
         nome_voo = st.text_input("Nome do voo", value=f"Voo_Direcionado_{date.today().strftime('%Y%m%d')}", key="vd_nome_voo")
@@ -2427,9 +2428,8 @@ def _vd_render_envio(manifest: dict) -> None:
         tipo_voo = st.text_input("Tipo de voo", value="", placeholder="Ex.: RGB, Multiespectral, NDVI, Altura", key="vd_tipo_voo")
         usuario = st.text_input("Usuário responsável", value=manifest.get("config", {}).get("usuario_padrao", "Operador"), key="vd_usuario_resp")
     data_voo = st.date_input("Data do voo", value=date.today(), key="vd_data_voo")
-    st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("<div class='vd-clean-card'><div class='vd-section-title'>Destino e diretório de envio</div>", unsafe_allow_html=True)
+    st.markdown("<div class='vd-section-title'>Destino e diretório de envio</div>", unsafe_allow_html=True)
     dcol1, dcol2 = st.columns([1, 2])
     with dcol1:
         destino = st.selectbox(
@@ -2448,9 +2448,8 @@ def _vd_render_envio(manifest: dict) -> None:
     d4.metric("Último envio", dest_status["ultimo_envio"])
     pasta_prevista = Path(str(caminho).strip()).expanduser() / _tv_safe_name(nome_voo)
     st.markdown(f"<div class='vd-dest-path'>Pasta que será criada no destino: <b>{pasta_prevista}</b></div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("<div class='vd-clean-card'><div class='vd-section-title'>Anexar imagens do voo</div>", unsafe_allow_html=True)
+    st.markdown("<div class='vd-section-title'>Anexar imagens do voo</div>", unsafe_allow_html=True)
     files = st.file_uploader(
         "Selecionar fotos de voos ou ZIP",
         type=["jpg", "jpeg", "tif", "tiff", "png", "raw", "dng", "arw", "cr2", "nef", "zip"],
@@ -2460,7 +2459,6 @@ def _vd_render_envio(manifest: dict) -> None:
     if files:
         total_previsto = sum(int(getattr(f, "size", 0) or 0) for f in files)
         st.info(f"{len(files)} arquivo(s) selecionado(s) · volume previsto: {_tv_human_size(total_previsto)}")
-    st.markdown("</div>", unsafe_allow_html=True)
 
     if st.button("🚀 Enviar Fotos de Voos", type="primary", key="vd_send_flight", use_container_width=True):
         if not files:
@@ -2554,13 +2552,17 @@ def _vd_render_envio(manifest: dict) -> None:
 def _vd_render_ortofotos(manifest: dict) -> None:
     st.markdown("#### PASSO 2 — Receber Ortofotos")
     project_options = _vd_project_options(manifest)
-    selected_voo = st.selectbox("Voo vinculado", [""] + project_options, key="vd_ortho_voo")
-    ortho_file = st.file_uploader(
-        "Buscar/Importar Ortofoto Gerada",
-        type=["tif", "tiff", "geotiff", "png", "jpg", "jpeg", "jp2", "img", "zip"],
-        key="vd_ortho_file"
-    )
-    if st.button("Importar Ortofoto", type="primary", key="vd_attach_ortho", use_container_width=True):
+
+    with st.form("vd_ortho_import_form", clear_on_submit=False):
+        selected_voo = st.selectbox("Voo vinculado", [""] + project_options, key="vd_ortho_voo")
+        ortho_file = st.file_uploader(
+            "Buscar/Importar Ortofoto Gerada",
+            type=["tif", "tiff", "geotiff", "png", "jpg", "jpeg", "jp2", "img", "zip"],
+            key="vd_ortho_file"
+        )
+        importar_ortho = st.form_submit_button("Importar Ortofoto", type="primary", use_container_width=True)
+
+    if importar_ortho:
         if ortho_file is None:
             st.warning("Selecione a ortofoto processada externamente.")
         else:
@@ -4267,7 +4269,6 @@ updateGridSelect();
                         st.session_state["_mostrar_notas"] = not st.session_state.get("_mostrar_notas", False)
 
                 # Exibir tabela de notas salvas
-                st.markdown("<div style='background:#1e1e1e;border:1px solid #333;border-radius:10px;padding:15px;margin-top:10px;'>", unsafe_allow_html=True)
                 st.markdown("<p style='color:#ff8c00;font-weight:700;font-size:0.9rem;'>📊 Resumo de Notas de Parcelas:</p>", unsafe_allow_html=True)
                 if st.session_state.notas_parcelas:
                     import pandas as pd
@@ -4276,7 +4277,6 @@ updateGridSelect();
                     st.dataframe(df_notas, use_container_width=True, hide_index=True)
                 else:
                     st.info("Nenhuma nota manual salva ainda. As notas feitas no visualizador aparecem no painel integrado logo abaixo da imagem.")
-                st.markdown("</div>", unsafe_allow_html=True)
                 # FIM NOVO - PAINEL FIXO PARA NOTAR PARCELAS
 
         else:
@@ -5018,7 +5018,6 @@ window.addEventListener('resize', resize);
             st.markdown("<br>", unsafe_allow_html=True)
             
             # --- NOVA FUNCIONALIDADE: Transferidor de Arquivos ---
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
             st.markdown("<h4 style='color:#ff8c00; margin-bottom:15px;'>🚀 Transferência Inteligente de Arquivos</h4>", unsafe_allow_html=True)
 
             col_dest1, col_dest2 = st.columns(2)
@@ -5057,9 +5056,6 @@ window.addEventListener('resize', resize);
                 st.success(f"✅ Transferência concluída com sucesso!")
                 st.markdown(f"**Status:** {len(uploaded_files)} imagens salvas na pasta configurada: `{caminho_envio}`")
                 st.balloons()
-            
-            st.markdown("</div>", unsafe_allow_html=True)
-
     # CONFIG[cite: 1]
     elif st.session_state.pagina_ativa == 'Config':
         st.subheader("⚙️ Painel Administrativo")
@@ -5205,16 +5201,14 @@ window.addEventListener('resize', resize);
         col1, col2 = st.columns(2)
 
         with col1:
-            st.markdown("<div class='card'><h4 style='color:#ff8c00;'>Origem</h4>", unsafe_allow_html=True)
+            st.markdown("<h4 style='color:#ff8c00;'>Origem</h4>", unsafe_allow_html=True)
             st.text_input("Servidor de Origem", value=str(SYSTEM_DATABASE_DIR))
             st.selectbox("Protocolo", ["FTP", "SFTP", "S3", "API REST"])
-            st.markdown("</div>", unsafe_allow_html=True)
 
         with col2:
-            st.markdown("<div class='card'><h4 style='color:#ff8c00;'>Destino</h4>", unsafe_allow_html=True)
+            st.markdown("<h4 style='color:#ff8c00;'>Destino</h4>", unsafe_allow_html=True)
             st.text_input("Servidor de Destino", value="nuvem.tmg.com.br")
             st.selectbox("Frequência", ["Manual", "A cada hora", "Diário", "Semanal"])
-            st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -5236,20 +5230,18 @@ window.addEventListener('resize', resize);
         col1, col2 = st.columns(2)
 
         with col1:
-            st.markdown("<div class='card'><h4 style='color:#ff8c00;'>Parâmetros de Processamento</h4>", unsafe_allow_html=True)
+            st.markdown("<h4 style='color:#ff8c00;'>Parâmetros de Processamento</h4>", unsafe_allow_html=True)
             st.selectbox("Resolução de Saída", ["5 cm/px", "10 cm/px", "20 cm/px", "50 cm/px"])
             st.selectbox("Método de Alinhamento", ["Alta Precisão", "Média Precisão", "Rápida"])
             st.selectbox("Sistema de Coordenadas", ["SIRGAS 2000 (EPSG:4674)", "WGS 84 (EPSG:4326)", "UTM Zone 21S"])
             st.number_input("Sobreposição Frontal (%)", min_value=60, max_value=95, value=80)
             st.number_input("Sobreposição Lateral (%)", min_value=60, max_value=95, value=75)
-            st.markdown("</div>", unsafe_allow_html=True)
 
         with col2:
-            st.markdown("<div class='card'><h4 style='color:#ff8c00;'>Área de Processamento</h4>", unsafe_allow_html=True)
+            st.markdown("<h4 style='color:#ff8c00;'>Área de Processamento</h4>", unsafe_allow_html=True)
             st.text_input("Diretório de Imagens", value=str(SYSTEM_DATABASE_DIR / "imagens"))
             st.text_input("Diretório de Saída", value=str(SYSTEM_DATABASE_DIR / "ortomosaicos"))
             st.text_area("Notas do Voo", placeholder="Descreva condições do voo, sensor utilizado, altitude, etc.")
-            st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
