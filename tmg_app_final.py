@@ -16,6 +16,7 @@ import csv
 import cv2
 import warnings
 import hashlib
+import re
 from datetime import datetime, date
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -174,8 +175,8 @@ st.markdown("""
             2px 2px 0px #000000,
             4px 4px 0px #1a1a1a,
             6px 6px 8px rgba(0,0,0,0.9),
-            0 0 30px rgba(255,140,0,0.25);
-        border-bottom: 2px solid #ff8c00;
+            0 0 30px var(--tmg-primary-glow-soft);
+        border-bottom: 2px solid var(--tmg-primary);
         margin-bottom: 30px;
     }
 
@@ -200,13 +201,13 @@ st.markdown("""
     }
 
     div.stButton > button:hover {
-        color: #ff8c00;
-        border: 1px solid #ff8c00;
+        color: var(--tmg-primary);
+        border: 1px solid var(--tmg-primary);
         transform: translateY(-2px);
     }
 
     .stButton > button[kind="primary"] {
-        background: linear-gradient(145deg, #ff9e33, #e67600) !important;
+        background: linear-gradient(145deg, var(--tmg-primary), var(--tmg-primary-dark)) !important;
         color: white !important;
         box-shadow: 4px 4px 10px #0a0a0a !important;
     }
@@ -225,23 +226,23 @@ st.markdown("""
         font-weight: 900;
         font-size: 1.6rem;
         letter-spacing: 4px;
-        color: #ff8c00;
+        color: var(--tmg-primary);
         text-transform: uppercase;
         text-shadow:
-            1px 1px 0 #7a3a00,
-            2px 2px 0 #5c2b00,
-            3px 3px 0 #3d1d00,
+            1px 1px 0 var(--tmg-primary-shadow-1),
+            2px 2px 0 var(--tmg-primary-shadow-2),
+            3px 3px 0 var(--tmg-primary-shadow-3),
             4px 4px 6px rgba(0,0,0,0.9),
-            0 0 20px rgba(255,140,0,0.4),
-            0 0 40px rgba(255,140,0,0.15);
+            0 0 20px var(--tmg-primary-glow),
+            0 0 40px var(--tmg-primary-glow-soft);
         margin-bottom: 8px;
     }
 
     /* Separator with glow */
     .separator-glow {
         border: none;
-        border-top: 1px solid #ff8c00;
-        box-shadow: 0 0 8px rgba(255,140,0,0.5);
+        border-top: 1px solid var(--tmg-primary);
+        box-shadow: 0 0 8px var(--tmg-primary-glow);
         margin: 10px 0 18px 0;
     }
 </style>
@@ -359,18 +360,115 @@ SYSTEM_CONFIG = _load_system_config()
 SYSTEM_DATABASE_DIR = _resolve_system_path(SYSTEM_CONFIG.get("database_dir", "tmg_data"))
 SYSTEM_DATABASE_DIR.mkdir(parents=True, exist_ok=True)
 
+THEME_PALETTES = {
+    "padrao": {
+        "primary": "#42a5f5",
+        "primary_dark": "#1565c0",
+        "primary_soft": "#90caf9",
+        "shadow_1": "#0d47a1",
+        "shadow_2": "#0a3070",
+        "shadow_3": "#071f4a",
+        "rgb": "66,165,245",
+    },
+    "tmg_azul": {
+        "primary": "#42a5f5",
+        "primary_dark": "#1565c0",
+        "primary_soft": "#90caf9",
+        "shadow_1": "#0d47a1",
+        "shadow_2": "#0a3070",
+        "shadow_3": "#071f4a",
+        "rgb": "66,165,245",
+    },
+}
+THEME_PALETTE = THEME_PALETTES.get(SYSTEM_CONFIG.get("tema", "padrao"), THEME_PALETTES["padrao"])
+THEME_PRIMARY_COLOR = THEME_PALETTE["primary"]
+THEME_PRIMARY_DARK = THEME_PALETTE["primary_dark"]
+THEME_PRIMARY_SOFT = THEME_PALETTE["primary_soft"]
+THEME_PRIMARY_RGB = THEME_PALETTE["rgb"]
+
+st.markdown(f"""
+<style>
+:root {{
+    --tmg-primary: {THEME_PRIMARY_COLOR};
+    --tmg-primary-dark: {THEME_PRIMARY_DARK};
+    --tmg-primary-soft: {THEME_PRIMARY_SOFT};
+    --tmg-primary-shadow-1: {THEME_PALETTE["shadow_1"]};
+    --tmg-primary-shadow-2: {THEME_PALETTE["shadow_2"]};
+    --tmg-primary-shadow-3: {THEME_PALETTE["shadow_3"]};
+    --tmg-primary-glow: rgba({THEME_PRIMARY_RGB}, .42);
+    --tmg-primary-glow-soft: rgba({THEME_PRIMARY_RGB}, .18);
+}}
+[style*="#ff8c00"], [style*="#FF8C00"] {{
+    color: var(--tmg-primary) !important;
+    border-color: var(--tmg-primary) !important;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+def _theme_colorize_markup(value):
+    if not isinstance(value, str):
+        return value
+    themed = value
+    replacements = {
+        "#ff8c00": THEME_PRIMARY_COLOR,
+        "#FF8C00": THEME_PRIMARY_COLOR,
+        "#ff9e33": THEME_PRIMARY_COLOR,
+        "#e67600": THEME_PRIMARY_DARK,
+        "#e07000": THEME_PRIMARY_DARK,
+        "#ffaa33": THEME_PRIMARY_SOFT,
+        "#ffb347": THEME_PRIMARY_SOFT,
+        "#2a1a00": "#0d2b45",
+        "#1a0a00": "#071a2c",
+        "#160b00": "#061525",
+        "#7a3a00": THEME_PALETTE["shadow_1"],
+        "#5c2b00": THEME_PALETTE["shadow_2"],
+        "#3d1d00": THEME_PALETTE["shadow_3"],
+    }
+    for old, new in replacements.items():
+        themed = themed.replace(old, new)
+    themed = re.sub(
+        r"rgba\(\s*255\s*,\s*140\s*,\s*0\s*,\s*([0-9.]+)\s*\)",
+        rf"rgba({THEME_PRIMARY_RGB},\1)",
+        themed,
+    )
+    return themed
+
+_ORIGINAL_ST_MARKDOWN = st.markdown
+_ORIGINAL_COMPONENTS_HTML = components.html
+
+def _themed_markdown(body, *args, **kwargs):
+    return _ORIGINAL_ST_MARKDOWN(_theme_colorize_markup(body), *args, **kwargs)
+
+def _themed_components_html(html, *args, **kwargs):
+    return _ORIGINAL_COMPONENTS_HTML(_theme_colorize_markup(html), *args, **kwargs)
+
+st.markdown = _themed_markdown
+components.html = _themed_components_html
+
 # ==========================================
 # MODULO ISOLADO - USUARIOS E PARCEIROS
 # ==========================================
 AUTH_USERS_PATH = SYSTEM_DATABASE_DIR / "usuarios_sistema.json"
 PARTNERS_ROOT = SYSTEM_DATABASE_DIR / "parceiros_controle_voos_dados"
 PARTNERS_STATE_PATH = PARTNERS_ROOT / "parceiros_estado.json"
+PARTNERS_LOGOS_DIR = PARTNERS_ROOT / "logos"
 PARTNER_KEYS = {"eiwa": "Eiwa", "alvaz": "Alvaz"}
-PARTNER_STATUS_OPTIONS = ["Executado", "Não Executado", "Pendente", "Em andamento"]
+PARTNER_BUTTON_LABELS = {"eiwa": "IVA", "alvaz": "ALVÁS"}
+PARTNER_STATUS_OPTIONS = ["Executado", "Não executado"]
 PARTNER_TREATMENT_STATUS = ["Aberto", "Em andamento", "Concluído", "Resolvido", "Atrasado"]
 PARTNER_TREATMENT_DONE = {"Concluído", "Resolvido"}
 PARTNER_INTERNAL_COLUMNS = ["Status de Execução", "Descrição / Observação", "Última Alteração", "Usuário Responsável"]
 PARTNER_ROW_ID = "__tmg_row_id"
+MENU_PERMISSION_OPTIONS = {
+    "menu_checklist": "Checklist",
+    "menu_grid": "Marcar Grid",
+    "menu_upload": "Upload",
+    "menu_bases": "Banco de Dados",
+    "menu_sync": "Sincronizar",
+    "menu_ortomosaicos": "Gerar Ortomosaico",
+    "menu_parceiros": "Parceiros",
+    "menu_controle_dados": "Controle de Dados",
+}
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -379,7 +477,7 @@ def _now_human() -> str:
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 def _default_permissions(all_access: bool = True) -> dict:
-    return {
+    permissions = {
         "culturas": bool(all_access),
         "soja": bool(all_access),
         "milho": bool(all_access),
@@ -388,6 +486,9 @@ def _default_permissions(all_access: bool = True) -> dict:
         "eiwa": bool(all_access),
         "alvaz": bool(all_access),
     }
+    for key in MENU_PERMISSION_OPTIONS:
+        permissions[key] = bool(all_access)
+    return permissions
 
 def _auth_default_users() -> dict:
     return {
@@ -439,8 +540,19 @@ def _auth_load_users() -> dict:
         user.setdefault("ativo", True)
         user.setdefault("admin", False)
         user.setdefault("permissoes", _default_permissions(False))
-        for key, value in _default_permissions(False).items():
-            user["permissoes"].setdefault(key, value)
+        perms = user["permissoes"]
+        legacy_culture_access = bool(perms.get("culturas", False))
+        legacy_partner_access = bool(perms.get("parceiros", False))
+        defaults = _default_permissions(False)
+        for key, value in defaults.items():
+            if key in perms:
+                continue
+            if key in ("menu_checklist", "menu_grid", "menu_upload", "menu_bases", "menu_sync", "menu_ortomosaicos"):
+                perms[key] = legacy_culture_access
+            elif key in ("menu_parceiros", "menu_controle_dados"):
+                perms[key] = legacy_partner_access
+            else:
+                perms[key] = value
     return data
 
 def _auth_save_users(data: dict) -> None:
@@ -479,6 +591,14 @@ def _auth_permissions(user: dict = None) -> dict:
     perms = user.get("permissoes", {}) if isinstance(user, dict) else {}
     normalized = _default_permissions(False)
     normalized.update({k: bool(v) for k, v in perms.items()})
+    legacy_culture_access = bool(normalized.get("culturas"))
+    legacy_partner_access = bool(normalized.get("parceiros"))
+    for key in ("menu_checklist", "menu_grid", "menu_upload", "menu_bases", "menu_sync", "menu_ortomosaicos"):
+        if key not in perms:
+            normalized[key] = legacy_culture_access
+    for key in ("menu_parceiros", "menu_controle_dados"):
+        if key not in perms:
+            normalized[key] = legacy_partner_access
     return normalized
 
 def _auth_allowed_cultures(user: dict = None) -> list:
@@ -495,7 +615,11 @@ def _auth_allowed_cultures(user: dict = None) -> list:
     return allowed
 
 def _auth_can_partners(user: dict = None) -> bool:
-    return bool(_auth_permissions(user).get("parceiros"))
+    perms = _auth_permissions(user)
+    return bool(perms.get("parceiros") and (perms.get("menu_parceiros") or perms.get("menu_controle_dados")))
+
+def _auth_menu_allowed(menu_key: str, user: dict = None) -> bool:
+    return bool(_auth_permissions(user).get(menu_key))
 
 def _auth_allowed_partners(user: dict = None) -> list:
     perms = _auth_permissions(user)
@@ -513,11 +637,15 @@ def _partners_default_partner() -> dict:
         "link": "",
         "rows": [],
         "columns": [],
+        "baseline_rows": [],
+        "baseline_columns": [],
+        "baseline_import": {},
         "last_import": {},
         "last_update": {},
         "diff_rows": [],
         "chat": [],
         "history": [],
+        "logo_path": "",
     }
 
 def _partners_default_state() -> dict:
@@ -545,11 +673,15 @@ def _partners_load_state() -> dict:
         partner.setdefault("link", "")
         partner.setdefault("rows", [])
         partner.setdefault("columns", [])
+        partner.setdefault("baseline_rows", [])
+        partner.setdefault("baseline_columns", [])
+        partner.setdefault("baseline_import", {})
         partner.setdefault("last_import", {})
         partner.setdefault("last_update", {})
         partner.setdefault("diff_rows", [])
         partner.setdefault("chat", [])
         partner.setdefault("history", [])
+        partner.setdefault("logo_path", "")
     return state
 
 def _partners_save_state(state: dict) -> None:
@@ -569,6 +701,73 @@ def _partners_add_history(state: dict, partner_key: str, acao: str, detalhes: st
     if partner_key in state.get("partners", {}):
         state["partners"][partner_key].setdefault("history", []).insert(0, item)
         state["partners"][partner_key]["history"] = state["partners"][partner_key]["history"][:1000]
+
+def _partner_label(partner_key: str) -> str:
+    return PARTNER_BUTTON_LABELS.get(partner_key, PARTNER_KEYS.get(partner_key, partner_key))
+
+def _partners_logo_path(partner_key: str):
+    partner_key = str(partner_key or "").strip().lower()
+    for suffix in (".png", ".jpg", ".jpeg", ".webp"):
+        candidate = PARTNERS_LOGOS_DIR / f"{partner_key}{suffix}"
+        if candidate.exists():
+            return candidate
+    return None
+
+def _partners_save_logo(state: dict, partner_key: str, uploaded_file) -> None:
+    if uploaded_file is None:
+        return
+    suffix = Path(uploaded_file.name).suffix.lower()
+    if suffix not in (".png", ".jpg", ".jpeg", ".webp"):
+        suffix = ".png"
+    PARTNERS_LOGOS_DIR.mkdir(parents=True, exist_ok=True)
+    for old in PARTNERS_LOGOS_DIR.glob(f"{partner_key}.*"):
+        try:
+            old.unlink()
+        except Exception:
+            pass
+    target = PARTNERS_LOGOS_DIR / f"{partner_key}{suffix}"
+    target.write_bytes(uploaded_file.getvalue())
+    state["partners"][partner_key]["logo_path"] = str(target)
+
+def _auth_mention_options() -> tuple:
+    users = []
+    labels = {}
+    for user in _auth_load_users().get("users", []):
+        if not user.get("ativo", True):
+            continue
+        usuario = str(user.get("usuario", "")).strip()
+        if not usuario:
+            continue
+        users.append(usuario)
+        labels[usuario] = f"{user.get('nome', usuario)} ({usuario})"
+    return users, labels
+
+def _partners_mentions_for_user(state: dict, user: dict) -> list:
+    usuario = str(user.get("usuario", "")).strip().lower()
+    if not usuario:
+        return []
+    notes = []
+    for partner_key, partner in state.get("partners", {}).items():
+        for item in partner.get("chat", []) or []:
+            citados = [str(v).strip().lower() for v in item.get("citados", [])]
+            if usuario in citados:
+                notes.append({
+                    "parceira": _partner_label(partner_key),
+                    "assunto": item.get("assunto", "Sem assunto"),
+                    "usuario": item.get("usuario", ""),
+                    "data": item.get("data", ""),
+                    "hora": item.get("hora", ""),
+                })
+    return notes[:5]
+
+def _partners_read_csv_upload(uploaded_file) -> tuple:
+    if uploaded_file is None:
+        return None, "Selecione uma planilha CSV para importar."
+    try:
+        df = pd.read_csv(BytesIO(uploaded_file.getvalue()), sep=None, engine="python")
+        return _partners_clean_dataframe(df), ""
+    except Exception as exc:
+        return None, f"Não consegui ler o CSV enviado. Confira se o arquivo está salvo em formato CSV válido. Detalhe: {exc}"
 
 def _partners_normalize_sheet_url(link: str) -> str:
     raw = str(link or "").strip()
@@ -722,18 +921,28 @@ def _partners_rows_to_df(partner_data: dict) -> pd.DataFrame:
         df[PARTNER_ROW_ID] = [hashlib.sha1(f"row-{i}".encode()).hexdigest()[:12] for i in range(len(df))]
     for col in columns + PARTNER_INTERNAL_COLUMNS:
         if col not in df.columns:
-            df[col] = "Pendente" if col == "Status de Execução" else ""
-    ordered = [PARTNER_ROW_ID] + [col for col in columns if col in df.columns] + [col for col in PARTNER_INTERNAL_COLUMNS if col in df.columns]
+            df[col] = "Não executado" if col == "Status de Execução" else ""
+    if "Status de Execução" in df.columns:
+        df["Status de Execução"] = df["Status de Execução"].map(
+            lambda value: value if str(value) in PARTNER_STATUS_OPTIONS else "Não executado"
+        )
+    status_cols = ["Status de Execução"] if "Status de Execução" in df.columns else []
+    other_internal = [col for col in PARTNER_INTERNAL_COLUMNS if col in df.columns and col not in status_cols]
+    ordered = [PARTNER_ROW_ID] + status_cols + [col for col in columns if col in df.columns] + other_internal
     ordered += [col for col in df.columns if col not in ordered]
     return df[ordered].replace({np.nan: ""})
 
 def _partners_prepare_import_df(df: pd.DataFrame, current_user: str) -> tuple:
     df = _partners_clean_dataframe(df)
-    original_columns = [col for col in df.columns if col != PARTNER_ROW_ID]
+    original_columns = [col for col in df.columns if col != PARTNER_ROW_ID and col not in PARTNER_INTERNAL_COLUMNS]
     df.insert(0, PARTNER_ROW_ID, [hashlib.sha1(f"{current_user}-{_now_iso()}-{i}".encode()).hexdigest()[:12] for i in range(len(df))])
     for col in PARTNER_INTERNAL_COLUMNS:
         if col not in df.columns:
-            df[col] = "Pendente" if col == "Status de Execução" else ""
+            df[col] = "Não executado" if col == "Status de Execução" else ""
+    if "Status de Execução" in df.columns:
+        df["Status de Execução"] = df["Status de Execução"].map(
+            lambda value: value if str(value) in PARTNER_STATUS_OPTIONS else "Não executado"
+        )
     if "Usuário Responsável" in df.columns:
         df["Usuário Responsável"] = df["Usuário Responsável"].replace("", current_user)
     return df, original_columns
@@ -841,8 +1050,14 @@ def _partners_merge_edited_rows(base_df: pd.DataFrame, visible_ids: list, edited
     columns = [col for col in original_columns if col in merged.columns]
     for col in PARTNER_INTERNAL_COLUMNS:
         if col not in merged.columns:
-            merged[col] = "Pendente" if col == "Status de Execução" else ""
-    ordered = [PARTNER_ROW_ID] + columns + [col for col in PARTNER_INTERNAL_COLUMNS if col in merged.columns]
+            merged[col] = "Não executado" if col == "Status de Execução" else ""
+    if "Status de Execução" in merged.columns:
+        merged["Status de Execução"] = merged["Status de Execução"].map(
+            lambda value: value if str(value) in PARTNER_STATUS_OPTIONS else "Não executado"
+        )
+    status_cols = ["Status de Execução"] if "Status de Execução" in merged.columns else []
+    other_internal = [col for col in PARTNER_INTERNAL_COLUMNS if col in merged.columns and col not in status_cols]
+    ordered = [PARTNER_ROW_ID] + status_cols + columns + other_internal
     ordered += [col for col in merged.columns if col not in ordered]
     return merged[ordered], logs
 
@@ -1171,15 +1386,15 @@ if not st.session_state.logged_in:
         font-weight: 900;
         font-size: 2.4rem;
         letter-spacing: 6px;
-        color: #ff8c00;
+        color: var(--tmg-primary);
         text-transform: uppercase;
         text-shadow:
-            1px 1px 0 #7a3a00,
-            2px 2px 0 #5c2b00,
-            3px 3px 0 #3d1d00,
+            1px 1px 0 var(--tmg-primary-shadow-1),
+            2px 2px 0 var(--tmg-primary-shadow-2),
+            3px 3px 0 var(--tmg-primary-shadow-3),
             5px 5px 10px rgba(0,0,0,0.95),
-            0 0 25px rgba(255,140,0,0.5),
-            0 0 60px rgba(255,140,0,0.15);
+            0 0 25px var(--tmg-primary-glow),
+            0 0 60px var(--tmg-primary-glow-soft);
         margin-bottom: 4px;
     }
 
@@ -1194,23 +1409,26 @@ if not st.session_state.logged_in:
 
     .login-divider {
         border: none;
-        border-top: 1px solid #ff8c00;
-        box-shadow: 0 0 10px rgba(255,140,0,0.4);
+        border-top: 1px solid var(--tmg-primary);
+        box-shadow: 0 0 10px var(--tmg-primary-glow);
         margin: 0 0 28px 0;
     }
 
     .stTextInput > div > div > input {
-        background-color: #1a1a1a !important;
-        border: 1px solid #333 !important;
+        background-color: #ffffff !important;
+        border: 1px solid #d6e3f0 !important;
         border-radius: 10px !important;
-        color: #e0e0e0 !important;
+        color: #111827 !important;
         padding: 12px 16px !important;
         font-size: 0.95rem !important;
-        box-shadow: inset 2px 2px 5px #0a0a0a !important;
+        box-shadow: inset 0 1px 2px rgba(0,0,0,.12) !important;
+    }
+    .stTextInput > div > div > input::placeholder {
+        color: #6b7280 !important;
     }
     .stTextInput > div > div > input:focus {
-        border-color: #ff8c00 !important;
-        box-shadow: inset 2px 2px 5px #0a0a0a, 0 0 8px rgba(255,140,0,0.3) !important;
+        border-color: var(--tmg-primary) !important;
+        box-shadow: inset 0 1px 2px rgba(0,0,0,.12), 0 0 8px var(--tmg-primary-glow) !important;
     }
 
     .stTextInput label {
@@ -1232,7 +1450,7 @@ if not st.session_state.logged_in:
     .login-cfg-panel {
         background: linear-gradient(160deg, #181818 0%, #0f0f0f 100%);
         border: 1px solid #2a2a2a;
-        border-top: 2px solid #ff8c00;
+        border-top: 2px solid var(--tmg-primary);
         border-radius: 16px;
         padding: 24px 28px;
         box-shadow: 0 8px 24px rgba(0,0,0,0.7);
@@ -1242,12 +1460,12 @@ if not st.session_state.logged_in:
     }
 
     .cfg-panel-title {
-        color: #ff8c00;
+        color: var(--tmg-primary);
         font-weight: 700;
         font-size: 0.85rem;
         letter-spacing: 3px;
         text-transform: uppercase;
-        text-shadow: 0 0 12px rgba(255,140,0,0.35);
+        text-shadow: 0 0 12px var(--tmg-primary-glow);
         margin-bottom: 16px;
     }
     </style>
@@ -1315,7 +1533,7 @@ if not st.session_state.logged_in:
                 st.markdown(
                     f"<p style='color:#666;font-size:0.8rem;margin-bottom:10px;'>"
                     f"&#128193; Background atual: "
-                    f"<code style='color:#ff8c00;'>{LOGIN_BG_PATH}</code></p>",
+                    f"<code style='color:{THEME_PRIMARY_COLOR};'>{LOGIN_BG_PATH}</code></p>",
                     unsafe_allow_html=True
                 )
 
@@ -1367,15 +1585,15 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
         font-weight: 900;
         font-size: 2rem;
         letter-spacing: 5px;
-        color: #ff8c00;
+        color: var(--tmg-primary);
         text-transform: uppercase;
         text-shadow:
-            1px 1px 0 #7a3a00,
-            2px 2px 0 #5c2b00,
-            3px 3px 0 #3d1d00,
+            1px 1px 0 var(--tmg-primary-shadow-1),
+            2px 2px 0 var(--tmg-primary-shadow-2),
+            3px 3px 0 var(--tmg-primary-shadow-3),
             5px 5px 10px rgba(0,0,0,0.95),
-            0 0 25px rgba(255,140,0,0.45),
-            0 0 60px rgba(255,140,0,0.12);
+            0 0 25px var(--tmg-primary-glow),
+            0 0 60px var(--tmg-primary-glow-soft);
         margin-bottom: 6px;
     }
 
@@ -1390,8 +1608,8 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
 
     .cultura-hr {
         border: none;
-        border-top: 1px solid #ff8c00;
-        box-shadow: 0 0 10px rgba(255,140,0,0.4);
+        border-top: 1px solid var(--tmg-primary);
+        box-shadow: 0 0 10px var(--tmg-primary-glow);
         width: 60%;
         margin: 0 auto 40px auto;
     }
@@ -1417,16 +1635,16 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
         position: absolute;
         top: 0; left: 0; right: 0;
         height: 2px;
-        background: linear-gradient(90deg, transparent, #ff8c00, transparent);
+        background: linear-gradient(90deg, transparent, var(--tmg-primary), transparent);
         opacity: 0.5;
     }
 
     .cultura-card:hover {
-        border-color: #ff8c00;
+        border-color: var(--tmg-primary);
         box-shadow:
             6px 6px 20px #050505,
             -2px -2px 10px #2a2a2a,
-            0 0 20px rgba(255,140,0,0.15),
+            0 0 20px var(--tmg-primary-glow-soft),
             inset 0 1px 0 rgba(255,255,255,0.06);
         transform: translateY(-5px) scale(1.02);
     }
@@ -1525,7 +1743,7 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
                 st.markdown("""
                 <div class='cultura-card'>
                     <span class='cultura-icon'>🤝</span>
-                    <div class='cultura-nome' style='color:#42a5f5;text-shadow:1px 1px 0 rgba(0,0,0,.8),0 0 12px #42a5f555;'>
+                    <div class='cultura-nome' style='color:var(--tmg-primary);text-shadow:1px 1px 0 rgba(0,0,0,.8),0 0 12px var(--tmg-primary-glow);'>
                         PARCEIROS
                     </div>
                     <div class='cultura-desc'>Controle de Voos e Dados</div>
@@ -3869,7 +4087,8 @@ def _render_manage_users() -> None:
                 "Status": "Ativo" if user.get("ativo", True) else "Inativo",
                 "Admin": "Sim" if _auth_is_admin(user) else "Não",
                 "Culturas": ", ".join(_auth_allowed_cultures(user)) or "-",
-                "Parceiros": ", ".join(PARTNER_KEYS[p] for p in _auth_allowed_partners(user)) or "-",
+                "Parceiros": ", ".join(_partner_label(p) for p in _auth_allowed_partners(user)) or "-",
+                "Menus": ", ".join(label for key, label in MENU_PERMISSION_OPTIONS.items() if _auth_menu_allowed(key, user)) or "-",
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
@@ -3901,9 +4120,17 @@ def _render_manage_users() -> None:
             perm_parceiros = st.checkbox("Acessar módulo Parceiros / Controle de Voos e Dados", value=bool(perms_current.get("parceiros", False)))
             p_eiwa, p_alvaz = st.columns(2)
             with p_eiwa:
-                perm_eiwa = st.checkbox("Eiwa", value=bool(perms_current.get("eiwa", False)))
+                perm_eiwa = st.checkbox("IVA", value=bool(perms_current.get("eiwa", False)))
             with p_alvaz:
-                perm_alvaz = st.checkbox("Alvaz", value=bool(perms_current.get("alvaz", False)))
+                perm_alvaz = st.checkbox("ALVÁS", value=bool(perms_current.get("alvaz", False)))
+            st.markdown("##### Permissões por menu")
+            menu_values = {}
+            menu_items = list(MENU_PERMISSION_OPTIONS.items())
+            for idx in range(0, len(menu_items), 2):
+                mcols = st.columns(2)
+                for col, (menu_key, menu_label) in zip(mcols, menu_items[idx:idx + 2]):
+                    with col:
+                        menu_values[menu_key] = st.checkbox(menu_label, value=bool(perms_current.get(menu_key, True)))
 
         save_user = st.form_submit_button("💾 Salvar usuário", type="primary", use_container_width=True)
 
@@ -3926,6 +4153,7 @@ def _render_manage_users() -> None:
                     "parceiros": perm_parceiros,
                     "eiwa": perm_eiwa,
                     "alvaz": perm_alvaz,
+                    **menu_values,
                 },
                 "criado_em": editing.get("criado_em", _now_iso()),
                 "atualizado_em": _now_iso(),
@@ -3979,68 +4207,77 @@ def _render_partner_alerts(partner_data: dict) -> None:
 
 def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
     partner = state["partners"][partner_key]
-    partner_name = PARTNER_KEYS[partner_key]
-    st.markdown("##### Importação da planilha online")
-    link = st.text_input("Link da planilha Excel online", value=partner.get("link", ""), key=f"partner_link_{partner_key}")
+    partner_name = _partner_label(partner_key)
+    st.markdown("##### Importação de planilha CSV")
     uploaded_sheet = st.file_uploader(
-        "Ou envie a planilha Excel/CSV",
-        type=["xlsx", "xls", "csv"],
+        "Selecionar planilha CSV baixada",
+        type=["csv"],
         key=f"partner_upload_sheet_{partner_key}",
-        help="Use esta opção quando o SharePoint pedir login ou bloquear o link online.",
+        help="Baixe a planilha em CSV e importe aqui para espelhar os dados no sistema.",
     )
-    st.caption("Links do SharePoint precisam estar compartilhados para download por link. Se a planilha pedir login, envie o arquivo Excel/CSV aqui.")
+    st.caption("A importação online foi removida. Use somente CSV baixado para manter o espelho leve, estável e comparável.")
     c1, c2, c3 = st.columns(3)
     with c1:
-        import_clicked = st.button("📥 Importar Planilha", key=f"partner_import_{partner_key}", use_container_width=True)
+        import_clicked = st.button("📥 Importar CSV", key=f"partner_import_{partner_key}", use_container_width=True)
     with c2:
-        update_clicked = st.button("🔄 Atualizar Planilha", key=f"partner_update_{partner_key}", use_container_width=True)
+        update_clicked = st.button("🔄 Atualizar dados", key=f"partner_update_{partner_key}", use_container_width=True)
     with c3:
         save_internal_clicked = st.button("💾 Salvar Dados Internos", key=f"partner_save_internal_top_{partner_key}", use_container_width=True)
 
-    if import_clicked:
-        df, err, source_label = _partners_read_sheet_source(link, uploaded_sheet)
+    if import_clicked or update_clicked:
+        df, err = _partners_read_csv_upload(uploaded_sheet)
         if err:
             st.warning(err)
         else:
-            prepared, original_columns = _partners_prepare_import_df(df, _auth_user_name())
-            partner["link"] = link.strip()
-            partner["columns"] = original_columns
-            partner["rows"] = prepared.to_dict(orient="records")
-            partner["last_import"] = {"data_hora": _now_human(), "usuario": _auth_user_name(), "linhas": len(prepared), "fonte": source_label}
-            partner["diff_rows"] = []
-            _partners_add_history(state, partner_key, "Planilha importada", f"{partner_name}: {len(prepared)} linhas · {source_label}")
-            _partners_save_state(state)
-            st.success("Planilha importada e espelhada no sistema.")
-            app_rerun()
-
-    if update_clicked:
-        df, err, source_label = _partners_read_sheet_source(link or partner.get("link", ""), uploaded_sheet)
-        if err:
-            st.warning(err)
-        else:
-            old_df = _partners_rows_to_df(partner)
             new_clean = _partners_clean_dataframe(df)
-            original_columns = [col for col in new_clean.columns if col != PARTNER_ROW_ID]
-            summary, diff_rows = _partners_compare_dataframes(old_df, new_clean, original_columns)
-            prepared, _ = _partners_prepare_import_df(new_clean, _auth_user_name())
+            original_columns = [col for col in new_clean.columns if col != PARTNER_ROW_ID and col not in PARTNER_INTERNAL_COLUMNS]
+            baseline_rows = partner.get("baseline_rows", [])
+            baseline_columns = partner.get("baseline_columns", [])
+            if not baseline_rows:
+                partner["baseline_rows"] = new_clean[original_columns].to_dict(orient="records")
+                partner["baseline_columns"] = original_columns
+                partner["baseline_import"] = {
+                    "data_hora": _now_human(),
+                    "usuario": _auth_user_name(),
+                    "arquivo": uploaded_sheet.name,
+                    "linhas": len(new_clean),
+                }
+                summary = {
+                    "linhas_novas": 0,
+                    "linhas_alteradas": 0,
+                    "linhas_removidas": 0,
+                    "data_hora": _now_human(),
+                    "usuario": _auth_user_name(),
+                    "fonte": f"CSV: {uploaded_sheet.name}",
+                    "base_comparacao": "Primeira importação salva",
+                }
+                diff_rows = []
+            else:
+                compare_columns = baseline_columns or original_columns
+                baseline_df = pd.DataFrame(baseline_rows)
+                summary, diff_rows = _partners_compare_dataframes(baseline_df, new_clean, compare_columns)
+                summary["fonte"] = f"CSV: {uploaded_sheet.name}"
+                summary["base_comparacao"] = "Primeira importação salva"
+            prepared, original_columns = _partners_prepare_import_df(df, _auth_user_name())
+            old_df = _partners_rows_to_df(partner)
             for idx in range(min(len(old_df), len(prepared))):
                 for col in PARTNER_INTERNAL_COLUMNS:
-                    if col in old_df.columns:
+                    if col in old_df.columns and col in prepared.columns:
                         prepared.at[idx, col] = old_df.iloc[idx].get(col, prepared.at[idx, col])
-            partner["link"] = (link or partner.get("link", "")).strip()
+            partner["link"] = ""
             partner["columns"] = original_columns
             partner["rows"] = prepared.to_dict(orient="records")
-            summary["fonte"] = source_label
+            partner["last_import"] = {"data_hora": _now_human(), "usuario": _auth_user_name(), "linhas": len(prepared), "fonte": f"CSV: {uploaded_sheet.name}"}
             partner["last_update"] = summary
             partner["diff_rows"] = diff_rows[:500]
             _partners_add_history(
                 state,
                 partner_key,
-                "Planilha atualizada",
-                f"Novas: {summary['linhas_novas']} · Alteradas: {summary['linhas_alteradas']} · Removidas: {summary['linhas_removidas']}"
+                "Planilha CSV importada",
+                f"{partner_name}: {len(prepared)} linhas · {uploaded_sheet.name}"
             )
             _partners_save_state(state)
-            st.success("Planilha atualizada e comparada com a versão anterior.")
+            st.success("CSV importado e espelhado no sistema.")
             app_rerun()
 
     if save_internal_clicked:
@@ -4059,7 +4296,7 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
     partner = state["partners"][partner_key]
     df = _partners_rows_to_df(partner)
     if df.empty or len(df) == 0:
-        st.info("Importe uma planilha online ou envie um Excel/CSV para iniciar a tabela espelhada.")
+        st.info("Importe uma planilha CSV para iniciar a tabela espelhada.")
         return
 
     st.markdown("##### Tabela espelhada estilo Excel")
@@ -4111,7 +4348,7 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
         st.download_button(
             "⬇️ Exportar CSV",
             data=export_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"{PARTNER_KEYS[partner_key]}_controle.csv",
+            file_name=f"{_partner_label(partner_key)}_controle.csv",
             mime="text/csv",
             use_container_width=True,
         )
@@ -4121,7 +4358,7 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
         st.download_button(
             "⬇️ Exportar Excel",
             data=excel_buf.getvalue(),
-            file_name=f"{PARTNER_KEYS[partner_key]}_controle.xlsx",
+            file_name=f"{_partner_label(partner_key)}_controle.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
@@ -4133,6 +4370,7 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
             "Última atualização": last_update.get("data_hora", ""),
             "Usuário que atualizou": last_update.get("usuario", ""),
             "Fonte": last_update.get("fonte", ""),
+            "Base de comparação": last_update.get("base_comparacao", ""),
             "Linhas novas": last_update.get("linhas_novas", 0),
             "Linhas alteradas": last_update.get("linhas_alteradas", 0),
             "Linhas removidas": last_update.get("linhas_removidas", 0),
@@ -4145,15 +4383,26 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
 
 def _render_partner_chat(state: dict, partner_key: str) -> None:
     partner = state["partners"][partner_key]
-    st.markdown("##### Histórico de Tratativas")
+    mention_options, mention_labels = _auth_mention_options()
+    st.markdown(
+        "<div class='partner-window-title'>Tratativas</div>"
+        "<div class='partner-window-subtitle'>Acompanhamento de assuntos, prazos, responsáveis e citações internas.</div>",
+        unsafe_allow_html=True,
+    )
     with st.form(f"partner_chat_form_{partner_key}"):
         c1, c2 = st.columns(2)
         with c1:
             assunto = st.text_input("Assunto")
             prazo = st.date_input("Prazo", value=date.today())
         with c2:
-            status = st.selectbox("Status da tratativa", PARTNER_TREATMENT_STATUS)
-            st.text_input("Usuário logado", value=_auth_user_name(), disabled=True)
+            status = st.selectbox("Status", PARTNER_TREATMENT_STATUS)
+            st.text_input("Usuário responsável/autoria", value=_auth_user_name(), disabled=True)
+        citados = st.multiselect(
+            "Citar usuários cadastrados",
+            mention_options,
+            format_func=lambda usuario: mention_labels.get(usuario, usuario),
+            help="Selecione os usuários que devem receber notificação ao entrar no sistema.",
+        )
         mensagem = st.text_area("Mensagem")
         send = st.form_submit_button("💬 Enviar tratativa", type="primary", use_container_width=True)
     if send:
@@ -4169,9 +4418,11 @@ def _render_partner_chat(state: dict, partner_key: str) -> None:
                 "hora": datetime.now().strftime("%H:%M:%S"),
                 "prazo": prazo.isoformat() if prazo else "",
                 "status": status,
+                "citados": citados,
             }
             partner.setdefault("chat", []).insert(0, item)
-            _partners_add_history(state, partner_key, "Mensagem enviada", f"{item['assunto']} · prazo {item['prazo']}")
+            citados_label = ", ".join(mention_labels.get(usuario, usuario) for usuario in citados) or "Sem citações"
+            _partners_add_history(state, partner_key, "Mensagem enviada", f"{item['assunto']} · prazo {item['prazo']} · citados: {citados_label}")
             _partners_save_state(state)
             st.success("Tratativa registrada.")
             app_rerun()
@@ -4180,12 +4431,15 @@ def _render_partner_chat(state: dict, partner_key: str) -> None:
         chat_id = item.get("id") or hashlib.sha1(f"{partner_key}-{idx}-{item.get('assunto','')}-{item.get('data','')}".encode()).hexdigest()[:12]
         current_status = item.get("status", "Aberto")
         status_options = PARTNER_TREATMENT_STATUS if current_status in PARTNER_TREATMENT_STATUS else [current_status] + PARTNER_TREATMENT_STATUS
-        color = "#66bb6a" if current_status in PARTNER_TREATMENT_DONE else "#ffd54f" if current_status == "Em andamento" else "#ff5252" if current_status == "Atrasado" else "#ff8c00"
+        color = "#66bb6a" if current_status in PARTNER_TREATMENT_DONE else "#ffd54f" if current_status == "Em andamento" else "#ff5252" if current_status == "Atrasado" else THEME_PRIMARY_COLOR
+        citados_txt = ", ".join(mention_labels.get(str(usuario), str(usuario)) for usuario in item.get("citados", []))
+        citados_html = f"<div style='color:#9ec9ef;font-size:.78rem;margin-top:6px;'>Citados: {citados_txt}</div>" if citados_txt else ""
         st.markdown(
             f"<div style='background:#151515;border:1px solid #333;border-left:4px solid {color};border-radius:10px;padding:10px 12px;margin:8px 0;'>"
             f"<div style='color:{color};font-weight:700;'>{item.get('assunto','Sem assunto')} · {item.get('status','')}</div>"
             f"<div style='color:#aaa;font-size:.78rem;'>{item.get('usuario','')} · {item.get('data','')} {item.get('hora','')} · Prazo: {item.get('prazo','')}</div>"
             f"<div style='color:#eee;margin-top:6px;'>{item.get('mensagem','')}</div>"
+            f"{citados_html}"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -4220,50 +4474,224 @@ def _render_partner_chat(state: dict, partner_key: str) -> None:
 
 def _render_partner_history(state: dict, partner_key: str) -> None:
     partner = state["partners"][partner_key]
+    st.markdown(
+        "<div class='partner-window-title'>Histórico</div>"
+        "<div class='partner-window-subtitle'>Registro organizado das ações e atualizações do módulo.</div>",
+        unsafe_allow_html=True,
+    )
     h1, h2 = st.columns(2)
     with h1:
-        st.markdown(f"##### Histórico {PARTNER_KEYS[partner_key]}")
+        st.markdown(f"##### Histórico {_partner_label(partner_key)}")
         st.dataframe(partner.get("history", []), use_container_width=True, hide_index=True)
     with h2:
         st.markdown("##### Histórico Geral")
         st.dataframe(state.get("history_general", []), use_container_width=True, hide_index=True)
 
-def _render_single_partner(state: dict, partner_key: str) -> None:
-    partner_name = PARTNER_KEYS[partner_key]
+def _render_partner_module_css() -> None:
+    st.markdown("""
+    <style>
+    .partner-hero {
+        background: linear-gradient(145deg, rgba(17,27,42,.98), rgba(8,14,24,.98));
+        border: 1px solid rgba(66,165,245,.28);
+        border-top: 2px solid var(--tmg-primary);
+        border-radius: 12px;
+        padding: 18px 20px;
+        margin-bottom: 18px;
+        box-shadow: 0 10px 26px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    .partner-hero-title {
+        color: var(--tmg-primary);
+        font-weight: 900;
+        letter-spacing: 3px;
+        text-transform: uppercase;
+        font-size: 1.25rem;
+        text-shadow: 0 0 18px var(--tmg-primary-glow);
+    }
+    .partner-hero-subtitle,
+    .partner-window-subtitle {
+        color: #b8c7d9;
+        font-size: .86rem;
+        margin-top: 6px;
+    }
+    .partner-card {
+        background: linear-gradient(145deg, rgba(18,33,54,.98), rgba(7,15,28,.98));
+        border: 1px solid rgba(66,165,245,.28);
+        border-radius: 12px;
+        padding: 18px;
+        min-height: 220px;
+        box-shadow: 8px 8px 20px rgba(0,0,0,.45), -1px -1px 8px rgba(255,255,255,.04);
+        text-align: center;
+    }
+    .partner-card-title,
+    .partner-window-title {
+        color: var(--tmg-primary);
+        font-weight: 900;
+        letter-spacing: 2.5px;
+        text-transform: uppercase;
+        text-shadow: 0 0 14px var(--tmg-primary-glow);
+    }
+    .partner-logo-slot {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 92px;
+        border: 1px dashed rgba(144,202,249,.30);
+        border-radius: 10px;
+        color: #7f96ad;
+        font-size: .78rem;
+        letter-spacing: 1px;
+        margin-bottom: 12px;
+    }
+    .partner-section-card {
+        background: linear-gradient(145deg, rgba(18,33,54,.98), rgba(7,15,28,.98));
+        border: 1px solid rgba(66,165,245,.26);
+        border-radius: 12px;
+        padding: 18px 16px;
+        text-align: center;
+        box-shadow: 6px 6px 18px rgba(0,0,0,.40), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    div[data-testid="stFileUploader"] section {
+        border-color: rgba(66,165,245,.32) !important;
+        background: rgba(13,30,53,.52) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+def _render_partner_selection(state: dict, allowed: list) -> None:
+    st.markdown(
+        "<div class='partner-window-title'>Parceiros</div>"
+        "<div class='partner-window-subtitle'>Anexe a logomarca e selecione a parceira para abrir o controle de voos e dados.</div>",
+        unsafe_allow_html=True,
+    )
+    cols = st.columns(max(1, len(allowed)), gap="large")
+    for col, partner_key in zip(cols, allowed):
+        with col:
+            label = _partner_label(partner_key)
+            uploaded_logo = st.file_uploader(
+                f"Anexar logomarca {label}",
+                type=["png", "jpg", "jpeg", "webp"],
+                key=f"partner_logo_upload_{partner_key}",
+            )
+            if uploaded_logo is not None:
+                _partners_save_logo(state, partner_key, uploaded_logo)
+                _partners_add_history(state, partner_key, "Logomarca atualizada", label)
+                _partners_save_state(state)
+                st.success(f"Logomarca de {label} salva.")
+                app_rerun()
+
+            logo_path = _partners_logo_path(partner_key)
+            st.markdown("<div class='partner-card'>", unsafe_allow_html=True)
+            if logo_path and logo_path.exists():
+                app_image(str(logo_path))
+            else:
+                st.markdown("<div class='partner-logo-slot'>LOGOMARCA</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='partner-card-title'>{label}</div>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+            if st.button(label, key=f"partner_open_{partner_key}", type="primary", use_container_width=True):
+                st.session_state["partner_selected"] = partner_key
+                st.session_state["partner_section"] = ""
+                app_rerun()
+
+def _render_partner_section_buttons(partner_key: str) -> None:
+    sections = [
+        ("sheet", "Planilha", "Espelho CSV, edição e comparação"),
+        ("chat", "Tratativa", "Assuntos, prazos e citações"),
+        ("history", "Histórico", "Registros e auditoria"),
+    ]
+    cols = st.columns(3, gap="large")
+    for col, (section_key, label, desc) in zip(cols, sections):
+        with col:
+            st.markdown(
+                f"<div class='partner-section-card'><div class='partner-card-title'>{label}</div>"
+                f"<div class='partner-window-subtitle'>{desc}</div></div>",
+                unsafe_allow_html=True,
+            )
+            if st.button(label, key=f"partner_section_{partner_key}_{section_key}", type="primary", use_container_width=True):
+                st.session_state["partner_section"] = section_key
+                app_rerun()
+
+def _render_partner_workspace(state: dict, partner_key: str) -> None:
+    partner_name = _partner_label(partner_key)
     partner = state["partners"][partner_key]
-    st.markdown(f"### {partner_name}")
+    top_cols = st.columns([1, 3])
+    with top_cols[0]:
+        if st.button("← Parceiros", key=f"partner_back_{partner_key}", use_container_width=True):
+            st.session_state["partner_selected"] = ""
+            st.session_state["partner_section"] = ""
+            app_rerun()
+    with top_cols[1]:
+        st.markdown(f"<div class='partner-window-title'>{partner_name}</div>", unsafe_allow_html=True)
     _render_partner_alerts(partner)
-    tabs = st.tabs(["Planilha", "Tratativas", "Histórico"])
-    with tabs[0]:
+    _render_partner_section_buttons(partner_key)
+    section = st.session_state.get("partner_section", "")
+    if not section:
+        st.info("Selecione Planilha, Tratativa ou Histórico para abrir a janela correspondente.")
+        return
+    st.markdown("<hr class='separator-glow'>", unsafe_allow_html=True)
+    if section == "sheet":
         _render_partner_sheet_controls(state, partner_key)
         _render_partner_table(state, partner_key)
-    with tabs[1]:
+    elif section == "chat":
         _render_partner_chat(state, partner_key)
-    with tabs[2]:
+    elif section == "history":
         _render_partner_history(state, partner_key)
 
 def render_parceiros_controle() -> None:
     user = _auth_current_user()
     allowed = _auth_allowed_partners(user)
     if not allowed:
-        st.warning("Seu usuário não possui permissão para acessar Eiwa ou Alvaz.")
+        st.warning("Seu usuário não possui permissão para acessar IVA ou ALVÁS.")
         return
     state = _partners_load_state()
+    _render_partner_module_css()
     st.markdown("""
-    <div style='background:#111b2a;border:1px solid #1e3a5f;border-top:2px solid #42a5f5;border-radius:10px;
-                padding:18px 20px;margin-bottom:14px;box-shadow:0 8px 22px rgba(0,0,0,.45);'>
-        <div style='color:#42a5f5;font-weight:900;letter-spacing:3px;text-transform:uppercase;font-size:1.25rem;'>
+    <div class='partner-hero'>
+        <div class='partner-hero-title'>
             Parceiros / Controle de Voos e Dados
         </div>
-        <div style='color:#b8c7d9;font-size:.86rem;margin-top:6px;'>
-            Módulo isolado para Eiwa e Alvaz: planilhas, execução, tratativas, prazos, histórico e exportações.
+        <div class='partner-hero-subtitle'>
+            Módulo isolado para IVA e ALVÁS: planilhas CSV, tratativas, prazos, histórico e exportações.
         </div>
     </div>
     """, unsafe_allow_html=True)
-    tabs = st.tabs([PARTNER_KEYS[key] for key in allowed])
-    for tab, partner_key in zip(tabs, allowed):
-        with tab:
-            _render_single_partner(state, partner_key)
+    selected = st.session_state.get("partner_selected", "")
+    if selected not in allowed:
+        selected = ""
+        st.session_state["partner_selected"] = ""
+        st.session_state["partner_section"] = ""
+    if not selected:
+        _render_partner_selection(state, allowed)
+    else:
+        _render_partner_workspace(state, selected)
+
+def _render_partner_mention_notifications() -> None:
+    if not st.session_state.get("logged_in", False):
+        return
+    user = _auth_current_user()
+    if not _auth_can_partners(user):
+        return
+    notes = _partners_mentions_for_user(_partners_load_state(), user)
+    if not notes:
+        return
+    items = "".join(
+        f"<div style='margin-top:6px;'><b>{note['parceira']}</b> · {note['assunto']}<br>"
+        f"<span style='color:#9fb3c8;'>Citado por {note['usuario']} em {note['data']} {note['hora']}</span></div>"
+        for note in notes
+    )
+    st.markdown(
+        f"""
+        <div style='position:fixed;right:22px;bottom:24px;z-index:999999;max-width:360px;
+                    background:linear-gradient(145deg,rgba(17,27,42,.98),rgba(6,12,22,.98));
+                    border:1px solid var(--tmg-primary);border-radius:12px;padding:14px 16px;
+                    box-shadow:0 10px 28px rgba(0,0,0,.5),0 0 18px var(--tmg-primary-glow);'>
+            <div style='color:var(--tmg-primary);font-weight:900;letter-spacing:1.4px;text-transform:uppercase;'>
+                Notificações de tratativas
+            </div>
+            <div style='color:#dce9f8;font-size:.82rem;'>{items}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 
@@ -4275,6 +4703,7 @@ current_user = _auth_current_user()
 show_culture_modules = bool(_auth_allowed_cultures(current_user))
 show_partners_module = _auth_can_partners(current_user)
 show_admin_config = _auth_is_admin(current_user)
+is_partners_page = st.session_state.pagina_ativa == 'Parceiros'
 
 with st.sidebar:
 
@@ -4283,38 +4712,52 @@ with st.sidebar:
     <hr class='separator-glow'>
     """, unsafe_allow_html=True)
 
-    if show_culture_modules:
-        if st.button("📋 Checklist Notas", key="btn_check"):
-            ir_para('Checklist')
+    if is_partners_page and show_partners_module:
+        if _auth_menu_allowed("menu_parceiros", current_user):
+            if st.button("🤝 Parceiros", key="btn_parceiros_home"):
+                st.session_state["partner_selected"] = ""
+                st.session_state["partner_section"] = ""
+                ir_para('Parceiros')
+        if _auth_menu_allowed("menu_controle_dados", current_user):
+            if st.button("📊 Controle de Dados", key="btn_parceiros_controle_dados"):
+                if st.session_state.get("partner_selected"):
+                    st.session_state["partner_section"] = st.session_state.get("partner_section", "") or "sheet"
+                ir_para('Parceiros')
+    else:
+        if show_culture_modules:
+            if _auth_menu_allowed("menu_checklist", current_user) and st.button("📋 Checklist Notas", key="btn_check"):
+                ir_para('Checklist')
 
-        if st.button("📊 Marcador de Grid", key="btn_grid"):
-            ir_para('Grid')
+            if _auth_menu_allowed("menu_grid", current_user) and st.button("📊 Marcador de Grid", key="btn_grid"):
+                ir_para('Grid')
 
-        if st.button("📤 Upload de Imagens", key="btn_upload"):
-            ir_para('Upload')
+            if _auth_menu_allowed("menu_upload", current_user) and st.button("📤 Upload de Imagens", key="btn_upload"):
+                ir_para('Upload')
 
-        if st.button("🗂️ Banco de Dados Sistema", key="btn_bases"):
-            ir_para('Bases')
+            if _auth_menu_allowed("menu_bases", current_user) and st.button("🗂️ Banco de Dados Sistema", key="btn_bases"):
+                ir_para('Bases')
 
-        if st.button("🔄 Sincronizar Dados", key="btn_sync"):
-            ir_para('Sync')
+            if _auth_menu_allowed("menu_sync", current_user) and st.button("🔄 Sincronizar Dados", key="btn_sync"):
+                ir_para('Sync')
 
-        if st.button("🛰️ Gerar Ortomosaicos", key="btn_orto"):
-            ir_para('Ortomosaicos')
+            if _auth_menu_allowed("menu_ortomosaicos", current_user) and st.button("🛰️ Gerar Ortomosaicos", key="btn_orto"):
+                ir_para('Ortomosaicos')
 
-        # NOVO - Botão Análises de Fenotipagem
-        if st.button("📈 Análises de Fenotipagem", key="btn_visualizador"):
-            ir_para('Visualizador')
+            # NOVO - Botão Análises de Fenotipagem
+            if st.button("📈 Análises de Fenotipagem", key="btn_visualizador"):
+                ir_para('Visualizador')
 
-        # NOVO - Botão isolado para fluxo passo a passo de voos para análise
-        if st.button("🛰️ Processos de Voos para Análise", key="btn_processos_voos_analise"):
-            ir_para('VoosDirecionados')
+            # NOVO - Botão isolado para fluxo passo a passo de voos para análise
+            if st.button("🛰️ Processos de Voos para Análise", key="btn_processos_voos_analise"):
+                ir_para('VoosDirecionados')
 
-    if show_partners_module:
-        if st.button("🤝 Parceiros / Controle de Voos e Dados", key="btn_parceiros_controle"):
-            ir_para('Parceiros')
+        if show_partners_module and _auth_menu_allowed("menu_parceiros", current_user):
+            if st.button("🤝 Parceiros / Controle de Voos e Dados", key="btn_parceiros_controle"):
+                st.session_state["partner_selected"] = ""
+                st.session_state["partner_section"] = ""
+                ir_para('Parceiros')
 
-    if show_culture_modules or show_admin_config:
+    if (not is_partners_page) and (show_culture_modules or show_admin_config):
         if st.button("⚙️ Configurações", key="btn_config"):
             ir_para('Config')
 
@@ -6196,7 +6639,7 @@ window.addEventListener('resize', resize);
             )
 
             _temas_disponiveis = {
-                "padrao": "🟠 Padrão do Sistema  —  Dark com laranja (original)",
+                "padrao": "🔵 Padrão do Sistema  —  Dark com cor do tema",
                 "tmg_azul": "🔵 TMG Azul  —  Azul escuro · Cinza · Branco"
             }
             _tema_atual = SYSTEM_CONFIG.get("tema", "padrao")
@@ -11368,6 +11811,8 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                 </div>
             </div>""", unsafe_allow_html=True)
     # FIM NOVO - VISUALIZADOR DE RESULTADOS
+
+_render_partner_mention_notifications()
 
 # ==========================================
 # FOOTER[cite: 1]
