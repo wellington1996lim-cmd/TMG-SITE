@@ -402,6 +402,7 @@ if SYSTEM_CONFIG.get("tema", "padrao") == "tmg_azul":
 # ==========================================
 # HELPER — PROCESSAR ORTOFOTO PARA VISUALIZAÇÃO[cite: 1]
 # ==========================================
+@st.cache_data(show_spinner=False, max_entries=12)
 def processar_ortofoto(file_bytes: bytes, filename: str):
     """Converte qualquer ortofoto para base64 renderizável, suportando imagens gigantes e recuperando Metadados Espaciais para o SHP."""
     ext = Path(filename).suffix.lower()
@@ -417,9 +418,21 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         "orig_height": 0
     }
 
+    def _stretch_band(band):
+        band = np.ma.asarray(band).astype(np.float32).filled(np.nan)
+        valid = band[np.isfinite(band)]
+        if valid.size == 0:
+            return np.zeros(band.shape, dtype=np.uint8)
+        mn = np.nanpercentile(valid, 2)
+        mx = np.nanpercentile(valid, 98)
+        if not np.isfinite(mn) or not np.isfinite(mx) or mx <= mn:
+            return np.zeros(band.shape, dtype=np.uint8)
+        return np.nan_to_num(np.clip((band - mn) / (mx - mn) * 255, 0, 255)).astype(np.uint8)
+
     try:
         # Tenta inicialmente com Rasterio (Obrigatório para GeoTIFF, robusto para JPG/PNG)
         import rasterio
+        from rasterio.enums import Resampling
         from rasterio.io import MemoryFile
         with MemoryFile(file_bytes) as memfile:
             with memfile.open() as src:
@@ -430,25 +443,30 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                 if hasattr(src, 'transform'):
                     spatial_meta["transform"] = src.transform.to_gdal()
 
+                max_dim = _preview_max_dim()
+                ratio = min(1.0, max_dim / max(src.width, src.height))
+                out_width = max(1, int(src.width * ratio))
+                out_height = max(1, int(src.height * ratio))
+                spatial_meta["ratio"] = ratio
+
                 bands = src.count
                 if bands >= 3:
-                    data = src.read([1, 2, 3]).astype(float)
-                    for i in range(3):
-                        mn = np.percentile(data[i], 2)
-                        mx = np.percentile(data[i], 98)
-                        if mx > mn:
-                            data[i] = np.clip((data[i] - mn) / (mx - mn) * 255, 0, 255)
-                        else:
-                            data[i] = 0
-                    arr = np.transpose(data, (1, 2, 0)).astype(np.uint8)
+                    data = src.read(
+                        [1, 2, 3],
+                        out_shape=(3, out_height, out_width),
+                        resampling=Resampling.bilinear,
+                        masked=True
+                    )
+                    arr = np.transpose(np.stack([_stretch_band(data[i]) for i in range(3)]), (1, 2, 0))
                     img = Image.fromarray(arr, 'RGB')
                 else:
-                    data = src.read(1).astype(float)
-                    mn = np.percentile(data, 2)
-                    mx = np.percentile(data, 98)
-                    if mx > mn:
-                        data = np.clip((data - mn) / (mx - mn) * 255, 0, 255)
-                    img = Image.fromarray(data.astype(np.uint8), 'L').convert('RGB')
+                    data = src.read(
+                        1,
+                        out_shape=(out_height, out_width),
+                        resampling=Resampling.bilinear,
+                        masked=True
+                    )
+                    img = Image.fromarray(_stretch_band(data), 'L').convert('RGB')
     except ImportError:
         try:
             img = Image.open(BytesIO(file_bytes))
@@ -960,7 +978,7 @@ TV_RETURNS_DIR = TV_ROOT / "retornos"
 TV_MANIFEST_PATH = TV_ROOT / "manifest.json"
 MOSAIC_LIBRARY_DIR = SYSTEM_DATABASE_DIR / "mosaicos_importados"
 MOSAIC_MANIFEST_PATH = MOSAIC_LIBRARY_DIR / "manifest.json"
-MOSAIC_UPLOAD_TYPES = ["png", "jpg", "jpeg", "tif", "tiff", "geotiff", "img", "ecw", "jp2"]
+MOSAIC_UPLOAD_TYPES = ["png", "jpg", "jpeg", "tif", "tiff", "geotiff", "geotif", "img", "ecw", "jp2"]
 
 def _tv_safe_name(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(value).strip())
@@ -3252,7 +3270,7 @@ with main_container:
 
         chk_file = st.file_uploader(
             "Selecione a ortofoto para anotação",
-            type=["png","jpg","jpeg","tif","tiff","img","ecw","jp2"],
+            type=MOSAIC_UPLOAD_TYPES,
             key="chk_orto_uploader",
             help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW"
         )
