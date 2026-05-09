@@ -1220,6 +1220,31 @@ def _mosaic_input_bytes(uploaded, selected_option: str, origem: str) -> tuple:
         return raw, uploaded.name
     return _mosaic_bytes_from_selection(selected_option)
 
+def _resettable_ortho_uploader(label: str, key: str, accept_multiple_files: bool = False, help: str = ""):
+    reset_key = f"{key}_reset"
+    st.session_state.setdefault(reset_key, 0)
+    widget_key = f"{key}_{st.session_state[reset_key]}"
+    uploaded = st.file_uploader(
+        label,
+        type=MOSAIC_UPLOAD_TYPES,
+        accept_multiple_files=accept_multiple_files,
+        key=widget_key,
+        help=help
+    )
+    has_upload = bool(uploaded) if accept_multiple_files else uploaded is not None
+    if has_upload:
+        _, clear_col = st.columns([3, 1])
+        with clear_col:
+            if st.button("🗑️ Excluir e importar nova", key=f"{key}_clear_{st.session_state[reset_key]}", use_container_width=True):
+                st.session_state[reset_key] += 1
+                app_rerun()
+    return uploaded
+
+def _uploaded_ortho_bytes(uploaded) -> tuple:
+    if uploaded is None:
+        return None, ""
+    return uploaded.getbuffer().tobytes(), uploaded.name
+
 def _tv_default_manifest() -> dict:
     return {
         "projects": [],
@@ -3352,24 +3377,12 @@ with main_container:
             🗺️ Visualizador de Ortofoto · Anotação de Parcelas
         </div>""", unsafe_allow_html=True)
 
-        chk_file = st.file_uploader(
+        chk_file = _resettable_ortho_uploader(
             "Selecione a ortofoto para anotação",
-            type=MOSAIC_UPLOAD_TYPES,
             key="chk_orto_uploader",
             help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW"
         )
-        chk_library = _mosaic_single_select("Ou usar mosaico já importado", key="chk_mosaic_library")
-        if chk_library:
-            _, delete_mosaic_col = st.columns([3, 1])
-            with delete_mosaic_col:
-                if st.button("🗑️ Excluir mosaico", key="chk_delete_mosaic", use_container_width=True):
-                    ok, msg = _mosaic_delete(chk_library)
-                    if ok:
-                        st.success(msg)
-                    else:
-                        st.warning(msg)
-                    app_rerun()
-        chk_bytes, chk_name = _mosaic_input_bytes(chk_file, chk_library, "Checklist")
+        chk_bytes, chk_name = _uploaded_ortho_bytes(chk_file)
 
         if chk_bytes:
             with st.spinner("Carregando ortofoto..."):
@@ -4419,30 +4432,26 @@ updateGridSelect();
     elif st.session_state.pagina_ativa == 'Grid':
         st.subheader("📊 Visualizador de Ortofoto")
 
-        orto_file = st.file_uploader(
+        orto_file = _resettable_ortho_uploader(
             "Selecione a ortofoto",
-            type=MOSAIC_UPLOAD_TYPES,
             key="orto_uploader",
             help="Formatos suportados: PNG, JPG, TIF/GeoTIFF, JP2, IMG"
         )
-        grid_library = _mosaic_single_select("Ou usar mosaico já importado", key="grid_mosaic_library")
 
         grid_prefill_path = st.session_state.get("grid_prefill_ortho_path", "")
         grid_prefill_name = st.session_state.get("grid_prefill_ortho_name", "")
         grid_prefill_available = bool(grid_prefill_path and Path(grid_prefill_path).exists())
-        if grid_prefill_available and not orto_file and not grid_library:
+        if grid_prefill_available and not orto_file:
             st.info(f"Ortofoto recebida do módulo Voos Direcionados: {grid_prefill_name or Path(grid_prefill_path).name}")
             if st.button("Limpar ortofoto recebida", key="btn_clear_grid_prefill"):
                 st.session_state.pop("grid_prefill_ortho_path", None)
                 st.session_state.pop("grid_prefill_ortho_name", None)
                 app_rerun()
 
-        if orto_file or grid_library or grid_prefill_available:
+        if orto_file or grid_prefill_available:
             with st.spinner("Carregando ortofoto de alta resolução... (Isso pode levar alguns segundos)"):
                 if orto_file:
-                    file_bytes, orto_nome_exibicao = _mosaic_input_bytes(orto_file, "", "Grid")
-                elif grid_library:
-                    file_bytes, orto_nome_exibicao = _mosaic_input_bytes(None, grid_library, "Grid")
+                    file_bytes, orto_nome_exibicao = _uploaded_ortho_bytes(orto_file)
                 else:
                     file_bytes = Path(grid_prefill_path).read_bytes()
                     orto_nome_exibicao = grid_prefill_name or Path(grid_prefill_path).name
@@ -5423,14 +5432,12 @@ window.addEventListener('resize', resize);
             </div>""", unsafe_allow_html=True)
 
             # NOVO - Upload de imagem para contagem (mesmo formato do Checklist)
-            cnt_file = st.file_uploader(
+            cnt_file = _resettable_ortho_uploader(
                 "📷 Carregar Ortofoto para Contagem",
-                type=MOSAIC_UPLOAD_TYPES,
                 key="cnt_orto_uploader",
                 help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW"
             )
-            cnt_library = _mosaic_single_select("Ou usar mosaico já importado", key="cnt_mosaic_library")
-            cnt_bytes, cnt_name = _mosaic_input_bytes(cnt_file, cnt_library, "Contagem")
+            cnt_bytes, cnt_name = _uploaded_ortho_bytes(cnt_file)
 
             if cnt_bytes:
                 with st.spinner("Carregando ortofoto..."):
@@ -6250,14 +6257,12 @@ new ResizeObserver(() => drawAll()).observe(vc);
                 🌾 Pendoamento · Visualizador de Ortofoto por Parcela
             </div>""", unsafe_allow_html=True)
 
-            pend_file = st.file_uploader(
+            pend_file = _resettable_ortho_uploader(
                 "📷 Carregar Ortofoto para Pendoamento",
-                type=MOSAIC_UPLOAD_TYPES,
                 key="pend_orto_uploader",
                 help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW"
             )
-            pend_library = _mosaic_single_select("Ou usar mosaico já importado", key="pend_mosaic_library")
-            pend_bytes, pend_name = _mosaic_input_bytes(pend_file, pend_library, "Pendoamento")
+            pend_bytes, pend_name = _uploaded_ortho_bytes(pend_file)
 
             if pend_bytes:
                 with st.spinner("Carregando ortofoto para pendoamento..."):
@@ -7206,24 +7211,17 @@ new ResizeObserver(()=>drawAll()).observe(vc);
             meta_dtp = ""
             st.caption("O limite fica travado em 50% do teto informado. Depois de anexar, use Próxima/Anterior no visualizador para conferir cada data.")
 
-            cron_files = st.file_uploader(
+            cron_files = _resettable_ortho_uploader(
                 "📷 Anexar ortofotos cronológicas de pendoamento (até 10)",
-                type=MOSAIC_UPLOAD_TYPES,
                 accept_multiple_files=True,
                 key="pend_cron_ortos",
                 help="Use ortofotos da mesma área, em datas diferentes. O grid marcado será mantido fixo em todas."
             )
-            cron_library = _mosaic_multi_select("Ou usar mosaicos já importados na análise cronológica", key="pend_cron_mosaic_library", max_items=10)
 
             cron_items = []
             for cron_file in cron_files or []:
                 raw = cron_file.getbuffer().tobytes()
-                _mosaic_register_bytes(raw, cron_file.name, "Pendoamento cronológico")
                 cron_items.append({"name": cron_file.name, "raw": raw})
-            for selected_mosaic in cron_library:
-                raw, name = _mosaic_bytes_from_selection(selected_mosaic)
-                if raw:
-                    cron_items.append({"name": name, "raw": raw})
 
             if cron_items:
                 selected_cron_items = cron_items[:10]
@@ -8312,14 +8310,12 @@ new ResizeObserver(() => drawAll()).observe(viewer);
                 ✅ Qualidade de Parcelas · Detecção de Falhas Lineares
             </div>""", unsafe_allow_html=True)
 
-            qual_file = st.file_uploader(
+            qual_file = _resettable_ortho_uploader(
                 "📷 Carregar Ortofoto para Análise de Qualidade",
-                type=MOSAIC_UPLOAD_TYPES,
                 key="qual_orto_uploader",
                 help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW"
             )
-            qual_library = _mosaic_single_select("Ou usar mosaico já importado", key="qual_mosaic_library")
-            qual_bytes, qual_name = _mosaic_input_bytes(qual_file, qual_library, "Qualidade")
+            qual_bytes, qual_name = _uploaded_ortho_bytes(qual_file)
 
             if qual_bytes:
                 with st.spinner("Carregando ortofoto..."):
