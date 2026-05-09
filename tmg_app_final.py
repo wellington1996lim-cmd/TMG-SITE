@@ -17,6 +17,9 @@ import cv2
 import warnings
 import hashlib
 from datetime import datetime, date
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.request import Request, urlopen
 import pandas as pd
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -364,7 +367,8 @@ PARTNERS_ROOT = SYSTEM_DATABASE_DIR / "parceiros_controle_voos_dados"
 PARTNERS_STATE_PATH = PARTNERS_ROOT / "parceiros_estado.json"
 PARTNER_KEYS = {"eiwa": "Eiwa", "alvaz": "Alvaz"}
 PARTNER_STATUS_OPTIONS = ["Executado", "Não Executado", "Pendente", "Em andamento"]
-PARTNER_TREATMENT_STATUS = ["Aberto", "Em andamento", "Resolvido", "Atrasado"]
+PARTNER_TREATMENT_STATUS = ["Aberto", "Em andamento", "Concluído", "Resolvido", "Atrasado"]
+PARTNER_TREATMENT_DONE = {"Concluído", "Resolvido"}
 PARTNER_INTERNAL_COLUMNS = ["Status de Execução", "Descrição / Observação", "Última Alteração", "Usuário Responsável"]
 PARTNER_ROW_ID = "__tmg_row_id"
 
@@ -574,7 +578,87 @@ def _partners_normalize_sheet_url(link: str) -> str:
         if "gid=" in raw:
             gid = raw.split("gid=", 1)[1].split("&", 1)[0].split("#", 1)[0]
         return f"{base}/export?format=xlsx" + (f"&gid={gid}" if gid else "")
+    lower = raw.lower()
+    if raw.startswith(("http://", "https://")) and any(host in lower for host in ("sharepoint.com", "1drv.ms", "onedrive.live.com")):
+        parsed = urlparse(raw)
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        query["download"] = ["1"]
+        return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
     return raw
+
+def _partners_source_name_from_url(url: str) -> str:
+    parsed = urlparse(str(url or ""))
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    file_name = (query.get("file") or [""])[0]
+    if file_name:
+        return file_name
+    path_name = Path(parsed.path).name
+    return path_name or str(url or "")
+
+def _partners_is_csv_source(source_name: str, content_type: str = "") -> bool:
+    lower_name = str(source_name or "").lower()
+    lower_type = str(content_type or "").lower()
+    return (
+        lower_name.endswith(".csv")
+        or "format=csv" in lower_name
+        or "output=csv" in lower_name
+        or "text/csv" in lower_type
+        or "application/csv" in lower_type
+    )
+
+def _partners_looks_like_login_page(final_url: str, content_type: str, payload: bytes) -> bool:
+    lower_url = str(final_url or "").lower()
+    lower_type = str(content_type or "").lower()
+    if "login.microsoftonline.com" in lower_url or "/oauth2/" in lower_url:
+        return True
+    if "text/html" not in lower_type:
+        return False
+    sample = payload[:6000].decode("utf-8", errors="ignore").lower()
+    return any(marker in sample for marker in ("microsoft", "sign in", "entrar", "login", "oauth2", "saml"))
+
+def _partners_friendly_import_error(exc, source: str = "") -> str:
+    text = f"{exc} {source}".lower()
+    if any(marker in text for marker in ("sharepoint_auth_required", "401", "403", "unauthorized", "forbidden", "login.microsoftonline.com")):
+        return (
+            "A planilha online está pedindo login/permissão no SharePoint. "
+            "No Streamlit Cloud ela só será lida se o arquivo estiver compartilhado para download por link. "
+            "Compartilhe como acesso por link ou envie o Excel/CSV no campo de upload abaixo."
+        )
+    if any(marker in text for marker in ("excel file format cannot be determined", "unsupported format", "file is not a zip file")):
+        return (
+            "O link retornou uma página que não parece ser uma planilha Excel/CSV direta. "
+            "Use um link compartilhado para download do SharePoint ou envie o arquivo Excel/CSV no campo de upload abaixo."
+        )
+    if any(marker in text for marker in ("urlopen error", "timed out", "temporary failure", "name or service not known")):
+        return "Não consegui acessar a planilha online agora. Confira o link ou envie o arquivo Excel/CSV no campo de upload abaixo."
+    return "Não consegui importar a planilha. Confira se o link é direto para Excel/CSV ou envie o arquivo no campo de upload abaixo."
+
+def _partners_read_sheet_bytes(payload: bytes, source_name: str, content_type: str = "") -> pd.DataFrame:
+    stream = BytesIO(payload)
+    if _partners_is_csv_source(source_name, content_type):
+        return pd.read_csv(stream, sep=None, engine="python")
+    return pd.read_excel(stream)
+
+def _partners_fetch_online_sheet(url: str) -> tuple:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (TMG Streamlit)",
+        "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/octet-stream,*/*",
+    }
+    request = Request(url, headers=headers)
+    try:
+        with urlopen(request, timeout=60) as response:
+            final_url = response.geturl()
+            content_type = response.headers.get("content-type", "")
+            payload = response.read()
+    except HTTPError as exc:
+        if exc.code in (401, 403):
+            raise PermissionError("sharepoint_auth_required") from exc
+        raise
+    except URLError:
+        raise
+    if _partners_looks_like_login_page(final_url, content_type, payload):
+        raise PermissionError("sharepoint_auth_required")
+    return payload, final_url, content_type
 
 def _partners_clean_dataframe(df) -> pd.DataFrame:
     if df is None:
@@ -591,14 +675,34 @@ def _partners_read_online_sheet(link: str) -> tuple:
     if not url:
         return None, "Cole o link da planilha online."
     try:
-        lower = url.lower()
-        if lower.endswith(".csv") or "format=csv" in lower or "output=csv" in lower:
-            df = pd.read_csv(url)
+        if url.startswith(("http://", "https://")):
+            payload, final_url, content_type = _partners_fetch_online_sheet(url)
+            source_name = _partners_source_name_from_url(url) or _partners_source_name_from_url(final_url)
+            df = _partners_read_sheet_bytes(payload, source_name, content_type)
         else:
-            df = pd.read_excel(url)
+            if _partners_is_csv_source(url):
+                df = pd.read_csv(url, sep=None, engine="python")
+            else:
+                df = pd.read_excel(url)
         return _partners_clean_dataframe(df), ""
     except Exception as exc:
-        return None, f"Falha ao importar planilha online: {exc}"
+        return None, _partners_friendly_import_error(exc, url)
+
+def _partners_read_uploaded_sheet(uploaded_file) -> tuple:
+    if uploaded_file is None:
+        return None, "Cole o link da planilha online ou envie um arquivo Excel/CSV."
+    try:
+        df = _partners_read_sheet_bytes(uploaded_file.getvalue(), uploaded_file.name)
+        return _partners_clean_dataframe(df), ""
+    except Exception as exc:
+        return None, _partners_friendly_import_error(exc, getattr(uploaded_file, "name", "arquivo enviado"))
+
+def _partners_read_sheet_source(link: str, uploaded_file=None) -> tuple:
+    if uploaded_file is not None:
+        df, err = _partners_read_uploaded_sheet(uploaded_file)
+        return df, err, f"arquivo enviado: {uploaded_file.name}"
+    df, err = _partners_read_online_sheet(link)
+    return df, err, "link online"
 
 def _partners_ensure_row_ids(rows: list) -> list:
     prepared = []
@@ -758,7 +862,7 @@ def _partners_deadline_alerts(chat_rows: list) -> list:
     for item in chat_rows or []:
         status = item.get("status", "Aberto")
         prazo_raw = item.get("prazo", "")
-        if status == "Resolvido":
+        if status in PARTNER_TREATMENT_DONE:
             alerts.append(("Verde", "Tratativa resolvida", item))
             continue
         if not prazo_raw:
@@ -3878,6 +3982,13 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
     partner_name = PARTNER_KEYS[partner_key]
     st.markdown("##### Importação da planilha online")
     link = st.text_input("Link da planilha Excel online", value=partner.get("link", ""), key=f"partner_link_{partner_key}")
+    uploaded_sheet = st.file_uploader(
+        "Ou envie a planilha Excel/CSV",
+        type=["xlsx", "xls", "csv"],
+        key=f"partner_upload_sheet_{partner_key}",
+        help="Use esta opção quando o SharePoint pedir login ou bloquear o link online.",
+    )
+    st.caption("Links do SharePoint precisam estar compartilhados para download por link. Se a planilha pedir login, envie o arquivo Excel/CSV aqui.")
     c1, c2, c3 = st.columns(3)
     with c1:
         import_clicked = st.button("📥 Importar Planilha", key=f"partner_import_{partner_key}", use_container_width=True)
@@ -3887,25 +3998,25 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
         save_internal_clicked = st.button("💾 Salvar Dados Internos", key=f"partner_save_internal_top_{partner_key}", use_container_width=True)
 
     if import_clicked:
-        df, err = _partners_read_online_sheet(link)
+        df, err, source_label = _partners_read_sheet_source(link, uploaded_sheet)
         if err:
-            st.error(err)
+            st.warning(err)
         else:
             prepared, original_columns = _partners_prepare_import_df(df, _auth_user_name())
             partner["link"] = link.strip()
             partner["columns"] = original_columns
             partner["rows"] = prepared.to_dict(orient="records")
-            partner["last_import"] = {"data_hora": _now_human(), "usuario": _auth_user_name(), "linhas": len(prepared)}
+            partner["last_import"] = {"data_hora": _now_human(), "usuario": _auth_user_name(), "linhas": len(prepared), "fonte": source_label}
             partner["diff_rows"] = []
-            _partners_add_history(state, partner_key, "Planilha importada", f"{partner_name}: {len(prepared)} linhas")
+            _partners_add_history(state, partner_key, "Planilha importada", f"{partner_name}: {len(prepared)} linhas · {source_label}")
             _partners_save_state(state)
             st.success("Planilha importada e espelhada no sistema.")
             app_rerun()
 
     if update_clicked:
-        df, err = _partners_read_online_sheet(link or partner.get("link", ""))
+        df, err, source_label = _partners_read_sheet_source(link or partner.get("link", ""), uploaded_sheet)
         if err:
-            st.error(err)
+            st.warning(err)
         else:
             old_df = _partners_rows_to_df(partner)
             new_clean = _partners_clean_dataframe(df)
@@ -3919,6 +4030,7 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
             partner["link"] = (link or partner.get("link", "")).strip()
             partner["columns"] = original_columns
             partner["rows"] = prepared.to_dict(orient="records")
+            summary["fonte"] = source_label
             partner["last_update"] = summary
             partner["diff_rows"] = diff_rows[:500]
             _partners_add_history(
@@ -3947,7 +4059,7 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
     partner = state["partners"][partner_key]
     df = _partners_rows_to_df(partner)
     if df.empty or len(df) == 0:
-        st.info("Importe uma planilha online para iniciar a tabela espelhada.")
+        st.info("Importe uma planilha online ou envie um Excel/CSV para iniciar a tabela espelhada.")
         return
 
     st.markdown("##### Tabela espelhada estilo Excel")
@@ -4020,6 +4132,7 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
         st.json({
             "Última atualização": last_update.get("data_hora", ""),
             "Usuário que atualizou": last_update.get("usuario", ""),
+            "Fonte": last_update.get("fonte", ""),
             "Linhas novas": last_update.get("linhas_novas", 0),
             "Linhas alteradas": last_update.get("linhas_alteradas", 0),
             "Linhas removidas": last_update.get("linhas_removidas", 0),
@@ -4063,8 +4176,11 @@ def _render_partner_chat(state: dict, partner_key: str) -> None:
             st.success("Tratativa registrada.")
             app_rerun()
 
-    for item in partner.get("chat", [])[:30]:
-        color = "#66bb6a" if item.get("status") == "Resolvido" else "#ffd54f" if item.get("status") == "Em andamento" else "#ff8c00"
+    for idx, item in enumerate(partner.get("chat", [])[:30]):
+        chat_id = item.get("id") or hashlib.sha1(f"{partner_key}-{idx}-{item.get('assunto','')}-{item.get('data','')}".encode()).hexdigest()[:12]
+        current_status = item.get("status", "Aberto")
+        status_options = PARTNER_TREATMENT_STATUS if current_status in PARTNER_TREATMENT_STATUS else [current_status] + PARTNER_TREATMENT_STATUS
+        color = "#66bb6a" if current_status in PARTNER_TREATMENT_DONE else "#ffd54f" if current_status == "Em andamento" else "#ff5252" if current_status == "Atrasado" else "#ff8c00"
         st.markdown(
             f"<div style='background:#151515;border:1px solid #333;border-left:4px solid {color};border-radius:10px;padding:10px 12px;margin:8px 0;'>"
             f"<div style='color:{color};font-weight:700;'>{item.get('assunto','Sem assunto')} · {item.get('status','')}</div>"
@@ -4073,6 +4189,34 @@ def _render_partner_chat(state: dict, partner_key: str) -> None:
             f"</div>",
             unsafe_allow_html=True,
         )
+        sc1, sc2, sc3 = st.columns([1.4, 1, 2.4])
+        with sc1:
+            new_status = st.selectbox(
+                "Alterar status",
+                status_options,
+                index=status_options.index(current_status),
+                key=f"partner_chat_status_{partner_key}_{chat_id}",
+            )
+        with sc2:
+            if st.button("Salvar status", key=f"partner_chat_save_status_{partner_key}_{chat_id}", use_container_width=True):
+                if new_status != current_status:
+                    item["status"] = new_status
+                    item["status_atualizado_por"] = _auth_user_name()
+                    item["status_atualizado_em"] = _now_human()
+                    _partners_add_history(
+                        state,
+                        partner_key,
+                        "Status da tratativa alterado",
+                        f"{item.get('assunto','Sem assunto')}: {current_status} -> {new_status}"
+                    )
+                    _partners_save_state(state)
+                    st.success("Status da tratativa atualizado.")
+                    app_rerun()
+                else:
+                    st.info("Status já estava selecionado.")
+        with sc3:
+            if item.get("status_atualizado_em"):
+                st.caption(f"Última atualização: {item.get('status_atualizado_em')} por {item.get('status_atualizado_por','')}")
 
 def _render_partner_history(state: dict, partner_key: str) -> None:
     partner = state["partners"][partner_key]

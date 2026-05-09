@@ -3,6 +3,7 @@ pillow==10.4.0
 numpy
 pandas
 openpyxl
+xlrd
 opencv-python-headless
 rasterio
 geopandas
