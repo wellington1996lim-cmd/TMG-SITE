@@ -271,10 +271,10 @@ def _int_setting(name: str, default: int, min_value: int, max_value: int) -> int
     return max(min_value, min(max_value, value))
 
 def _preview_max_dim() -> int:
-    return _int_setting("TMG_PREVIEW_MAX_DIM", 8192, 1024, 8192)
+    return _int_setting("TMG_PREVIEW_MAX_DIM", 6144, 1024, 8192)
 
 def _preview_jpeg_quality() -> int:
-    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 96, 70, 97)
+    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 95, 70, 97)
 
 def _looks_like_windows_drive_path(raw: str) -> bool:
     return len(raw) > 2 and raw[1] == ":" and raw[2:3] in ("\\", "/")
