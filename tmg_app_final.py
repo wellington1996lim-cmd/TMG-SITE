@@ -55,6 +55,40 @@ components.html(
     """
 <script>
 (function () {
+  function patchDomForTranslate(win) {
+    try {
+      if (!win || win.__tmgDomPatchInstalled || !win.Node || !win.Node.prototype) {
+        return;
+      }
+
+      const nodeProto = win.Node.prototype;
+      const nativeRemoveChild = nodeProto.removeChild;
+      const nativeInsertBefore = nodeProto.insertBefore;
+
+      nodeProto.removeChild = function (child) {
+        if (child && child.parentNode !== this) {
+          return child;
+        }
+        return nativeRemoveChild.call(this, child);
+      };
+
+      nodeProto.insertBefore = function (newNode, referenceNode) {
+        if (referenceNode && referenceNode.parentNode !== this) {
+          return this.appendChild(newNode);
+        }
+        return nativeInsertBefore.call(this, newNode, referenceNode);
+      };
+
+      Object.defineProperty(win, "__tmgDomPatchInstalled", {
+        value: true,
+        configurable: false,
+        writable: false
+      });
+    } catch (err) {
+      // Browser extensions and hosted iframes can block prototype access.
+    }
+  }
+
   function protectOneDocument(doc) {
     const root = doc.documentElement;
     root.setAttribute("lang", "pt-BR");
@@ -92,6 +126,7 @@ components.html(
     try {
       let current = window;
       for (let i = 0; i < 4; i += 1) {
+        patchDomForTranslate(current);
         protectOneDocument(current.document);
         if (current === current.parent) {
           break;
