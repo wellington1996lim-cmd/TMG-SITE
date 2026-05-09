@@ -271,10 +271,10 @@ def _int_setting(name: str, default: int, min_value: int, max_value: int) -> int
     return max(min_value, min(max_value, value))
 
 def _preview_max_dim() -> int:
-    return _int_setting("TMG_PREVIEW_MAX_DIM", 4096, 1024, 8192)
+    return _int_setting("TMG_PREVIEW_MAX_DIM", 8192, 1024, 8192)
 
 def _preview_jpeg_quality() -> int:
-    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 90, 70, 97)
+    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 96, 70, 97)
 
 def _looks_like_windows_drive_path(raw: str) -> bool:
     return len(raw) > 2 and raw[1] == ":" and raw[2:3] in ("\\", "/")
@@ -429,6 +429,9 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
             return np.zeros(band.shape, dtype=np.uint8)
         return np.nan_to_num(np.clip((band - mn) / (mx - mn) * 255, 0, 255)).astype(np.uint8)
 
+    def _preserve_uint8_band(band):
+        return np.ma.asarray(band).filled(0).astype(np.uint8, copy=False)
+
     try:
         # Tenta inicialmente com Rasterio (Obrigatório para GeoTIFF, robusto para JPG/PNG)
         import rasterio
@@ -449,24 +452,33 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                 out_height = max(1, int(src.height * ratio))
                 spatial_meta["ratio"] = ratio
 
+                resampling_filter = getattr(Resampling, "lanczos", Resampling.bilinear)
                 bands = src.count
                 if bands >= 3:
+                    band_indexes = [1, 2, 3]
                     data = src.read(
-                        [1, 2, 3],
+                        band_indexes,
                         out_shape=(3, out_height, out_width),
-                        resampling=Resampling.bilinear,
+                        resampling=resampling_filter,
                         masked=True
                     )
-                    arr = np.transpose(np.stack([_stretch_band(data[i]) for i in range(3)]), (1, 2, 0))
+                    selected_dtypes = [np.dtype(src.dtypes[index - 1]) for index in band_indexes]
+                    if all(dtype == np.dtype("uint8") for dtype in selected_dtypes):
+                        arr = np.transpose(np.stack([_preserve_uint8_band(data[i]) for i in range(3)]), (1, 2, 0))
+                    else:
+                        arr = np.transpose(np.stack([_stretch_band(data[i]) for i in range(3)]), (1, 2, 0))
                     img = Image.fromarray(arr, 'RGB')
                 else:
                     data = src.read(
                         1,
                         out_shape=(out_height, out_width),
-                        resampling=Resampling.bilinear,
+                        resampling=resampling_filter,
                         masked=True
                     )
-                    img = Image.fromarray(_stretch_band(data), 'L').convert('RGB')
+                    if np.dtype(src.dtypes[0]) == np.dtype("uint8"):
+                        img = Image.fromarray(_preserve_uint8_band(data), 'L').convert('RGB')
+                    else:
+                        img = Image.fromarray(_stretch_band(data), 'L').convert('RGB')
     except ImportError:
         try:
             img = Image.open(BytesIO(file_bytes))
@@ -526,7 +538,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         img = img.resize((int(img.width * ratio), int(img.height * ratio)), resample_filter)
 
     buf = BytesIO()
-    img.save(buf, format='JPEG', quality=_preview_jpeg_quality(), subsampling=0, optimize=True)
+    img.save(buf, format='JPEG', quality=_preview_jpeg_quality(), subsampling=0, optimize=True, progressive=True)
     b64 = base64.b64encode(buf.getvalue()).decode()
     
     return b64, img.size, None, spatial_meta
@@ -1685,7 +1697,7 @@ function draw(){{
   ctx.restore();
 }}
 img.onload=()=>{{ imgW=img.width; imgH=img.height; resize(); fit(); }};
-img.src='data:image/png;base64,{b64}';
+img.src='data:image/jpeg;base64,{b64}';
 window.addEventListener('resize',resize);
 cv.addEventListener('wheel',e=>{{ e.preventDefault(); const f=e.deltaY<0?1.18:.84; const r=cv.getBoundingClientRect(); const mx=e.clientX-r.left, my=e.clientY-r.top; const ix=(mx-ox)/sc, iy=(my-oy)/sc; sc=Math.max(.05,Math.min(40,sc*f)); ox=mx-ix*sc; oy=my-iy*sc; draw(); }},{{passive:false}});
 cv.addEventListener('mousedown',e=>{{
@@ -5878,7 +5890,7 @@ img.onload = () => {{
   ox = (W - imgW*sc)/2; oy = (H - imgH*sc)/2;
   drawAll();
 }};
-img.src = 'data:image/png;base64,' + IMG_B64;
+img.src = 'data:image/jpeg;base64,' + IMG_B64;
 
 // Pan & Zoom
 vc.addEventListener('wheel', e => {{
@@ -6986,7 +6998,7 @@ function drawAll() {
 }
 
 img.onload=()=>{ imgW=img.width; imgH=img.height; fitView(); };
-img.src='data:image/png;base64,'+IMG_B64;
+img.src='data:image/jpeg;base64,'+IMG_B64;
 
 vc.addEventListener('wheel', e=>{
   e.preventDefault();
@@ -9899,7 +9911,7 @@ img.onload=()=>{{
   loadParcelAdjustments();
   drawAll();
 }};
-img.src='data:image/png;base64,'+IMG_B64;
+img.src='data:image/jpeg;base64,'+IMG_B64;
 
 // ── Pan & Zoom ────────────────────────────────────────────────────────────
 vc.addEventListener('wheel',e=>{{
