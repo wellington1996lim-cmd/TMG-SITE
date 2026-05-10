@@ -4943,32 +4943,39 @@ def _render_partner_workspace(state: dict, partner_key: str) -> None:
         _render_partner_history(state, partner_key)
 
 def render_parceiros_controle() -> None:
-    user = _auth_current_user()
-    allowed = _auth_allowed_partners(user)
-    if not allowed:
-        st.warning("Seu usuário não possui permissão para acessar EIWA ou ALVAZ.")
-        return
-    state = _partners_load_state()
-    _render_partner_module_css()
-    st.markdown("""
-    <div class='partner-hero'>
-        <div class='partner-hero-title'>
-            Parceiros / Controle de Voos e Dados
+    try:
+        user = _auth_current_user()
+        allowed = _auth_allowed_partners(user)
+        if not allowed:
+            st.warning("Seu usuário não possui permissão para acessar EIWA ou ALVAZ.")
+            return
+        state = _partners_load_state()
+        _render_partner_module_css()
+        st.markdown("""
+        <div class='partner-hero'>
+            <div class='partner-hero-title'>
+                Parceiros / Controle de Voos e Dados
+            </div>
+            <div class='partner-hero-subtitle'>
+                Módulo isolado para EIWA e ALVAZ: planilhas, tratativas, prazos, histórico e exportações.
+            </div>
         </div>
-        <div class='partner-hero-subtitle'>
-            Módulo isolado para EIWA e ALVAZ: planilhas, tratativas, prazos, histórico e exportações.
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    selected = st.session_state.get("partner_selected", "")
-    if selected not in allowed:
-        selected = ""
-        st.session_state["partner_selected"] = ""
-        st.session_state["partner_section"] = ""
-    if not selected:
-        _render_partner_selection(state, allowed)
-    else:
-        _render_partner_workspace(state, selected)
+        """, unsafe_allow_html=True)
+        selected = st.session_state.get("partner_selected", "")
+        if selected not in allowed:
+            selected = ""
+            st.session_state["partner_selected"] = ""
+            st.session_state["partner_section"] = ""
+        if not selected:
+            _render_partner_selection(state, allowed)
+        else:
+            _render_partner_workspace(state, selected)
+    except Exception:
+        st.warning("Não foi possível abrir o módulo de Parceiros agora. Volte para a seleção de parceiros e tente novamente.")
+        if st.button("Reabrir módulo Parceiros", key="partner_recover_safe", use_container_width=True):
+            st.session_state["partner_selected"] = ""
+            st.session_state["partner_section"] = ""
+            app_rerun()
 
 def _render_partner_mention_notifications() -> None:
     if not st.session_state.get("logged_in", False):
