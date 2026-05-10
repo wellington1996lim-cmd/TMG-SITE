@@ -18,6 +18,7 @@ import warnings
 import hashlib
 import re
 import subprocess
+import sqlite3
 from datetime import datetime, date
 import pandas as pd
 
@@ -5080,116 +5081,531 @@ def _save_uploaded_files_generic(files, target_dir: Path) -> tuple:
         })
     return saved, total_size
 
-def _render_orthomosaic_generator() -> None:
-    st.subheader("🛰️ Geração de Ortomosaicos")
-    st.info("Estrutura preparada para processamento externo com Docker/WebODM/OpenDroneMap sem travar o Streamlit.")
+ORTHOMOSAIC_QUALITY_PRESETS = {
+    "Alta qualidade": {
+        "resolution_cm": 2,
+        "feature_quality": "ultra",
+        "pc_quality": "ultra",
+        "mesh_depth": 13,
+        "min_features": 12000,
+        "matcher_neighbors": 8,
+        "resize_to": 0,
+        "extra_args": "--dsm --dtm --orthophoto-compression NONE",
+        "descricao": "Prioriza nitidez, densidade de pontos e GeoTIFF final com menor perda.",
+    },
+    "Média qualidade": {
+        "resolution_cm": 5,
+        "feature_quality": "high",
+        "pc_quality": "medium",
+        "mesh_depth": 11,
+        "min_features": 8000,
+        "matcher_neighbors": 6,
+        "resize_to": 3000,
+        "extra_args": "--dsm",
+        "descricao": "Equilibra qualidade visual e tempo de processamento.",
+    },
+    "Baixa/leve": {
+        "resolution_cm": 10,
+        "feature_quality": "medium",
+        "pc_quality": "low",
+        "mesh_depth": 9,
+        "min_features": 4000,
+        "matcher_neighbors": 4,
+        "resize_to": 2000,
+        "extra_args": "--fast-orthophoto",
+        "descricao": "Prioriza velocidade e arquivos menores para testes ou máquinas leves.",
+    },
+}
 
+def _orthomosaic_db_path() -> Path:
+    root = SYSTEM_DATABASE_DIR / "ortomosaicos_jobs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "ortomosaic_jobs.sqlite"
+
+def _orthomosaic_init_db() -> None:
+    db_path = _orthomosaic_db_path()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ortomosaic_jobs (
+                job_id TEXT PRIMARY KEY,
+                nome TEXT,
+                pasta_entrada TEXT,
+                pasta_saida TEXT,
+                qualidade TEXT,
+                status TEXT,
+                caminho_ortomosaico TEXT,
+                modo_execucao TEXT,
+                criado_em TEXT,
+                atualizado_em TEXT
+            )
+        """)
+        conn.commit()
+
+def _orthomosaic_upsert_job(record: dict) -> None:
+    _orthomosaic_init_db()
+    with sqlite3.connect(_orthomosaic_db_path()) as conn:
+        conn.execute(
+            """
+            INSERT INTO ortomosaic_jobs
+                (job_id, nome, pasta_entrada, pasta_saida, qualidade, status, caminho_ortomosaico, modo_execucao, criado_em, atualizado_em)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                nome=excluded.nome,
+                pasta_entrada=excluded.pasta_entrada,
+                pasta_saida=excluded.pasta_saida,
+                qualidade=excluded.qualidade,
+                status=excluded.status,
+                caminho_ortomosaico=excluded.caminho_ortomosaico,
+                modo_execucao=excluded.modo_execucao,
+                atualizado_em=excluded.atualizado_em
+            """,
+            (
+                record.get("job_id", ""),
+                record.get("nome", ""),
+                record.get("pasta_entrada", ""),
+                record.get("pasta_saida", ""),
+                record.get("qualidade", ""),
+                record.get("status", ""),
+                record.get("caminho_ortomosaico", ""),
+                record.get("modo_execucao", ""),
+                record.get("criado_em", _now_human()),
+                record.get("atualizado_em", _now_human()),
+            ),
+        )
+        conn.commit()
+
+def _orthomosaic_list_jobs() -> list:
+    _orthomosaic_init_db()
+    with sqlite3.connect(_orthomosaic_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM ortomosaic_jobs ORDER BY criado_em DESC LIMIT 80").fetchall()
+    return [dict(row) for row in rows]
+
+def _orthomosaic_find_outputs(output_dir: Path, project_slug: str = "") -> list:
+    candidates = []
+    roots = [output_dir]
+    if project_slug:
+        roots.append(output_dir / project_slug)
+    seen = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for pattern in ("*.tif", "*.tiff", "*.geotiff", "*.png", "*.jpg", "*.jpeg"):
+            for path in root.rglob(pattern):
+                if path.is_file() and path not in seen:
+                    seen.add(path)
+                    candidates.append(path)
+    return sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True)
+
+def _orthomosaic_select_folder_dialog(initial_dir: Path) -> tuple:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = filedialog.askdirectory(initialdir=str(initial_dir), title="Selecionar pasta de saída do ortomosaico")
+        root.destroy()
+        if selected:
+            return selected, ""
+        return "", "Nenhuma pasta selecionada."
+    except Exception as exc:
+        return "", f"Seleção por janela indisponível neste ambiente. Informe o caminho manualmente. Detalhe: {exc}"
+
+def _orthomosaic_quality_args(preset: dict) -> str:
+    args = [
+        f"--orthophoto-resolution {preset['resolution_cm']}",
+        f"--feature-quality {preset['feature_quality']}",
+        f"--pc-quality {preset['pc_quality']}",
+        f"--mesh-octree-depth {preset['mesh_depth']}",
+        f"--min-num-features {preset['min_features']}",
+        f"--matcher-neighbors {preset['matcher_neighbors']}",
+    ]
+    if int(preset.get("resize_to", 0) or 0) > 0:
+        args.append(f"--resize-to {preset['resize_to']}")
+    if preset.get("extra_args"):
+        args.append(str(preset["extra_args"]))
+    return " ".join(args)
+
+def _orthomosaic_write_vscode_workspace(job_dir: Path, project_slug: str, output_dir: Path, docker_image: str, quality_args: str, mode: str, final_name: str) -> dict:
+    dataset_project = job_dir / project_slug
+    images_dir = dataset_project / "images"
+    logs_dir = job_dir / "logs"
+    vscode_dir = job_dir / ".vscode"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    vscode_dir.mkdir(parents=True, exist_ok=True)
+    final_tif = output_dir / f"{final_name}.tif"
+
+    docker_command = (
+        f'docker run --rm -v "{job_dir}:/datasets" '
+        f'{docker_image} --project-path /datasets {project_slug} {quality_args}'
+    )
+    ps_script = f"""$ErrorActionPreference = "Stop"
+$Workspace = "{job_dir}"
+$Project = "{project_slug}"
+$OutputDir = "{output_dir}"
+$FinalTif = "{final_tif}"
+Write-Host "TMG Ortomosaico - processamento externo via Docker/WebODM"
+Write-Host "Projeto: $Project"
+Write-Host "Entrada: $Workspace\\$Project\\images"
+Write-Host "Saida: $OutputDir"
+{docker_command}
+$Generated = Join-Path $Workspace "$Project\\odm_orthophoto\\odm_orthophoto.tif"
+if (Test-Path $Generated) {{
+    Copy-Item $Generated $FinalTif -Force
+    Write-Host "Ortomosaico final copiado para: $FinalTif"
+}} else {{
+    Write-Host "Processamento finalizado, mas o arquivo odm_orthophoto.tif não foi encontrado automaticamente."
+    Write-Host "Verifique a pasta: $Workspace\\$Project\\odm_orthophoto"
+}}
+"""
+    sh_script = f"""#!/usr/bin/env bash
+set -e
+WORKSPACE="{job_dir.as_posix()}"
+PROJECT="{project_slug}"
+OUTPUT_DIR="{output_dir.as_posix()}"
+FINAL_TIF="{final_tif.as_posix()}"
+echo "TMG Ortomosaico - processamento externo via Docker/WebODM"
+{docker_command}
+GENERATED="$WORKSPACE/$PROJECT/odm_orthophoto/odm_orthophoto.tif"
+if [ -f "$GENERATED" ]; then
+  cp "$GENERATED" "$FINAL_TIF"
+  echo "Ortomosaico final copiado para: $FINAL_TIF"
+else
+  echo "Arquivo final não encontrado automaticamente. Verifique $WORKSPACE/$PROJECT/odm_orthophoto"
+fi
+"""
+    webodm_script = f"""$ErrorActionPreference = "Continue"
+Write-Host "Abrindo WebODM local e pasta preparada para o projeto."
+Write-Host "Imagens: {images_dir}"
+Write-Host "Saida final desejada: {output_dir}"
+Start-Process "http://localhost:8000"
+Write-Host "Se usar a API do WebODM, configure WEBODM_TOKEN/WEBODM_URL e execute webodm_submit.py."
+"""
+    webodm_py = f'''"""
+Envio opcional para WebODM local via API.
+Configure as variáveis de ambiente:
+  WEBODM_URL=http://localhost:8000
+  WEBODM_TOKEN=seu_token
+Depois execute no terminal do VS Code: python webodm_submit.py
+"""
+import os
+from pathlib import Path
+import requests
+
+WEBODM_URL = os.environ.get("WEBODM_URL", "http://localhost:8000").rstrip("/")
+TOKEN = os.environ.get("WEBODM_TOKEN", "")
+PROJECT_NAME = "{final_name}"
+IMAGES_DIR = Path(r"{images_dir}")
+
+if not TOKEN:
+    raise SystemExit("Configure WEBODM_TOKEN antes de enviar para o WebODM.")
+
+headers = {{"Authorization": f"JWT {{TOKEN}}"}}
+project_response = requests.post(f"{{WEBODM_URL}}/api/projects/", headers=headers, data={{"name": PROJECT_NAME}})
+project_response.raise_for_status()
+project_id = project_response.json()["id"]
+files = [("images", (p.name, open(p, "rb"))) for p in IMAGES_DIR.iterdir() if p.is_file()]
+try:
+    task_response = requests.post(f"{{WEBODM_URL}}/api/projects/{{project_id}}/tasks/", headers=headers, files=files)
+    task_response.raise_for_status()
+    print("Tarefa criada no WebODM:", task_response.json())
+finally:
+    for _, (_, handle) in files:
+        handle.close()
+'''
+    tasks = {
+        "version": "2.0.0",
+        "tasks": [
+            {
+                "label": "Gerar Ortomosaico - Docker ODM",
+                "type": "shell",
+                "command": "powershell",
+                "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/run_ortomosaico.ps1"],
+                "group": {"kind": "build", "isDefault": True},
+                "problemMatcher": [],
+            },
+            {
+                "label": "Abrir WebODM local",
+                "type": "shell",
+                "command": "powershell",
+                "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/abrir_webodm_local.ps1"],
+                "problemMatcher": [],
+            },
+            {
+                "label": "Enviar para WebODM local via API",
+                "type": "shell",
+                "command": "python",
+                "args": ["${workspaceFolder}/webodm_submit.py"],
+                "problemMatcher": [],
+            },
+        ],
+    }
+    readme = f"""# TMG - Gerador de Ortomosaico
+
+Projeto preparado pelo Streamlit para processamento externo.
+
+## Como executar
+
+1. Abra este diretório no VS Code.
+2. Pressione `Ctrl+Shift+B` para rodar a tarefa padrão **Gerar Ortomosaico - Docker ODM**.
+3. Aguarde o Docker/OpenDroneMap concluir.
+4. O arquivo final será copiado para:
+
+`{final_tif}`
+
+## Modo selecionado
+
+{mode}
+
+## Comando Docker preparado
+
+```powershell
+{docker_command}
+```
+
+O Streamlit principal apenas preparou os arquivos; o processamento pesado roda fora dele.
+"""
+    (job_dir / "run_ortomosaico.ps1").write_text(ps_script, encoding="utf-8")
+    (job_dir / "run_ortomosaico.sh").write_text(sh_script, encoding="utf-8")
+    (job_dir / "abrir_webodm_local.ps1").write_text(webodm_script, encoding="utf-8")
+    (job_dir / "webodm_submit.py").write_text(webodm_py, encoding="utf-8")
+    (vscode_dir / "tasks.json").write_text(json.dumps(tasks, indent=2, ensure_ascii=False), encoding="utf-8")
+    (job_dir / "README_EXECUTAR.md").write_text(readme, encoding="utf-8")
+    return {"docker_command": docker_command, "final_tif": str(final_tif)}
+
+def _orthomosaic_open_vscode(job_dir: Path) -> tuple:
+    try:
+        code_cmd = shutil.which("code") or shutil.which("code.cmd")
+        if not code_cmd:
+            common = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Microsoft VS Code" / "bin" / "code.cmd"
+            if common.exists():
+                code_cmd = str(common)
+        if not code_cmd:
+            return False, "VS Code não encontrado no PATH. Abra manualmente a pasta do projeto gerado."
+        subprocess.Popen([code_cmd, str(job_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True, "VS Code aberto com o projeto preparado."
+    except Exception as exc:
+        return False, f"Não foi possível abrir o VS Code automaticamente: {exc}"
+
+def _orthomosaic_simple_viewer_html(b64: str, image_name: str, width: int, height: int) -> str:
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * {{ box-sizing:border-box; margin:0; padding:0; }}
+  body {{ background:#0b0f14; overflow:hidden; font-family:Segoe UI, Arial, sans-serif; }}
+  #viewer {{ width:100%; height:660px; background:#0b0f14; border:1px solid #26384a; border-radius:8px; overflow:hidden; position:relative; }}
+  canvas {{ position:absolute; inset:0; cursor:grab; image-rendering:auto; }}
+  canvas:active {{ cursor:grabbing; }}
+  .badge {{
+    position:absolute; left:12px; top:12px; z-index:3; pointer-events:none;
+    background:rgba(5,12,20,.82); border:1px solid #315170; color:#dcecff;
+    border-radius:6px; padding:8px 11px; font-size:12px; letter-spacing:.3px;
+    box-shadow:0 6px 18px rgba(0,0,0,.35);
+  }}
+  .zoom {{
+    position:absolute; right:12px; top:12px; z-index:3; pointer-events:none;
+    background:rgba(5,12,20,.82); border:1px solid #315170; color:#dcecff;
+    border-radius:6px; padding:8px 11px; font-size:12px;
+  }}
+</style>
+</head>
+<body>
+<div id="viewer">
+  <canvas id="cv"></canvas>
+  <div class="badge">{image_name} · {width} x {height} px</div>
+  <div class="zoom" id="zoom">Zoom 100%</div>
+</div>
+<script>
+const wrap=document.getElementById('viewer'), cv=document.getElementById('cv'), ctx=cv.getContext('2d'), zoom=document.getElementById('zoom');
+let sc=1, ox=0, oy=0, drag=false, lx=0, ly=0, imgW=0, imgH=0;
+const img=new Image();
+function resize(){{ cv.width=wrap.clientWidth; cv.height=wrap.clientHeight; draw(); }}
+function fit(){{ if(!imgW) return; sc=Math.min(cv.width/imgW, cv.height/imgH)*0.96; ox=(cv.width-imgW*sc)/2; oy=(cv.height-imgH*sc)/2; draw(); }}
+function draw(){{ ctx.clearRect(0,0,cv.width,cv.height); ctx.save(); ctx.translate(ox,oy); ctx.scale(sc,sc); if(imgW) ctx.drawImage(img,0,0); ctx.restore(); zoom.textContent='Zoom '+Math.round(sc*100)+'%'; }}
+img.onload=()=>{{ imgW=img.width; imgH=img.height; resize(); fit(); }};
+img.src='data:image/jpeg;base64,{b64}';
+window.addEventListener('resize', resize);
+cv.addEventListener('wheel',e=>{{ e.preventDefault(); const f=e.deltaY<0?1.18:.84; const r=cv.getBoundingClientRect(); const mx=e.clientX-r.left,my=e.clientY-r.top; const ix=(mx-ox)/sc,iy=(my-oy)/sc; sc=Math.max(.05,Math.min(40,sc*f)); ox=mx-ix*sc; oy=my-iy*sc; draw(); }},{{passive:false}});
+cv.addEventListener('mousedown',e=>{{ drag=true; lx=e.clientX; ly=e.clientY; }});
+cv.addEventListener('mousemove',e=>{{ if(drag){{ ox+=e.clientX-lx; oy+=e.clientY-ly; lx=e.clientX; ly=e.clientY; draw(); }} }});
+cv.addEventListener('mouseup',()=>{{ drag=false; }}); cv.addEventListener('mouseleave',()=>{{ drag=false; }});
+cv.addEventListener('dblclick',fit);
+</script>
+</body>
+</html>
+"""
+
+def _orthomosaic_render_viewer(path: Path) -> None:
+    if not path.exists():
+        st.warning("Arquivo do ortomosaico não encontrado.")
+        return
+    v1, v2 = st.columns([2, 1])
+    with v1:
+        if st.button("Visualizar ortomosaico", key=f"ortho_view_{path.as_posix()}", use_container_width=True):
+            st.session_state["ortho_view_file"] = str(path)
+    with v2:
+        st.download_button(
+            "Baixar Ortomosaico",
+            data=path.read_bytes(),
+            file_name=path.name,
+            mime="application/octet-stream",
+            use_container_width=True,
+        )
+    if st.session_state.get("ortho_view_file") == str(path):
+        try:
+            raw = path.read_bytes()
+            b64, dims, err, _ = processar_ortofoto(raw, path.name)
+            if err:
+                st.info("Não foi possível gerar a prévia no navegador. O arquivo continua disponível para download.")
+                return
+            components.html(_orthomosaic_simple_viewer_html(b64, path.name, dims[0], dims[1]), height=680, scrolling=False)
+        except Exception:
+            st.info("Não foi possível gerar a prévia no navegador. O arquivo continua disponível para download.")
+
+def _render_orthomosaic_generator() -> None:
+    st.subheader("🛰️ Gerador de Ortomosaico")
+    st.info("O Streamlit prepara o projeto, registra no SQLite e abre o VS Code. O processamento pesado fica no Docker/WebODM local.")
     jobs_root = SYSTEM_DATABASE_DIR / "ortomosaicos_jobs"
     default_output = SYSTEM_DATABASE_DIR / "ortomosaicos"
+    jobs_root.mkdir(parents=True, exist_ok=True)
+    default_output.mkdir(parents=True, exist_ok=True)
+
     files = st.file_uploader(
-        "Anexar múltiplas fotos de drone",
-        type=["jpg", "jpeg", "png", "tif", "tiff", "dng", "raw", "arw", "cr2", "nef"],
+        "Anexar imagens/fotos do voo ou ortomosaico base",
+        type=["jpg", "jpeg", "png", "tif", "tiff", "geotiff", "dng", "raw", "arw", "cr2", "nef", "zip"],
         accept_multiple_files=True,
         key="ortho_generator_images",
     )
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        job_name = st.text_input("Nome do processamento", value=f"ortomosaico_{date.today().strftime('%Y%m%d')}", key="ortho_job_name")
-        qualidade = st.selectbox("Qualidade do processamento", ["Alta", "Média", "Rápida"], key="ortho_quality")
+        job_name = st.text_input("Nome do ortomosaico", value=f"ortomosaico_{date.today().strftime('%Y%m%d')}", key="ortho_job_name")
+        qualidade = st.selectbox("Qualidade / resolução", list(ORTHOMOSAIC_QUALITY_PRESETS.keys()), key="ortho_quality")
     with c2:
-        resolucao = st.text_input("Resolução / GSD desejado", value="5 cm/px", key="ortho_resolution")
-        docker_image = st.text_input("Imagem Docker", value="opendronemap/odm:latest", key="ortho_docker_image")
+        modo_execucao = st.selectbox(
+            "Modo de execução",
+            ["Rodar pelo VS Code com Docker", "Rodar pelo VS Code + Docker local/WebODM já instalado"],
+            key="ortho_execution_mode",
+        )
+        docker_image = st.text_input("Imagem Docker/OpenDroneMap", value="opendronemap/odm:latest", key="ortho_docker_image")
     with c3:
-        output_dir = st.text_input("Pasta de saída", value=str(default_output), key="ortho_output_dir")
-        execute_external = st.checkbox("Executar comando externo neste ambiente", value=False, key="ortho_execute_external")
+        if "ortho_output_dir" not in st.session_state:
+            st.session_state["ortho_output_dir"] = str(default_output)
+        if st.button("Selecionar pasta de saída no computador", key="ortho_choose_output_dir", use_container_width=True):
+            selected_dir, folder_err = _orthomosaic_select_folder_dialog(default_output)
+            if selected_dir:
+                st.session_state["ortho_output_dir"] = selected_dir
+                st.success(f"Pasta selecionada: {selected_dir}")
+            else:
+                st.info(folder_err)
+        output_dir = st.text_input("Pasta de saída local", value=st.session_state["ortho_output_dir"], key="ortho_output_dir_text")
+        st.session_state["ortho_output_dir"] = output_dir
 
-    command_template = st.text_area(
-        "Comando externo / Docker preparado",
-        value=(
-            "docker run --rm -v \"{input_dir}:/datasets/project/images\" "
-            "-v \"{output_dir}:/datasets/project/odm_orthophoto\" "
-            "{docker_image} --project-path /datasets project --orthophoto-resolution {resolution}"
-        ),
-        key="ortho_command_template",
-        height=90,
-    )
-    st.caption("No Streamlit Cloud, deixe a execução externa desligada e use o pacote/configuração gerado para rodar no Docker/VS Code/WebODM.")
+    preset = ORTHOMOSAIC_QUALITY_PRESETS[qualidade]
+    quality_args = _orthomosaic_quality_args(preset)
+    st.markdown("##### Parâmetros automáticos")
+    st.json({
+        "qualidade": qualidade,
+        "resolução_orthophoto_cm_px": preset["resolution_cm"],
+        "feature_quality": preset["feature_quality"],
+        "pc_quality": preset["pc_quality"],
+        "mesh_octree_depth": preset["mesh_depth"],
+        "min_features": preset["min_features"],
+        "matcher_neighbors": preset["matcher_neighbors"],
+        "descrição": preset["descricao"],
+    })
 
-    if st.button("🛰️ Iniciar geração do ortomosaico", type="primary", key="ortho_start_generation", use_container_width=True):
+    if st.button("🛰️ Gerar Ortomosaico", type="primary", key="ortho_start_generation", use_container_width=True):
         if not files:
             st.warning("Anexe as fotos do drone antes de iniciar.")
             return
-        job_id = f"ORT_JOB_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_tv_safe_name(job_name)}"
+        clean_name = _tv_safe_name(job_name) or f"ortomosaico_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        job_id = f"ORT_JOB_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{clean_name}"
         job_dir = jobs_root / job_id
-        input_dir = job_dir / "input_images"
+        project_slug = clean_name
+        input_dir = job_dir / project_slug / "images"
         logs_dir = job_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         progress = st.progress(0)
         status = st.empty()
-        status.info("1/5 — Salvando imagens de entrada com integridade...")
+        status.info("1/5 — Salvando imagens do voo com integridade...")
         saved, total_size = _save_uploaded_files_generic(files, input_dir)
         progress.progress(25)
 
         output_path = _resolve_system_path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
-        command = command_template.format(
-            input_dir=str(input_dir),
-            output_dir=str(output_path),
+        status.info("2/5 — Gerando scripts, tasks do VS Code e parâmetros Docker/WebODM...")
+        workspace = _orthomosaic_write_vscode_workspace(
+            job_dir=job_dir,
+            project_slug=project_slug,
+            output_dir=output_path,
             docker_image=docker_image,
-            resolution=resolucao,
-            quality=qualidade,
-            job_id=job_id,
+            quality_args=quality_args,
+            mode=modo_execucao,
+            final_name=clean_name,
         )
         job_config = {
             "job_id": job_id,
             "criado_em": _now_human(),
             "usuario": _auth_user_name(),
             "qualidade": qualidade,
-            "resolucao": resolucao,
+            "parametros": preset,
+            "modo_execucao": modo_execucao,
             "input_dir": str(input_dir),
             "output_dir": str(output_path),
             "docker_image": docker_image,
-            "command": command,
+            "command": workspace["docker_command"],
+            "final_tif": workspace["final_tif"],
             "arquivos": saved,
         }
         (job_dir / "job_config.json").write_text(json.dumps(job_config, indent=2, ensure_ascii=False), encoding="utf-8")
-        progress.progress(45)
-
         log_path = logs_dir / "processing.log"
-        status.info("2/5 — Preparando comando externo e logs do processamento...")
-        log_lines = [
-            f"[{_now_human()}] Job criado: {job_id}",
-            f"Entrada: {input_dir}",
-            f"Saída: {output_path}",
-            f"Comando preparado: {command}",
-        ]
-        if execute_external and os.environ.get("TMG_ALLOW_EXTERNAL_PROCESS") == "1":
-            status.info("3/5 — Executando comando externo autorizado...")
-            try:
-                result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60 * 60)
-                log_lines.append(result.stdout or "")
-                log_lines.append(result.stderr or "")
-                log_lines.append(f"Código de saída: {result.returncode}")
-            except Exception as exc:
-                log_lines.append(f"Falha ao executar comando externo: {exc}")
-        else:
-            log_lines.append("Execução externa não realizada neste ambiente. Use o comando acima em Docker/VS Code/WebODM.")
-        log_path.write_text("\n".join(log_lines), encoding="utf-8")
+        log_path.write_text(
+            "\n".join([
+                f"[{_now_human()}] Job preparado: {job_id}",
+                f"Entrada: {input_dir}",
+                f"Saída: {output_path}",
+                f"Modo: {modo_execucao}",
+                f"Comando Docker: {workspace['docker_command']}",
+            ]),
+            encoding="utf-8",
+        )
+        _orthomosaic_upsert_job({
+            "job_id": job_id,
+            "nome": clean_name,
+            "pasta_entrada": str(input_dir),
+            "pasta_saida": str(output_path),
+            "qualidade": qualidade,
+            "status": "Preparado para execução externa no VS Code",
+            "caminho_ortomosaico": workspace["final_tif"],
+            "modo_execucao": modo_execucao,
+            "criado_em": _now_human(),
+            "atualizado_em": _now_human(),
+        })
         progress.progress(70)
 
         package_base = jobs_root / f"{job_id}_pacote_integracao"
         package_zip = shutil.make_archive(str(package_base), "zip", root_dir=job_dir)
+        opened, open_msg = _orthomosaic_open_vscode(job_dir)
         progress.progress(100)
-        status.success("5/5 — Estrutura de geração preparada.")
+        status.success("5/5 — Projeto preparado para VS Code/Docker/WebODM.")
 
-        st.success(f"Processamento `{job_id}` preparado com {len(saved)} imagem(ns), total {_tv_human_size(total_size)}.")
+        st.success(f"Projeto `{job_id}` preparado com {len(saved)} arquivo(s), total {_tv_human_size(total_size)}.")
+        (st.success if opened else st.info)(open_msg)
         st.json({
             "Job": job_id,
+            "Nome": clean_name,
             "Entrada": str(input_dir),
             "Saída": str(output_path),
-            "Log": str(log_path),
-            "Pacote Docker/VS Code": package_zip,
+            "Qualidade": qualidade,
+            "Modo": modo_execucao,
+            "VS Code": str(job_dir),
+            "SQLite": str(_orthomosaic_db_path()),
+            "Ortomosaico esperado": workspace["final_tif"],
         })
         st.download_button(
             "⬇️ Baixar pacote de integração",
@@ -5198,12 +5614,37 @@ def _render_orthomosaic_generator() -> None:
             mime="application/zip",
             use_container_width=True,
         )
-        outputs = list(output_path.glob("*.tif")) + list(output_path.glob("*.tiff")) + list(output_path.glob("*.png")) + list(output_path.glob("*.jpg"))
-        if outputs:
-            selected_output = st.selectbox("Ortomosaico gerado disponível", [str(p) for p in outputs], key=f"ortho_output_select_{job_id}")
-            st.caption(f"Arquivo pronto para visualizar/baixar: {selected_output}")
-        else:
-            st.info("Quando o Docker/WebODM gerar o ortomosaico na pasta de saída, ele aparecerá aqui para visualização ou download.")
+
+    st.markdown("#### Visualizador do ortomosaico gerado")
+    jobs = _orthomosaic_list_jobs()
+    if not jobs:
+        st.info("Nenhum projeto de ortomosaico preparado ainda.")
+        return
+    labels = [
+        f"{item.get('criado_em','')} · {item.get('nome','')} · {item.get('qualidade','')} · {item.get('status','')}"
+        for item in jobs
+    ]
+    selected_label = st.selectbox("Projetos preparados", labels, key="ortho_job_view_select")
+    selected_job = jobs[labels.index(selected_label)]
+    output_path = _resolve_system_path(selected_job.get("pasta_saida", str(default_output)))
+    expected_path = Path(str(selected_job.get("caminho_ortomosaico", "")))
+    outputs = []
+    if expected_path.exists():
+        outputs.append(expected_path)
+    outputs.extend([p for p in _orthomosaic_find_outputs(output_path, _tv_safe_name(selected_job.get("nome", ""))) if p not in outputs])
+    if outputs:
+        selected_output = st.selectbox("Ortomosaico disponível", [str(path) for path in outputs], key="ortho_output_file_select")
+        selected_path = Path(selected_output)
+        _orthomosaic_upsert_job({
+            **selected_job,
+            "status": "Ortomosaico encontrado",
+            "caminho_ortomosaico": str(selected_path),
+            "atualizado_em": _now_human(),
+        })
+        _orthomosaic_render_viewer(selected_path)
+    else:
+        st.info("Nenhum ortomosaico gerado encontrado ainda. Execute a task no VS Code e volte aqui para visualizar/baixar o resultado.")
+        st.caption(f"Pasta monitorada: {output_path}")
 
 def _render_sync_backup() -> None:
     st.subheader("🔄 Backup e Sincronização de Dados")
