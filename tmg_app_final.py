@@ -17,10 +17,8 @@ import cv2
 import warnings
 import hashlib
 import re
+import subprocess
 from datetime import datetime, date
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
-from urllib.request import Request, urlopen
 import pandas as pd
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -402,6 +400,19 @@ st.markdown(f"""
     color: var(--tmg-primary) !important;
     border-color: var(--tmg-primary) !important;
 }}
+.main-header,
+.cultura-title,
+.login-title,
+.partner-hero-title,
+.partner-window-title,
+.partner-card-title,
+.vd-hero h2,
+h1, h2, h3 {{
+    text-shadow:
+        1px 1px 0 rgba(0,0,0,.75),
+        2px 2px 0 rgba(0,0,0,.45),
+        0 0 18px var(--tmg-primary-glow) !important;
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -452,8 +463,8 @@ AUTH_USERS_PATH = SYSTEM_DATABASE_DIR / "usuarios_sistema.json"
 PARTNERS_ROOT = SYSTEM_DATABASE_DIR / "parceiros_controle_voos_dados"
 PARTNERS_STATE_PATH = PARTNERS_ROOT / "parceiros_estado.json"
 PARTNERS_LOGOS_DIR = PARTNERS_ROOT / "logos"
-PARTNER_KEYS = {"eiwa": "Eiwa", "alvaz": "Alvaz"}
-PARTNER_BUTTON_LABELS = {"eiwa": "IVA", "alvaz": "ALVÁS"}
+PARTNER_KEYS = {"eiwa": "EIWA", "alvaz": "ALVAZ"}
+PARTNER_BUTTON_LABELS = {"eiwa": "EIWA", "alvaz": "ALVAZ"}
 PARTNER_STATUS_OPTIONS = ["Executado", "Não executado"]
 PARTNER_TREATMENT_STATUS = ["Aberto", "Em andamento", "Concluído", "Resolvido", "Atrasado"]
 PARTNER_TREATMENT_DONE = {"Concluído", "Resolvido"}
@@ -729,6 +740,38 @@ def _partners_save_logo(state: dict, partner_key: str, uploaded_file) -> None:
     target.write_bytes(uploaded_file.getvalue())
     state["partners"][partner_key]["logo_path"] = str(target)
 
+def _partners_logo_html(partner_key: str) -> str:
+    label = _partner_label(partner_key)
+    logo_path = _partners_logo_path(partner_key)
+    if logo_path and logo_path.exists():
+        suffix = logo_path.suffix.lower()
+        mime = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/webp" if suffix == ".webp" else "image/png"
+        data = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+        return (
+            "<div class='partner-logo-frame'>"
+            f"<img src='data:{mime};base64,{data}' alt='Logo {label}' class='partner-logo-img'>"
+            "</div>"
+        )
+    return f"<div class='partner-logo-frame partner-logo-empty'>LOGO {label}</div>"
+
+def _partners_history_rows(rows: list) -> list:
+    label_map = {
+        "eiwa": "EIWA",
+        "iva": "EIWA",
+        "eva": "EIWA",
+        "alvaz": "ALVAZ",
+        "alvás": "ALVAZ",
+        "olvas": "ALVAZ",
+        "elvas": "ALVAZ",
+    }
+    normalized = []
+    for row in rows or []:
+        item = dict(row)
+        if "parceira" in item:
+            item["parceira"] = label_map.get(str(item.get("parceira", "")).strip().lower(), item.get("parceira", ""))
+        normalized.append(item)
+    return normalized
+
 def _auth_mention_options() -> tuple:
     users = []
     labels = {}
@@ -760,104 +803,30 @@ def _partners_mentions_for_user(state: dict, user: dict) -> list:
                 })
     return notes[:5]
 
-def _partners_read_csv_upload(uploaded_file) -> tuple:
+def _partners_read_sheet_upload(uploaded_file) -> tuple:
     if uploaded_file is None:
-        return None, "Selecione uma planilha CSV para importar."
+        return None, "Selecione uma planilha Excel ou CSV para importar."
     try:
-        df = pd.read_csv(BytesIO(uploaded_file.getvalue()), sep=None, engine="python")
+        raw = uploaded_file.getvalue()
+        suffix = Path(uploaded_file.name).suffix.lower()
+        if suffix in (".xlsx", ".xls"):
+            df = pd.read_excel(BytesIO(raw))
+        elif suffix == ".csv":
+            df = None
+            errors = []
+            for encoding in ("utf-8-sig", "utf-8", "latin1", "cp1252"):
+                try:
+                    df = pd.read_csv(BytesIO(raw), sep=None, engine="python", encoding=encoding)
+                    break
+                except Exception as exc:
+                    errors.append(f"{encoding}: {exc}")
+            if df is None:
+                raise ValueError("; ".join(errors[-2:]))
+        else:
+            return None, "Formato não suportado. Envie arquivos .xlsx, .xls ou .csv."
         return _partners_clean_dataframe(df), ""
     except Exception as exc:
-        return None, f"Não consegui ler o CSV enviado. Confira se o arquivo está salvo em formato CSV válido. Detalhe: {exc}"
-
-def _partners_normalize_sheet_url(link: str) -> str:
-    raw = str(link or "").strip()
-    if "docs.google.com/spreadsheets" in raw and "/edit" in raw:
-        base = raw.split("/edit", 1)[0]
-        gid = ""
-        if "gid=" in raw:
-            gid = raw.split("gid=", 1)[1].split("&", 1)[0].split("#", 1)[0]
-        return f"{base}/export?format=xlsx" + (f"&gid={gid}" if gid else "")
-    lower = raw.lower()
-    if raw.startswith(("http://", "https://")) and any(host in lower for host in ("sharepoint.com", "1drv.ms", "onedrive.live.com")):
-        parsed = urlparse(raw)
-        query = parse_qs(parsed.query, keep_blank_values=True)
-        query["download"] = ["1"]
-        return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
-    return raw
-
-def _partners_source_name_from_url(url: str) -> str:
-    parsed = urlparse(str(url or ""))
-    query = parse_qs(parsed.query, keep_blank_values=True)
-    file_name = (query.get("file") or [""])[0]
-    if file_name:
-        return file_name
-    path_name = Path(parsed.path).name
-    return path_name or str(url or "")
-
-def _partners_is_csv_source(source_name: str, content_type: str = "") -> bool:
-    lower_name = str(source_name or "").lower()
-    lower_type = str(content_type or "").lower()
-    return (
-        lower_name.endswith(".csv")
-        or "format=csv" in lower_name
-        or "output=csv" in lower_name
-        or "text/csv" in lower_type
-        or "application/csv" in lower_type
-    )
-
-def _partners_looks_like_login_page(final_url: str, content_type: str, payload: bytes) -> bool:
-    lower_url = str(final_url or "").lower()
-    lower_type = str(content_type or "").lower()
-    if "login.microsoftonline.com" in lower_url or "/oauth2/" in lower_url:
-        return True
-    if "text/html" not in lower_type:
-        return False
-    sample = payload[:6000].decode("utf-8", errors="ignore").lower()
-    return any(marker in sample for marker in ("microsoft", "sign in", "entrar", "login", "oauth2", "saml"))
-
-def _partners_friendly_import_error(exc, source: str = "") -> str:
-    text = f"{exc} {source}".lower()
-    if any(marker in text for marker in ("sharepoint_auth_required", "401", "403", "unauthorized", "forbidden", "login.microsoftonline.com")):
-        return (
-            "A planilha online está pedindo login/permissão no SharePoint. "
-            "No Streamlit Cloud ela só será lida se o arquivo estiver compartilhado para download por link. "
-            "Compartilhe como acesso por link ou envie o Excel/CSV no campo de upload abaixo."
-        )
-    if any(marker in text for marker in ("excel file format cannot be determined", "unsupported format", "file is not a zip file")):
-        return (
-            "O link retornou uma página que não parece ser uma planilha Excel/CSV direta. "
-            "Use um link compartilhado para download do SharePoint ou envie o arquivo Excel/CSV no campo de upload abaixo."
-        )
-    if any(marker in text for marker in ("urlopen error", "timed out", "temporary failure", "name or service not known")):
-        return "Não consegui acessar a planilha online agora. Confira o link ou envie o arquivo Excel/CSV no campo de upload abaixo."
-    return "Não consegui importar a planilha. Confira se o link é direto para Excel/CSV ou envie o arquivo no campo de upload abaixo."
-
-def _partners_read_sheet_bytes(payload: bytes, source_name: str, content_type: str = "") -> pd.DataFrame:
-    stream = BytesIO(payload)
-    if _partners_is_csv_source(source_name, content_type):
-        return pd.read_csv(stream, sep=None, engine="python")
-    return pd.read_excel(stream)
-
-def _partners_fetch_online_sheet(url: str) -> tuple:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (TMG Streamlit)",
-        "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/octet-stream,*/*",
-    }
-    request = Request(url, headers=headers)
-    try:
-        with urlopen(request, timeout=60) as response:
-            final_url = response.geturl()
-            content_type = response.headers.get("content-type", "")
-            payload = response.read()
-    except HTTPError as exc:
-        if exc.code in (401, 403):
-            raise PermissionError("sharepoint_auth_required") from exc
-        raise
-    except URLError:
-        raise
-    if _partners_looks_like_login_page(final_url, content_type, payload):
-        raise PermissionError("sharepoint_auth_required")
-    return payload, final_url, content_type
+        return None, f"Não consegui ler a planilha enviada. Confira se o arquivo é .xlsx, .xls ou .csv válido. Detalhe: {exc}"
 
 def _partners_clean_dataframe(df) -> pd.DataFrame:
     if df is None:
@@ -868,40 +837,6 @@ def _partners_clean_dataframe(df) -> pd.DataFrame:
     for col in df.columns:
         df[col] = df[col].map(lambda value: value.isoformat() if hasattr(value, "isoformat") else str(value) if value is not None else "")
     return df
-
-def _partners_read_online_sheet(link: str) -> tuple:
-    url = _partners_normalize_sheet_url(link)
-    if not url:
-        return None, "Cole o link da planilha online."
-    try:
-        if url.startswith(("http://", "https://")):
-            payload, final_url, content_type = _partners_fetch_online_sheet(url)
-            source_name = _partners_source_name_from_url(url) or _partners_source_name_from_url(final_url)
-            df = _partners_read_sheet_bytes(payload, source_name, content_type)
-        else:
-            if _partners_is_csv_source(url):
-                df = pd.read_csv(url, sep=None, engine="python")
-            else:
-                df = pd.read_excel(url)
-        return _partners_clean_dataframe(df), ""
-    except Exception as exc:
-        return None, _partners_friendly_import_error(exc, url)
-
-def _partners_read_uploaded_sheet(uploaded_file) -> tuple:
-    if uploaded_file is None:
-        return None, "Cole o link da planilha online ou envie um arquivo Excel/CSV."
-    try:
-        df = _partners_read_sheet_bytes(uploaded_file.getvalue(), uploaded_file.name)
-        return _partners_clean_dataframe(df), ""
-    except Exception as exc:
-        return None, _partners_friendly_import_error(exc, getattr(uploaded_file, "name", "arquivo enviado"))
-
-def _partners_read_sheet_source(link: str, uploaded_file=None) -> tuple:
-    if uploaded_file is not None:
-        df, err = _partners_read_uploaded_sheet(uploaded_file)
-        return df, err, f"arquivo enviado: {uploaded_file.name}"
-    df, err = _partners_read_online_sheet(link)
-    return df, err, "link online"
 
 def _partners_ensure_row_ids(rows: list) -> list:
     prepared = []
@@ -981,6 +916,7 @@ def _partners_compare_dataframes(old_df: pd.DataFrame, new_df: pd.DataFrame, col
         "linhas_novas": new_rows,
         "linhas_alteradas": changed_rows,
         "linhas_removidas": removed_rows,
+        "total_diferencas": new_rows + changed_rows + removed_rows,
         "data_hora": _now_human(),
         "usuario": _auth_user_name(),
     }, preview
@@ -1370,8 +1306,8 @@ if not st.session_state.logged_in:
     .login-card {
         background: linear-gradient(160deg, #1c1c1c 0%, #111111 100%);
         border: 1px solid #2e2e2e;
-        border-radius: 20px;
-        padding: 48px 44px 36px 44px;
+        border-radius: 16px;
+        padding: 26px 28px 22px 28px;
         box-shadow:
             0 8px 32px rgba(0,0,0,0.85),
             0 2px 8px rgba(0,0,0,0.6),
@@ -1384,8 +1320,8 @@ if not st.session_state.logged_in:
         text-align: center;
         font-family: 'Segoe UI', sans-serif;
         font-weight: 900;
-        font-size: 2.4rem;
-        letter-spacing: 6px;
+        font-size: 1.85rem;
+        letter-spacing: 5px;
         color: var(--tmg-primary);
         text-transform: uppercase;
         text-shadow:
@@ -1395,7 +1331,7 @@ if not st.session_state.logged_in:
             5px 5px 10px rgba(0,0,0,0.95),
             0 0 25px var(--tmg-primary-glow),
             0 0 60px var(--tmg-primary-glow-soft);
-        margin-bottom: 4px;
+        margin-bottom: 2px;
     }
 
     .login-subtitle {
@@ -1404,14 +1340,14 @@ if not st.session_state.logged_in:
         font-size: 0.78rem;
         letter-spacing: 3px;
         text-transform: uppercase;
-        margin-bottom: 28px;
+        margin-bottom: 18px;
     }
 
     .login-divider {
         border: none;
         border-top: 1px solid var(--tmg-primary);
         box-shadow: 0 0 10px var(--tmg-primary-glow);
-        margin: 0 0 28px 0;
+        margin: 0 0 18px 0;
     }
 
     .stTextInput > div > div > input {
@@ -1419,7 +1355,7 @@ if not st.session_state.logged_in:
         border: 1px solid #d6e3f0 !important;
         border-radius: 10px !important;
         color: #111827 !important;
-        padding: 12px 16px !important;
+        padding: 10px 14px !important;
         font-size: 0.95rem !important;
         box-shadow: inset 0 1px 2px rgba(0,0,0,.12) !important;
     }
@@ -1452,7 +1388,7 @@ if not st.session_state.logged_in:
         border: 1px solid #2a2a2a;
         border-top: 2px solid var(--tmg-primary);
         border-radius: 16px;
-        padding: 24px 28px;
+        padding: 16px 18px;
         box-shadow: 0 8px 24px rgba(0,0,0,0.7);
         position: relative;
         z-index: 1;
@@ -1471,14 +1407,14 @@ if not st.session_state.logged_in:
     </style>
     """, unsafe_allow_html=True)
 
-    _, col_mid, _ = st.columns([1, 1.05, 1])
+    _, col_mid, _ = st.columns([1.25, 0.9, 1.25])
 
     with col_mid:
         if LOGO_PATH.exists():
             lc1, lc2, lc3 = st.columns([1, 2, 1])
             with lc2:
-                app_image(str(LOGO_PATH))
-            st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+                st.image(str(LOGO_PATH), width=150)
+            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
         st.markdown("<div class='login-title'>TMG</div>", unsafe_allow_html=True)
         st.markdown(
@@ -1490,7 +1426,7 @@ if not st.session_state.logged_in:
         usuario = st.text_input("Usuário", placeholder="Digite seu login", key="login_user")
         senha   = st.text_input("Senha",   placeholder="Digite sua senha", type="password", key="login_pass")
 
-        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
         if st.button("⟶  ENTRAR", type="primary", key="btn_entrar"):
             auth_user = _auth_find_user(usuario, senha)
@@ -3389,19 +3325,36 @@ def _vd_render_envio(manifest: dict) -> None:
     </style>
     """, unsafe_allow_html=True)
 
-    st.markdown("#### PASSO 1 — Enviar Fotos de Voos")
+    st.markdown("#### PASSO 1 — Enviar Fotos de Drone")
     st.markdown("<div class='vd-section-title'>Dados principais do voo</div>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
         nome_voo = st.text_input("Nome do voo", value=f"Voo_Direcionado_{date.today().strftime('%Y%m%d')}", key="vd_nome_voo")
         fazenda = st.text_input("Nome da fazenda", value="", key="vd_fazenda")
+        ensaio = st.text_input("Nome do ensaio", value="", key="vd_ensaio")
     with c2:
-        ensaio = st.text_input("Ensaio", value="", key="vd_ensaio")
-        inicio_final = st.text_input("Início / Final", value="", placeholder="Ex.: Início, Final ou Início-Final", key="vd_inicio_final")
+        data_inicial = st.date_input("Data inicial", value=date.today(), key="vd_data_inicial")
+        data_final = st.date_input("Data final", value=date.today(), key="vd_data_final")
+        tipo_voo_base = st.selectbox(
+            "Tipo de voo",
+            ["RGB", "Multiespectral", "NDVI", "Termal", "LiDAR", "Mapeamento", "Outro"],
+            key="vd_tipo_voo_base"
+        )
     with c3:
-        tipo_voo = st.text_input("Tipo de voo", value="", placeholder="Ex.: RGB, Multiespectral, NDVI, Altura", key="vd_tipo_voo")
         usuario = st.text_input("Usuário responsável", value=manifest.get("config", {}).get("usuario_padrao", "Operador"), key="vd_usuario_resp")
-    data_voo = st.date_input("Data do voo", value=date.today(), key="vd_data_voo")
+        destino_envio = st.text_input("Destino de envio", value=manifest.get("config", {}).get("destino_envio_padrao", ""), placeholder="Ex.: análise interna, cliente, parceiro", key="vd_destino_envio")
+        tipo_voo_outro = ""
+        if tipo_voo_base == "Outro":
+            tipo_voo_outro = st.text_input("Descrever tipo de voo", value="", key="vd_tipo_voo_outro")
+    coordenadas = st.text_area(
+        "Coordenadas / área do voo",
+        value="",
+        placeholder="Informe coordenadas, talhão, polígono ou referência da área quando necessário.",
+        key="vd_coordenadas",
+        height=80
+    )
+    tipo_voo = (tipo_voo_outro or tipo_voo_base).strip()
+    inicio_final = f"{data_inicial} a {data_final}"
 
     st.markdown("<div class='vd-section-title'>Destino e diretório de envio</div>", unsafe_allow_html=True)
     dcol1, dcol2 = st.columns([1, 2])
@@ -3425,7 +3378,7 @@ def _vd_render_envio(manifest: dict) -> None:
 
     st.markdown("<div class='vd-section-title'>Anexar imagens do voo</div>", unsafe_allow_html=True)
     files = st.file_uploader(
-        "Selecionar fotos de voos ou ZIP",
+        "Selecionar múltiplas fotos de drone ou ZIP",
         type=["jpg", "jpeg", "tif", "tiff", "png", "raw", "dng", "arw", "cr2", "nef", "zip"],
         accept_multiple_files=True,
         key="vd_select_images"
@@ -3434,13 +3387,20 @@ def _vd_render_envio(manifest: dict) -> None:
         total_previsto = sum(int(getattr(f, "size", 0) or 0) for f in files)
         st.info(f"{len(files)} arquivo(s) selecionado(s) · volume previsto: {_tv_human_size(total_previsto)}")
 
-    if st.button("🚀 Enviar Fotos de Voos", type="primary", key="vd_send_flight", use_container_width=True):
+    confirmar_envio = st.checkbox(
+        "Confirmo o envio e autorizo o salvamento seguro dos arquivos no destino configurado.",
+        key="vd_confirmar_envio"
+    )
+
+    if st.button("🚀 Confirmar Envio de Fotos de Voos", type="primary", key="vd_send_flight", use_container_width=True):
         if not files:
             st.warning("Selecione as imagens do drone ou um ZIP do voo.")
         elif not str(nome_voo).strip():
             st.warning("Informe o nome do voo para criar a pasta de destino.")
         elif not str(caminho).strip():
             st.warning("Escolha/informe o diretório de destino.")
+        elif not confirmar_envio:
+            st.warning("Confirme o envio para registrar o lote com segurança.")
         else:
             lote_id = f"VD_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_tv_safe_name(nome_voo)}"
             st.markdown("<div class='vd-progress-box'><b>Resumo da progressão de envio</b></div>", unsafe_allow_html=True)
@@ -3459,11 +3419,15 @@ def _vd_render_envio(manifest: dict) -> None:
                 "fazenda": fazenda,
                 "ensaio": ensaio,
                 "inicio_final": inicio_final,
+                "data_inicial": str(data_inicial),
+                "data_final": str(data_final),
                 "tipo_voo": tipo_voo,
+                "coordenadas": coordenadas,
+                "destino_envio": destino_envio,
                 "quantidade_imagens": len(saved),
                 "data_hora": _tv_now(),
                 "usuario_responsavel": usuario,
-                "data_voo": str(data_voo),
+                "data_voo": str(data_inicial),
                 "destino_enviado": destino,
                 "caminho_destino": caminho,
                 "pasta_nome_voo": _tv_safe_name(nome_voo),
@@ -3478,6 +3442,7 @@ def _vd_render_envio(manifest: dict) -> None:
             manifest.setdefault("config", {})["destino"] = destino
             manifest.setdefault("config", {})["caminho"] = caminho
             manifest.setdefault("config", {})["usuario_padrao"] = usuario
+            manifest.setdefault("config", {})["destino_envio_padrao"] = destino_envio
             _vd_add_history(manifest, f"Voo enviado com {len(saved)} arquivo(s) para pasta {record['pasta_nome_voo']}", lote_id, envio_status)
             _vd_save_manifest(manifest)
             progress.progress(100)
@@ -3505,8 +3470,11 @@ def _vd_render_envio(manifest: dict) -> None:
                 "Nome do voo": v.get("nome_voo", ""),
                 "Fazenda": v.get("nome_fazenda") or v.get("fazenda") or "",
                 "Ensaio": v.get("ensaio", ""),
-                "Início/Final": v.get("inicio_final", ""),
-                "Tipo de voo": v.get("tipo_voo") or v.get("coordenadas") or "",
+                "Data inicial": v.get("data_inicial") or v.get("data_voo") or "",
+                "Data final": v.get("data_final") or "",
+                "Tipo de voo": v.get("tipo_voo") or "",
+                "Coordenadas": v.get("coordenadas") or "",
+                "Destino de envio": v.get("destino_envio") or "",
                 "Imagens": v.get("quantidade_imagens", 0),
                 "Data e hora": v.get("data_hora", ""),
                 "Destino": v.get("destino_enviado", ""),
@@ -4120,9 +4088,9 @@ def _render_manage_users() -> None:
             perm_parceiros = st.checkbox("Acessar módulo Parceiros / Controle de Voos e Dados", value=bool(perms_current.get("parceiros", False)))
             p_eiwa, p_alvaz = st.columns(2)
             with p_eiwa:
-                perm_eiwa = st.checkbox("IVA", value=bool(perms_current.get("eiwa", False)))
+                perm_eiwa = st.checkbox("EIWA", value=bool(perms_current.get("eiwa", False)))
             with p_alvaz:
-                perm_alvaz = st.checkbox("ALVÁS", value=bool(perms_current.get("alvaz", False)))
+                perm_alvaz = st.checkbox("ALVAZ", value=bool(perms_current.get("alvaz", False)))
             st.markdown("##### Permissões por menu")
             menu_values = {}
             menu_items = list(MENU_PERMISSION_OPTIONS.items())
@@ -4208,24 +4176,24 @@ def _render_partner_alerts(partner_data: dict) -> None:
 def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
     partner = state["partners"][partner_key]
     partner_name = _partner_label(partner_key)
-    st.markdown("##### Importação de planilha CSV")
+    st.markdown("##### Importação de planilha")
     uploaded_sheet = st.file_uploader(
-        "Selecionar planilha CSV baixada",
-        type=["csv"],
+        "Selecionar planilha Excel ou CSV",
+        type=["xlsx", "xls", "csv"],
         key=f"partner_upload_sheet_{partner_key}",
-        help="Baixe a planilha em CSV e importe aqui para espelhar os dados no sistema.",
+        help="Envie arquivos .xlsx, .xls ou .csv para espelhar os dados no sistema.",
     )
-    st.caption("A importação online foi removida. Use somente CSV baixado para manter o espelho leve, estável e comparável.")
+    st.caption("A planilha enviada será lida automaticamente e espelhada em uma tabela editável, separada por parceira.")
     c1, c2, c3 = st.columns(3)
     with c1:
-        import_clicked = st.button("📥 Importar CSV", key=f"partner_import_{partner_key}", use_container_width=True)
+        import_clicked = st.button("📥 Importar planilha", key=f"partner_import_{partner_key}", use_container_width=True)
     with c2:
         update_clicked = st.button("🔄 Atualizar dados", key=f"partner_update_{partner_key}", use_container_width=True)
     with c3:
         save_internal_clicked = st.button("💾 Salvar Dados Internos", key=f"partner_save_internal_top_{partner_key}", use_container_width=True)
 
     if import_clicked or update_clicked:
-        df, err = _partners_read_csv_upload(uploaded_sheet)
+        df, err = _partners_read_sheet_upload(uploaded_sheet)
         if err:
             st.warning(err)
         else:
@@ -4246,9 +4214,10 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
                     "linhas_novas": 0,
                     "linhas_alteradas": 0,
                     "linhas_removidas": 0,
+                    "total_diferencas": 0,
                     "data_hora": _now_human(),
                     "usuario": _auth_user_name(),
-                    "fonte": f"CSV: {uploaded_sheet.name}",
+                    "fonte": f"Arquivo: {uploaded_sheet.name}",
                     "base_comparacao": "Primeira importação salva",
                 }
                 diff_rows = []
@@ -4256,7 +4225,7 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
                 compare_columns = baseline_columns or original_columns
                 baseline_df = pd.DataFrame(baseline_rows)
                 summary, diff_rows = _partners_compare_dataframes(baseline_df, new_clean, compare_columns)
-                summary["fonte"] = f"CSV: {uploaded_sheet.name}"
+                summary["fonte"] = f"Arquivo: {uploaded_sheet.name}"
                 summary["base_comparacao"] = "Primeira importação salva"
             prepared, original_columns = _partners_prepare_import_df(df, _auth_user_name())
             old_df = _partners_rows_to_df(partner)
@@ -4267,17 +4236,17 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
             partner["link"] = ""
             partner["columns"] = original_columns
             partner["rows"] = prepared.to_dict(orient="records")
-            partner["last_import"] = {"data_hora": _now_human(), "usuario": _auth_user_name(), "linhas": len(prepared), "fonte": f"CSV: {uploaded_sheet.name}"}
+            partner["last_import"] = {"data_hora": _now_human(), "usuario": _auth_user_name(), "linhas": len(prepared), "fonte": f"Arquivo: {uploaded_sheet.name}"}
             partner["last_update"] = summary
             partner["diff_rows"] = diff_rows[:500]
             _partners_add_history(
                 state,
                 partner_key,
-                "Planilha CSV importada",
+                "Planilha importada",
                 f"{partner_name}: {len(prepared)} linhas · {uploaded_sheet.name}"
             )
             _partners_save_state(state)
-            st.success("CSV importado e espelhado no sistema.")
+            st.success("Planilha importada e espelhada no sistema.")
             app_rerun()
 
     if save_internal_clicked:
@@ -4287,6 +4256,7 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
             "linhas_novas": 0,
             "linhas_alteradas": 0,
             "linhas_removidas": 0,
+            "total_diferencas": 0,
         }
         _partners_add_history(state, partner_key, "Dados internos salvos", partner_name)
         _partners_save_state(state)
@@ -4296,7 +4266,7 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
     partner = state["partners"][partner_key]
     df = _partners_rows_to_df(partner)
     if df.empty or len(df) == 0:
-        st.info("Importe uma planilha CSV para iniciar a tabela espelhada.")
+        st.info("Importe uma planilha Excel ou CSV para iniciar a tabela espelhada.")
         return
 
     st.markdown("##### Tabela espelhada estilo Excel")
@@ -4374,6 +4344,7 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
             "Linhas novas": last_update.get("linhas_novas", 0),
             "Linhas alteradas": last_update.get("linhas_alteradas", 0),
             "Linhas removidas": last_update.get("linhas_removidas", 0),
+            "Total de diferenças": last_update.get("total_diferencas", 0),
         })
     diff_rows = partner.get("diff_rows", [])
     if diff_rows:
@@ -4482,10 +4453,10 @@ def _render_partner_history(state: dict, partner_key: str) -> None:
     h1, h2 = st.columns(2)
     with h1:
         st.markdown(f"##### Histórico {_partner_label(partner_key)}")
-        st.dataframe(partner.get("history", []), use_container_width=True, hide_index=True)
+        st.dataframe(_partners_history_rows(partner.get("history", [])), use_container_width=True, hide_index=True)
     with h2:
         st.markdown("##### Histórico Geral")
-        st.dataframe(state.get("history_general", []), use_container_width=True, hide_index=True)
+        st.dataframe(_partners_history_rows(state.get("history_general", [])), use_container_width=True, hide_index=True)
 
 def _render_partner_module_css() -> None:
     st.markdown("""
@@ -4534,13 +4505,40 @@ def _render_partner_module_css() -> None:
         display: flex;
         align-items: center;
         justify-content: center;
-        min-height: 92px;
+        width: 140px;
+        height: 96px;
         border: 1px dashed rgba(144,202,249,.30);
         border-radius: 10px;
         color: #7f96ad;
         font-size: .78rem;
         letter-spacing: 1px;
-        margin-bottom: 12px;
+        margin: 0 auto 12px auto;
+    }
+    .partner-logo-frame {
+        width: 140px;
+        height: 96px;
+        margin: 0 auto 14px auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid rgba(144,202,249,.22);
+        border-radius: 10px;
+        background: rgba(5,14,26,.48);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    .partner-logo-img {
+        max-width: 120px;
+        max-height: 80px;
+        width: auto;
+        height: auto;
+        object-fit: contain;
+        display: block;
+    }
+    .partner-logo-empty {
+        color: #7f96ad;
+        font-size: .72rem;
+        letter-spacing: 1.5px;
+        text-transform: uppercase;
     }
     .partner-section-card {
         background: linear-gradient(145deg, rgba(18,33,54,.98), rgba(7,15,28,.98));
@@ -4560,31 +4558,15 @@ def _render_partner_module_css() -> None:
 def _render_partner_selection(state: dict, allowed: list) -> None:
     st.markdown(
         "<div class='partner-window-title'>Parceiros</div>"
-        "<div class='partner-window-subtitle'>Anexe a logomarca e selecione a parceira para abrir o controle de voos e dados.</div>",
+        "<div class='partner-window-subtitle'>Selecione a parceira para abrir o controle de voos e dados.</div>",
         unsafe_allow_html=True,
     )
     cols = st.columns(max(1, len(allowed)), gap="large")
     for col, partner_key in zip(cols, allowed):
         with col:
             label = _partner_label(partner_key)
-            uploaded_logo = st.file_uploader(
-                f"Anexar logomarca {label}",
-                type=["png", "jpg", "jpeg", "webp"],
-                key=f"partner_logo_upload_{partner_key}",
-            )
-            if uploaded_logo is not None:
-                _partners_save_logo(state, partner_key, uploaded_logo)
-                _partners_add_history(state, partner_key, "Logomarca atualizada", label)
-                _partners_save_state(state)
-                st.success(f"Logomarca de {label} salva.")
-                app_rerun()
-
-            logo_path = _partners_logo_path(partner_key)
             st.markdown("<div class='partner-card'>", unsafe_allow_html=True)
-            if logo_path and logo_path.exists():
-                app_image(str(logo_path))
-            else:
-                st.markdown("<div class='partner-logo-slot'>LOGOMARCA</div>", unsafe_allow_html=True)
+            st.markdown(_partners_logo_html(partner_key), unsafe_allow_html=True)
             st.markdown(f"<div class='partner-card-title'>{label}</div>", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
             if st.button(label, key=f"partner_open_{partner_key}", type="primary", use_container_width=True):
@@ -4594,7 +4576,7 @@ def _render_partner_selection(state: dict, allowed: list) -> None:
 
 def _render_partner_section_buttons(partner_key: str) -> None:
     sections = [
-        ("sheet", "Planilha", "Espelho CSV, edição e comparação"),
+        ("sheet", "Planilha", "Espelho Excel/CSV, edição e comparação"),
         ("chat", "Tratativa", "Assuntos, prazos e citações"),
         ("history", "Histórico", "Registros e auditoria"),
     ]
@@ -4640,7 +4622,7 @@ def render_parceiros_controle() -> None:
     user = _auth_current_user()
     allowed = _auth_allowed_partners(user)
     if not allowed:
-        st.warning("Seu usuário não possui permissão para acessar IVA ou ALVÁS.")
+        st.warning("Seu usuário não possui permissão para acessar EIWA ou ALVAZ.")
         return
     state = _partners_load_state()
     _render_partner_module_css()
@@ -4650,7 +4632,7 @@ def render_parceiros_controle() -> None:
             Parceiros / Controle de Voos e Dados
         </div>
         <div class='partner-hero-subtitle'>
-            Módulo isolado para IVA e ALVÁS: planilhas CSV, tratativas, prazos, histórico e exportações.
+            Módulo isolado para EIWA e ALVAZ: planilhas, tratativas, prazos, histórico e exportações.
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -4692,6 +4674,291 @@ def _render_partner_mention_notifications() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+def _render_partner_logo_settings() -> None:
+    if not _auth_is_admin():
+        st.warning("Apenas o administrador Wellington pode alterar as logos das parceiras.")
+        return
+    _render_partner_module_css()
+    state = _partners_load_state()
+    st.markdown("#### Logos das Parceiras")
+    st.caption("As logos ficam salvas na pasta padrão do sistema e aparecem automaticamente na tela de Parceiros.")
+    cols = st.columns(2, gap="large")
+    for col, partner_key in zip(cols, PARTNER_KEYS):
+        with col:
+            label = _partner_label(partner_key)
+            st.markdown(f"<div class='partner-section-card'><div class='partner-card-title'>{label}</div>{_partners_logo_html(partner_key)}</div>", unsafe_allow_html=True)
+            uploaded = st.file_uploader(
+                f"Adicionar ou trocar logo {label}",
+                type=["png", "jpg", "jpeg", "webp"],
+                key=f"cfg_partner_logo_{partner_key}",
+            )
+            if uploaded is not None:
+                _partners_save_logo(state, partner_key, uploaded)
+                _partners_add_history(state, partner_key, "Logomarca atualizada", label)
+                _partners_save_state(state)
+                st.success(f"Logo {label} salva.")
+                app_rerun()
+            logo_path = _partners_logo_path(partner_key)
+            if logo_path:
+                st.caption(f"Arquivo salvo: {logo_path}")
+
+def _render_logged_user_chip() -> None:
+    if not st.session_state.get("logged_in", False):
+        return
+    user_name = _auth_user_name()
+    st.markdown(
+        f"""
+        <div style='position:fixed;left:14px;top:58px;z-index:999997;pointer-events:none;
+                    background:linear-gradient(145deg,rgba(20,48,78,.96),rgba(8,22,39,.96));
+                    border:1px solid var(--tmg-primary);border-radius:10px;padding:9px 13px;
+                    color:#e8f3ff;font-weight:800;font-size:.82rem;letter-spacing:.4px;
+                    box-shadow:4px 4px 12px rgba(0,0,0,.45),-1px -1px 5px rgba(255,255,255,.04),
+                               0 0 16px var(--tmg-primary-glow);
+                    text-shadow:1px 1px 0 rgba(0,0,0,.65);'>
+            Usuário: {user_name}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def _save_uploaded_files_generic(files, target_dir: Path) -> tuple:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved = []
+    total_size = 0
+    for uploaded in files or []:
+        try:
+            uploaded.seek(0)
+        except Exception:
+            pass
+        data = uploaded.read()
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        safe_name = Path(uploaded.name).name
+        target = target_dir / safe_name
+        if target.exists():
+            target = target_dir / f"{target.stem}_{datetime.now().strftime('%H%M%S%f')}{target.suffix}"
+        target.write_bytes(data)
+        total_size += len(data)
+        saved.append({
+            "nome": uploaded.name,
+            "path": str(target),
+            "tamanho": len(data),
+            "tamanho_fmt": _tv_human_size(len(data)),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        })
+    return saved, total_size
+
+def _render_orthomosaic_generator() -> None:
+    st.subheader("🛰️ Geração de Ortomosaicos")
+    st.info("Estrutura preparada para processamento externo com Docker/WebODM/OpenDroneMap sem travar o Streamlit.")
+
+    jobs_root = SYSTEM_DATABASE_DIR / "ortomosaicos_jobs"
+    default_output = SYSTEM_DATABASE_DIR / "ortomosaicos"
+    files = st.file_uploader(
+        "Anexar múltiplas fotos de drone",
+        type=["jpg", "jpeg", "png", "tif", "tiff", "dng", "raw", "arw", "cr2", "nef"],
+        accept_multiple_files=True,
+        key="ortho_generator_images",
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        job_name = st.text_input("Nome do processamento", value=f"ortomosaico_{date.today().strftime('%Y%m%d')}", key="ortho_job_name")
+        qualidade = st.selectbox("Qualidade do processamento", ["Alta", "Média", "Rápida"], key="ortho_quality")
+    with c2:
+        resolucao = st.text_input("Resolução / GSD desejado", value="5 cm/px", key="ortho_resolution")
+        docker_image = st.text_input("Imagem Docker", value="opendronemap/odm:latest", key="ortho_docker_image")
+    with c3:
+        output_dir = st.text_input("Pasta de saída", value=str(default_output), key="ortho_output_dir")
+        execute_external = st.checkbox("Executar comando externo neste ambiente", value=False, key="ortho_execute_external")
+
+    command_template = st.text_area(
+        "Comando externo / Docker preparado",
+        value=(
+            "docker run --rm -v \"{input_dir}:/datasets/project/images\" "
+            "-v \"{output_dir}:/datasets/project/odm_orthophoto\" "
+            "{docker_image} --project-path /datasets project --orthophoto-resolution {resolution}"
+        ),
+        key="ortho_command_template",
+        height=90,
+    )
+    st.caption("No Streamlit Cloud, deixe a execução externa desligada e use o pacote/configuração gerado para rodar no Docker/VS Code/WebODM.")
+
+    if st.button("🛰️ Iniciar geração do ortomosaico", type="primary", key="ortho_start_generation", use_container_width=True):
+        if not files:
+            st.warning("Anexe as fotos do drone antes de iniciar.")
+            return
+        job_id = f"ORT_JOB_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_tv_safe_name(job_name)}"
+        job_dir = jobs_root / job_id
+        input_dir = job_dir / "input_images"
+        logs_dir = job_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        progress = st.progress(0)
+        status = st.empty()
+        status.info("1/5 — Salvando imagens de entrada com integridade...")
+        saved, total_size = _save_uploaded_files_generic(files, input_dir)
+        progress.progress(25)
+
+        output_path = _resolve_system_path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        command = command_template.format(
+            input_dir=str(input_dir),
+            output_dir=str(output_path),
+            docker_image=docker_image,
+            resolution=resolucao,
+            quality=qualidade,
+            job_id=job_id,
+        )
+        job_config = {
+            "job_id": job_id,
+            "criado_em": _now_human(),
+            "usuario": _auth_user_name(),
+            "qualidade": qualidade,
+            "resolucao": resolucao,
+            "input_dir": str(input_dir),
+            "output_dir": str(output_path),
+            "docker_image": docker_image,
+            "command": command,
+            "arquivos": saved,
+        }
+        (job_dir / "job_config.json").write_text(json.dumps(job_config, indent=2, ensure_ascii=False), encoding="utf-8")
+        progress.progress(45)
+
+        log_path = logs_dir / "processing.log"
+        status.info("2/5 — Preparando comando externo e logs do processamento...")
+        log_lines = [
+            f"[{_now_human()}] Job criado: {job_id}",
+            f"Entrada: {input_dir}",
+            f"Saída: {output_path}",
+            f"Comando preparado: {command}",
+        ]
+        if execute_external and os.environ.get("TMG_ALLOW_EXTERNAL_PROCESS") == "1":
+            status.info("3/5 — Executando comando externo autorizado...")
+            try:
+                result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60 * 60)
+                log_lines.append(result.stdout or "")
+                log_lines.append(result.stderr or "")
+                log_lines.append(f"Código de saída: {result.returncode}")
+            except Exception as exc:
+                log_lines.append(f"Falha ao executar comando externo: {exc}")
+        else:
+            log_lines.append("Execução externa não realizada neste ambiente. Use o comando acima em Docker/VS Code/WebODM.")
+        log_path.write_text("\n".join(log_lines), encoding="utf-8")
+        progress.progress(70)
+
+        package_base = jobs_root / f"{job_id}_pacote_integracao"
+        package_zip = shutil.make_archive(str(package_base), "zip", root_dir=job_dir)
+        progress.progress(100)
+        status.success("5/5 — Estrutura de geração preparada.")
+
+        st.success(f"Processamento `{job_id}` preparado com {len(saved)} imagem(ns), total {_tv_human_size(total_size)}.")
+        st.json({
+            "Job": job_id,
+            "Entrada": str(input_dir),
+            "Saída": str(output_path),
+            "Log": str(log_path),
+            "Pacote Docker/VS Code": package_zip,
+        })
+        st.download_button(
+            "⬇️ Baixar pacote de integração",
+            data=Path(package_zip).read_bytes(),
+            file_name=Path(package_zip).name,
+            mime="application/zip",
+            use_container_width=True,
+        )
+        outputs = list(output_path.glob("*.tif")) + list(output_path.glob("*.tiff")) + list(output_path.glob("*.png")) + list(output_path.glob("*.jpg"))
+        if outputs:
+            selected_output = st.selectbox("Ortomosaico gerado disponível", [str(p) for p in outputs], key=f"ortho_output_select_{job_id}")
+            st.caption(f"Arquivo pronto para visualizar/baixar: {selected_output}")
+        else:
+            st.info("Quando o Docker/WebODM gerar o ortomosaico na pasta de saída, ele aparecerá aqui para visualização ou download.")
+
+def _render_sync_backup() -> None:
+    st.subheader("🔄 Backup e Sincronização de Dados")
+    st.info("Área real para gerar backup dos dados internos e preparar sincronização com Google Drive ou pasta externa.")
+
+    backup_root = SYSTEM_DATABASE_DIR / "backups"
+    sync_config_path = SYSTEM_DATABASE_DIR / "sync_config.json"
+    try:
+        sync_config = json.loads(sync_config_path.read_text(encoding="utf-8")) if sync_config_path.exists() else {}
+    except Exception:
+        sync_config = {}
+
+    c1, c2 = st.columns(2)
+    with c1:
+        drive_target = st.text_input("Link ou caminho do Google Drive / destino", value=sync_config.get("destino", ""), key="sync_drive_target")
+        destination_folder = st.text_input("Pasta de destino", value=sync_config.get("pasta_destino", "TMG_Backups"), key="sync_destination_folder")
+        local_source = st.text_input("Caminho local dos dados", value=str(SYSTEM_DATABASE_DIR), key="sync_local_source")
+    with c2:
+        client_id = st.text_input("Google client_id", value=sync_config.get("client_id", ""), key="sync_client_id")
+        client_secret = st.text_input("Google client_secret", value="", type="password", key="sync_client_secret")
+        token = st.text_input("Token / refresh token", value="", type="password", key="sync_token")
+
+    st.caption("Se a API do Google Drive exigir credenciais, preencha os campos acima. Sem credenciais, o sistema gera um pacote ZIP seguro para envio manual ou cópia local.")
+    if st.button("▶ Iniciar sincronização / backup", type="primary", key="sync_start_backup", use_container_width=True):
+        progress = st.progress(0)
+        status = st.empty()
+        status.info("1/4 — Mapeando dados internos do sistema...")
+        source = _resolve_system_path(local_source)
+        backup_root.mkdir(parents=True, exist_ok=True)
+        backup_id = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        backup_file = backup_root / f"{backup_id}.zip"
+
+        files_to_zip = []
+        if source.exists():
+            for path in source.rglob("*"):
+                if path.is_file() and backup_root not in path.parents:
+                    files_to_zip.append(path)
+        progress.progress(30)
+
+        status.info("2/4 — Compactando arquivos, históricos, tratativas, imagens e configurações...")
+        with zipfile.ZipFile(backup_file, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in files_to_zip:
+                try:
+                    zf.write(path, arcname=str(Path("dados") / path.relative_to(source)))
+                except Exception:
+                    pass
+            for extra in (SYSTEM_CONFIG_PATH, LOGO_PATH, LOGIN_BG_PATH):
+                if extra.exists():
+                    zf.write(extra, arcname=str(Path("configuracoes") / extra.name))
+        progress.progress(70)
+
+        copied_to = ""
+        target_text = str(drive_target or "").strip()
+        if target_text and not target_text.lower().startswith(("http://", "https://")):
+            try:
+                target_dir = _resolve_system_path(target_text) / _tv_safe_name(destination_folder or "TMG_Backups")
+                target_dir.mkdir(parents=True, exist_ok=True)
+                copied = target_dir / backup_file.name
+                shutil.copy2(backup_file, copied)
+                copied_to = str(copied)
+            except Exception as exc:
+                copied_to = f"Não foi possível copiar automaticamente: {exc}"
+        progress.progress(90)
+
+        sync_config = {
+            "destino": drive_target,
+            "pasta_destino": destination_folder,
+            "client_id": client_id,
+            "client_secret_configurado": bool(client_secret),
+            "token_configurado": bool(token),
+            "ultimo_backup": _now_human(),
+            "ultimo_arquivo": str(backup_file),
+            "copiado_para": copied_to,
+        }
+        sync_config_path.write_text(json.dumps(sync_config, indent=2, ensure_ascii=False), encoding="utf-8")
+        progress.progress(100)
+        status.success("4/4 — Backup finalizado e registro atualizado.")
+        st.success(f"Backup criado: `{backup_file}`")
+        st.json(sync_config)
+        st.download_button(
+            "⬇️ Baixar backup ZIP",
+            data=backup_file.read_bytes(),
+            file_name=backup_file.name,
+            mime="application/zip",
+            use_container_width=True,
+        )
 
 
 
@@ -4774,6 +5041,8 @@ with st.sidebar:
 # ==========================================
 # TOPO (LOGO FIXA)[cite: 1]
 # ==========================================
+_render_logged_user_chip()
+
 if st.session_state.logo_sistema and st.session_state.pagina_ativa not in ('TransferenciaVoos', 'VoosDirecionados'):
     col1, col2, col3 = st.columns([1,1,1])
     with col2:
@@ -6691,12 +6960,15 @@ window.addEventListener('resize', resize);
             st.caption("Altere esta pasta pelo menu Banco de Dados Sistema.")
 
         if _auth_is_admin():
+            with st.expander("Logos das Parceiras", expanded=False):
+                _render_partner_logo_settings()
+
             with st.expander("Gerenciar Usuários", expanded=False):
                 _render_manage_users()
 
             with st.expander("Histórico Geral do Sistema", expanded=False):
                 state_hist = _partners_load_state()
-                st.dataframe(state_hist.get("history_general", []), use_container_width=True, hide_index=True)
+                st.dataframe(_partners_history_rows(state_hist.get("history_general", [])), use_container_width=True, hide_index=True)
 
     # BASES[cite: 1]
     elif st.session_state.pagina_ativa == 'Bases':
@@ -6773,72 +7045,11 @@ window.addEventListener('resize', resize);
 
     # SINCRONIZAR DADOS[cite: 1]
     elif st.session_state.pagina_ativa == 'Sync':
-        st.subheader("🔄 Sincronização de Dados")
-
-        st.info("Gerencie a sincronização entre bases locais e remotas.")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown("<h4 style='color:#ff8c00;'>Origem</h4>", unsafe_allow_html=True)
-            st.text_input("Servidor de Origem", value=str(SYSTEM_DATABASE_DIR))
-            st.selectbox("Protocolo", ["FTP", "SFTP", "S3", "API REST"])
-
-        with col2:
-            st.markdown("<h4 style='color:#ff8c00;'>Destino</h4>", unsafe_allow_html=True)
-            st.text_input("Servidor de Destino", value="nuvem.tmg.com.br")
-            st.selectbox("Frequência", ["Manual", "A cada hora", "Diário", "Semanal"])
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        col_a, col_b, col_c = st.columns([1,1,1])
-        with col_b:
-            if st.button("▶ Iniciar Sincronização", type="primary"):
-                with st.spinner("Sincronizando dados..."):
-                    import time
-                    time.sleep(2)
-                st.success("✅ Sincronização concluída com sucesso!")
-                st.balloons()
+        _render_sync_backup()
 
     # GERAR ORTOMOSAICOS[cite: 1]
     elif st.session_state.pagina_ativa == 'Ortomosaicos':
-        st.subheader("🛰️ Geração de Ortomosaicos")
-
-        st.info("Configure e processe a geração de ortomosaicos a partir das imagens carregadas.")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown("<h4 style='color:#ff8c00;'>Parâmetros de Processamento</h4>", unsafe_allow_html=True)
-            st.selectbox("Resolução de Saída", ["5 cm/px", "10 cm/px", "20 cm/px", "50 cm/px"])
-            st.selectbox("Método de Alinhamento", ["Alta Precisão", "Média Precisão", "Rápida"])
-            st.selectbox("Sistema de Coordenadas", ["SIRGAS 2000 (EPSG:4674)", "WGS 84 (EPSG:4326)", "UTM Zone 21S"])
-            st.number_input("Sobreposição Frontal (%)", min_value=60, max_value=95, value=80)
-            st.number_input("Sobreposição Lateral (%)", min_value=60, max_value=95, value=75)
-
-        with col2:
-            st.markdown("<h4 style='color:#ff8c00;'>Área de Processamento</h4>", unsafe_allow_html=True)
-            st.text_input("Diretório de Imagens", value=str(SYSTEM_DATABASE_DIR / "imagens"))
-            st.text_input("Diretório de Saída", value=str(SYSTEM_DATABASE_DIR / "ortomosaicos"))
-            st.text_area("Notas do Voo", placeholder="Descreva condições do voo, sensor utilizado, altitude, etc.")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        cols_btn = st.columns([1,1,1])
-        with cols_btn[1]:
-            if st.button("🛰️ Gerar Ortomosaico", type="primary"):
-                with st.spinner("Processando ortomosaico..."):
-                    import time
-                    progress = st.progress(0)
-                    for i in range(100):
-                        time.sleep(0.03)
-                        progress.progress(i + 1)
-                st.success("✅ Ortomosaico gerado com sucesso!")
-                st.markdown(
-                    "<p style='color:#ff8c00; text-align:center;'>📁 Arquivo salvo em: "
-                    f"<code>{SYSTEM_DATABASE_DIR / 'ortomosaicos' / 'orto_output.tif'}</code></p>",
-                    unsafe_allow_html=True
-                )
+        _render_orthomosaic_generator()
 
     # ==========================================
     # NOVO - VISUALIZADOR DE RESULTADOS
