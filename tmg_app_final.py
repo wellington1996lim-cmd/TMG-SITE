@@ -468,7 +468,7 @@ PARTNER_BUTTON_LABELS = {"eiwa": "EIWA", "alvaz": "ALVAZ"}
 PARTNER_STATUS_OPTIONS = ["Executado", "Não executado"]
 PARTNER_TREATMENT_STATUS = ["Aberto", "Em andamento", "Concluído", "Resolvido", "Atrasado"]
 PARTNER_TREATMENT_DONE = {"Concluído", "Resolvido"}
-PARTNER_INTERNAL_COLUMNS = ["Status de Execução", "Descrição / Observação", "Última Alteração", "Usuário Responsável"]
+PARTNER_INTERNAL_COLUMNS = ["Status de Execução", "Tratativa", "Descrição / Observação", "Última Alteração", "Usuário Responsável"]
 PARTNER_ROW_ID = "__tmg_row_id"
 MENU_PERMISSION_OPTIONS = {
     "menu_checklist": "Checklist",
@@ -479,6 +479,16 @@ MENU_PERMISSION_OPTIONS = {
     "menu_ortomosaicos": "Gerar Ortomosaico",
     "menu_parceiros": "Parceiros",
     "menu_controle_dados": "Controle de Dados",
+}
+PARTNER_PERMISSION_OPTIONS = {
+    "partner_sheet_view": "Visualizar planilha",
+    "partner_sheet_import": "Importar planilha",
+    "partner_sheet_edit_rows": "Editar linhas",
+    "partner_sheet_delete_rows": "Excluir linhas",
+    "partner_sheet_edit_header": "Editar cabeçalho",
+    "partner_sheet_write_treatment": "Escrever tratativas na planilha",
+    "partner_sheet_history": "Acessar histórico",
+    "partner_sheet_export": "Exportar planilha",
 }
 
 def _now_iso() -> str:
@@ -498,6 +508,8 @@ def _default_permissions(all_access: bool = True) -> dict:
         "alvaz": bool(all_access),
     }
     for key in MENU_PERMISSION_OPTIONS:
+        permissions[key] = bool(all_access)
+    for key in PARTNER_PERMISSION_OPTIONS:
         permissions[key] = bool(all_access)
     return permissions
 
@@ -562,6 +574,8 @@ def _auth_load_users() -> dict:
                 perms[key] = legacy_culture_access
             elif key in ("menu_parceiros", "menu_controle_dados"):
                 perms[key] = legacy_partner_access
+            elif key in PARTNER_PERMISSION_OPTIONS:
+                perms[key] = legacy_partner_access
             else:
                 perms[key] = value
     return data
@@ -610,6 +624,9 @@ def _auth_permissions(user: dict = None) -> dict:
     for key in ("menu_parceiros", "menu_controle_dados"):
         if key not in perms:
             normalized[key] = legacy_partner_access
+    for key in PARTNER_PERMISSION_OPTIONS:
+        if key not in perms:
+            normalized[key] = legacy_partner_access
     return normalized
 
 def _auth_allowed_cultures(user: dict = None) -> list:
@@ -631,6 +648,9 @@ def _auth_can_partners(user: dict = None) -> bool:
 
 def _auth_menu_allowed(menu_key: str, user: dict = None) -> bool:
     return bool(_auth_permissions(user).get(menu_key))
+
+def _auth_partner_permission(permission_key: str, user: dict = None) -> bool:
+    return bool(_auth_permissions(user).get(permission_key))
 
 def _auth_allowed_partners(user: dict = None) -> list:
     perms = _auth_permissions(user)
@@ -699,7 +719,7 @@ def _partners_save_state(state: dict) -> None:
     PARTNERS_ROOT.mkdir(parents=True, exist_ok=True)
     PARTNERS_STATE_PATH.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
 
-def _partners_add_history(state: dict, partner_key: str, acao: str, detalhes: str = "") -> None:
+def _partners_add_history(state: dict, partner_key: str, acao: str, detalhes: str = "", extra: dict = None) -> None:
     item = {
         "data_hora": _now_human(),
         "usuario": _auth_user_name(),
@@ -707,6 +727,8 @@ def _partners_add_history(state: dict, partner_key: str, acao: str, detalhes: st
         "acao": acao,
         "detalhes": detalhes,
     }
+    if isinstance(extra, dict):
+        item.update(extra)
     state.setdefault("history_general", []).insert(0, item)
     state["history_general"] = state["history_general"][:1000]
     if partner_key in state.get("partners", {}):
@@ -824,19 +846,92 @@ def _partners_read_sheet_upload(uploaded_file) -> tuple:
                 raise ValueError("; ".join(errors[-2:]))
         else:
             return None, "Formato não suportado. Envie arquivos .xlsx, .xls ou .csv."
-        return _partners_clean_dataframe(df), ""
-    except Exception as exc:
-        return None, f"Não consegui ler a planilha enviada. Confira se o arquivo é .xlsx, .xls ou .csv válido. Detalhe: {exc}"
+        df = _partners_clean_dataframe(df)
+        if df.empty and len(df.columns) == 0:
+            return None, "Não foi possível importar a planilha. Verifique o formato do arquivo e tente novamente."
+        return df, ""
+    except Exception:
+        return None, "Não foi possível importar a planilha. Verifique o formato do arquivo e tente novamente."
+
+def _partners_unique_columns(columns) -> list:
+    seen = {}
+    unique = []
+    for idx, raw_col in enumerate(columns):
+        base = str(raw_col).strip() or f"Coluna {idx + 1}"
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        unique.append(base if count == 0 else f"{base}_{count + 1}")
+    return unique
 
 def _partners_clean_dataframe(df) -> pd.DataFrame:
     if df is None:
         return pd.DataFrame()
     df = df.copy()
-    df.columns = [str(col).strip() or f"Coluna {idx + 1}" for idx, col in enumerate(df.columns)]
+    df.columns = _partners_unique_columns(df.columns)
     df = df.replace({np.nan: ""})
     for col in df.columns:
         df[col] = df[col].map(lambda value: value.isoformat() if hasattr(value, "isoformat") else str(value) if value is not None else "")
     return df
+
+def _partners_row_label(row: dict, idx: int = 0) -> str:
+    row_id = str(row.get(PARTNER_ROW_ID, "")).strip()
+    values = [str(v).strip() for k, v in row.items() if k != PARTNER_ROW_ID and str(v).strip()]
+    preview = " · ".join(values[:2]) if values else row_id
+    return f"{idx + 1} · {preview[:80]} · {row_id}"
+
+def _partners_safe_excel_bytes(export_df: pd.DataFrame) -> tuple:
+    if export_df is None:
+        return None, "Não foi possível exportar a planilha agora."
+    max_rows, max_cols = 1048576, 16384
+    if len(export_df) > max_rows or len(export_df.columns) > max_cols:
+        return None, "A planilha ultrapassa o limite do Excel. Use a exportação CSV para baixar todos os dados."
+    try:
+        excel_buf = BytesIO()
+        export_df.replace({np.nan: ""}).to_excel(excel_buf, index=False)
+        return excel_buf.getvalue(), ""
+    except Exception:
+        return None, "Não foi possível exportar para Excel. Use a exportação CSV ou revise a planilha."
+
+def _partners_rename_column(partner: dict, old_name: str, new_name: str) -> tuple:
+    old_name = str(old_name or "").strip()
+    new_name = str(new_name or "").strip()
+    if not old_name or not new_name:
+        return False, "Informe o nome atual e o novo nome da coluna."
+    if old_name == new_name:
+        return False, "O cabeçalho já está com esse nome."
+    if new_name == PARTNER_ROW_ID or new_name in PARTNER_INTERNAL_COLUMNS:
+        return False, "Esse nome é reservado pelo sistema."
+    columns = list(partner.get("columns", []))
+    if old_name not in columns:
+        return False, "Coluna não encontrada na planilha atual."
+    if new_name in columns:
+        return False, "Já existe uma coluna com esse nome."
+    partner["columns"] = [new_name if col == old_name else col for col in columns]
+    for collection_name in ("rows", "baseline_rows", "diff_rows"):
+        for row in partner.get(collection_name, []) or []:
+            if old_name in row:
+                row[new_name] = row.pop(old_name)
+    partner["baseline_columns"] = [new_name if col == old_name else col for col in partner.get("baseline_columns", [])]
+    return True, ""
+
+def _partners_add_blank_row(partner: dict, partner_key: str) -> dict:
+    row_id = hashlib.sha1(f"{partner_key}-{_auth_user_name()}-{_now_iso()}-{len(partner.get('rows', []))}".encode()).hexdigest()[:12]
+    row = {PARTNER_ROW_ID: row_id}
+    row["Status de Execução"] = "Não executado"
+    for col in partner.get("columns", []):
+        row[col] = ""
+    for col in PARTNER_INTERNAL_COLUMNS:
+        row.setdefault(col, "Não executado" if col == "Status de Execução" else "")
+    row["Última Alteração"] = _now_human()
+    row["Usuário Responsável"] = _auth_user_name()
+    partner.setdefault("rows", []).append(row)
+    return row
+
+def _partners_delete_row(partner: dict, row_id: str) -> bool:
+    rows = partner.get("rows", [])
+    before = len(rows)
+    partner["rows"] = [row for row in rows if str(row.get(PARTNER_ROW_ID, "")) != str(row_id)]
+    return len(partner["rows"]) != before
 
 def _partners_ensure_row_ids(rows: list) -> list:
     prepared = []
@@ -862,8 +957,9 @@ def _partners_rows_to_df(partner_data: dict) -> pd.DataFrame:
             lambda value: value if str(value) in PARTNER_STATUS_OPTIONS else "Não executado"
         )
     status_cols = ["Status de Execução"] if "Status de Execução" in df.columns else []
-    other_internal = [col for col in PARTNER_INTERNAL_COLUMNS if col in df.columns and col not in status_cols]
-    ordered = [PARTNER_ROW_ID] + status_cols + [col for col in columns if col in df.columns] + other_internal
+    front_internal = [col for col in ("Tratativa", "Descrição / Observação") if col in df.columns]
+    tail_internal = [col for col in PARTNER_INTERNAL_COLUMNS if col in df.columns and col not in status_cols + front_internal]
+    ordered = [PARTNER_ROW_ID] + status_cols + front_internal + [col for col in columns if col in df.columns] + tail_internal
     ordered += [col for col in df.columns if col not in ordered]
     return df[ordered].replace({np.nan: ""})
 
@@ -948,7 +1044,11 @@ def _partners_merge_edited_rows(base_df: pd.DataFrame, visible_ids: list, edited
     for _, row in base.iterrows():
         row_id = str(row.get(PARTNER_ROW_ID, ""))
         if row_id in visible_set and row_id not in edited_ids:
-            logs.append(("Linha excluída", row_id))
+            logs.append((
+                "Linha excluída",
+                row_id,
+                {"tipo_acao": "exclusão", "linha": row_id, "campo": "", "valor_antigo": "linha existente", "valor_novo": "linha removida"}
+            ))
             continue
         keep_rows.append(row.to_dict())
     merged = pd.DataFrame(keep_rows)
@@ -963,7 +1063,11 @@ def _partners_merge_edited_rows(base_df: pd.DataFrame, visible_ids: list, edited
             row_dict[PARTNER_ROW_ID] = row_id
             row_dict["Última Alteração"] = now
             row_dict["Usuário Responsável"] = current_user
-            logs.append(("Linha criada", row_id))
+            logs.append((
+                "Linha criada",
+                row_id,
+                {"tipo_acao": "edição", "linha": row_id, "campo": "", "valor_antigo": "", "valor_novo": "linha criada"}
+            ))
             merged.loc[row_id, list(row_dict.keys())] = list(row_dict.values())
             continue
         previous_status = str(merged.at[row_id, "Status de Execução"]) if "Status de Execução" in merged.columns else ""
@@ -972,16 +1076,25 @@ def _partners_merge_edited_rows(base_df: pd.DataFrame, visible_ids: list, edited
         for col, value in row_dict.items():
             if col not in merged.columns:
                 merged[col] = ""
-            if str(merged.at[row_id, col]) != str(value):
+            old_value = str(merged.at[row_id, col])
+            if old_value != str(value):
                 merged.at[row_id, col] = value
                 if col != PARTNER_ROW_ID:
                     changed_cols.append(col)
+                    logs.append((
+                        "Linha alterada",
+                        f"{row_id}: {col}",
+                        {"tipo_acao": "edição", "linha": row_id, "campo": col, "valor_antigo": old_value, "valor_novo": str(value)}
+                    ))
         if changed_cols:
             merged.at[row_id, "Última Alteração"] = now
             merged.at[row_id, "Usuário Responsável"] = current_user
-            logs.append(("Linha alterada", f"{row_id}: {', '.join(changed_cols)}"))
         if previous_status != new_status:
-            logs.append(("Status alterado", f"{row_id}: {previous_status} -> {new_status}"))
+            logs.append((
+                "Status alterado",
+                f"{row_id}: {previous_status} -> {new_status}",
+                {"tipo_acao": "edição", "linha": row_id, "campo": "Status de Execução", "valor_antigo": previous_status, "valor_novo": new_status}
+            ))
     merged = merged.reset_index(drop=True).replace({np.nan: ""})
     columns = [col for col in original_columns if col in merged.columns]
     for col in PARTNER_INTERNAL_COLUMNS:
@@ -992,8 +1105,9 @@ def _partners_merge_edited_rows(base_df: pd.DataFrame, visible_ids: list, edited
             lambda value: value if str(value) in PARTNER_STATUS_OPTIONS else "Não executado"
         )
     status_cols = ["Status de Execução"] if "Status de Execução" in merged.columns else []
-    other_internal = [col for col in PARTNER_INTERNAL_COLUMNS if col in merged.columns and col not in status_cols]
-    ordered = [PARTNER_ROW_ID] + status_cols + columns + other_internal
+    front_internal = [col for col in ("Tratativa", "Descrição / Observação") if col in merged.columns]
+    tail_internal = [col for col in PARTNER_INTERNAL_COLUMNS if col in merged.columns and col not in status_cols + front_internal]
+    ordered = [PARTNER_ROW_ID] + status_cols + front_internal + columns + tail_internal
     ordered += [col for col in merged.columns if col not in ordered]
     return merged[ordered], logs
 
@@ -4057,6 +4171,7 @@ def _render_manage_users() -> None:
                 "Culturas": ", ".join(_auth_allowed_cultures(user)) or "-",
                 "Parceiros": ", ".join(_partner_label(p) for p in _auth_allowed_partners(user)) or "-",
                 "Menus": ", ".join(label for key, label in MENU_PERMISSION_OPTIONS.items() if _auth_menu_allowed(key, user)) or "-",
+                "Planilha Parceiros": ", ".join(label for key, label in PARTNER_PERMISSION_OPTIONS.items() if _auth_partner_permission(key, user)) or "-",
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
@@ -4076,7 +4191,7 @@ def _render_manage_users() -> None:
             ativo = st.checkbox("Usuário ativo", value=bool(editing.get("ativo", True)))
         with c2:
             admin = st.checkbox("Administrador", value=bool(editing.get("admin", False)))
-            perms_current = editing.get("permissoes", _default_permissions(False))
+            perms_current = _auth_permissions(editing) if editing else _default_permissions(False)
             perm_culturas = st.checkbox("Acessar seleção de culturas", value=bool(perms_current.get("culturas", True)))
             p_soja, p_milho, p_alg = st.columns(3)
             with p_soja:
@@ -4099,6 +4214,17 @@ def _render_manage_users() -> None:
                 for col, (menu_key, menu_label) in zip(mcols, menu_items[idx:idx + 2]):
                     with col:
                         menu_values[menu_key] = st.checkbox(menu_label, value=bool(perms_current.get(menu_key, True)))
+            st.markdown("##### Permissões específicas da planilha de parceiros")
+            partner_perm_values = {}
+            partner_items = list(PARTNER_PERMISSION_OPTIONS.items())
+            for idx in range(0, len(partner_items), 2):
+                pcols = st.columns(2)
+                for col, (perm_key, perm_label) in zip(pcols, partner_items[idx:idx + 2]):
+                    with col:
+                        partner_perm_values[perm_key] = st.checkbox(
+                            perm_label,
+                            value=bool(perms_current.get(perm_key, False)),
+                        )
 
         save_user = st.form_submit_button("💾 Salvar usuário", type="primary", use_container_width=True)
 
@@ -4122,6 +4248,7 @@ def _render_manage_users() -> None:
                     "eiwa": perm_eiwa,
                     "alvaz": perm_alvaz,
                     **menu_values,
+                    **partner_perm_values,
                 },
                 "criado_em": editing.get("criado_em", _now_iso()),
                 "atualizado_em": _now_iso(),
@@ -4176,29 +4303,45 @@ def _render_partner_alerts(partner_data: dict) -> None:
 def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
     partner = state["partners"][partner_key]
     partner_name = _partner_label(partner_key)
-    st.markdown("##### Importação de planilha")
-    uploaded_sheet = st.file_uploader(
-        "Selecionar planilha Excel ou CSV",
-        type=["xlsx", "xls", "csv"],
-        key=f"partner_upload_sheet_{partner_key}",
-        help="Envie arquivos .xlsx, .xls ou .csv para espelhar os dados no sistema.",
-    )
-    st.caption("A planilha enviada será lida automaticamente e espelhada em uma tabela editável, separada por parceira.")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        import_clicked = st.button("📥 Importar planilha", key=f"partner_import_{partner_key}", use_container_width=True)
-    with c2:
-        update_clicked = st.button("🔄 Atualizar dados", key=f"partner_update_{partner_key}", use_container_width=True)
-    with c3:
-        save_internal_clicked = st.button("💾 Salvar Dados Internos", key=f"partner_save_internal_top_{partner_key}", use_container_width=True)
+    can_import = _auth_partner_permission("partner_sheet_import")
+    can_edit = _auth_partner_permission("partner_sheet_edit_rows") or _auth_partner_permission("partner_sheet_write_treatment")
+    uploaded_sheet = None
+    import_clicked = False
+    update_clicked = False
+    save_internal_clicked = False
+
+    if can_import:
+        st.markdown("##### Importação de planilha")
+        uploaded_sheet = st.file_uploader(
+            "Selecionar planilha Excel ou CSV",
+            type=["xlsx", "xls", "csv"],
+            key=f"partner_upload_sheet_{partner_key}",
+            help="Envie arquivos .xlsx, .xls ou .csv para espelhar os dados no sistema.",
+        )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            import_clicked = st.button("📥 Importar planilha", key=f"partner_import_{partner_key}", use_container_width=True)
+        with c2:
+            update_clicked = st.button("🔄 Atualizar dados", key=f"partner_update_{partner_key}", use_container_width=True)
+        with c3:
+            save_internal_clicked = st.button("💾 Salvar Dados Internos", key=f"partner_save_internal_top_{partner_key}", use_container_width=True)
+    else:
+        st.caption("Seu usuário pode visualizar os dados liberados, mas não possui permissão para importar planilhas.")
 
     if import_clicked or update_clicked:
-        df, err = _partners_read_sheet_upload(uploaded_sheet)
-        if err:
-            st.warning(err)
-        else:
+        try:
+            df, err = _partners_read_sheet_upload(uploaded_sheet)
+            if err:
+                st.warning("Não foi possível importar a planilha. Verifique o formato do arquivo e tente novamente.")
+                return
             new_clean = _partners_clean_dataframe(df)
+            if new_clean.empty and len(new_clean.columns) == 0:
+                st.warning("Não foi possível importar a planilha. Verifique o formato do arquivo e tente novamente.")
+                return
             original_columns = [col for col in new_clean.columns if col != PARTNER_ROW_ID and col not in PARTNER_INTERNAL_COLUMNS]
+            if not original_columns:
+                st.warning("Não foi possível importar a planilha. Verifique o formato do arquivo e tente novamente.")
+                return
             baseline_rows = partner.get("baseline_rows", [])
             baseline_columns = partner.get("baseline_columns", [])
             if not baseline_rows:
@@ -4243,13 +4386,16 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
                 state,
                 partner_key,
                 "Planilha importada",
-                f"{partner_name}: {len(prepared)} linhas · {uploaded_sheet.name}"
+                f"{partner_name}: {len(prepared)} linhas · {uploaded_sheet.name}",
+                {"tipo_acao": "importação", "linha": "", "campo": "", "valor_antigo": "", "valor_novo": uploaded_sheet.name}
             )
             _partners_save_state(state)
             st.success("Planilha importada e espelhada no sistema.")
             app_rerun()
+        except Exception:
+            st.warning("Não foi possível importar a planilha. Verifique o formato do arquivo e tente novamente.")
 
-    if save_internal_clicked:
+    if save_internal_clicked and can_edit:
         partner["last_update"] = {
             "data_hora": _now_human(),
             "usuario": _auth_user_name(),
@@ -4264,12 +4410,49 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
 
 def _render_partner_table(state: dict, partner_key: str) -> None:
     partner = state["partners"][partner_key]
+    can_view = _auth_partner_permission("partner_sheet_view")
+    can_edit_rows = _auth_partner_permission("partner_sheet_edit_rows")
+    can_delete_rows = _auth_partner_permission("partner_sheet_delete_rows")
+    can_edit_header = _auth_partner_permission("partner_sheet_edit_header")
+    can_write_treatment = _auth_partner_permission("partner_sheet_write_treatment")
+    can_export = _auth_partner_permission("partner_sheet_export")
+    if not can_view:
+        st.warning("Seu usuário não possui permissão para visualizar esta planilha.")
+        return
+
     df = _partners_rows_to_df(partner)
     if df.empty or len(df) == 0:
         st.info("Importe uma planilha Excel ou CSV para iniciar a tabela espelhada.")
         return
 
+    if can_edit_header and partner.get("columns"):
+        with st.expander("Editar cabeçalho da tabela", expanded=False):
+            h1, h2, h3 = st.columns([1.2, 1.4, .8])
+            with h1:
+                old_header = st.selectbox("Cabeçalho atual", partner.get("columns", []), key=f"partner_header_old_{partner_key}")
+            with h2:
+                new_header = st.text_input("Novo cabeçalho", value=old_header, key=f"partner_header_new_{partner_key}")
+            with h3:
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                if st.button("Salvar cabeçalho", key=f"partner_header_save_{partner_key}", type="primary", use_container_width=True):
+                    ok, msg = _partners_rename_column(partner, old_header, new_header)
+                    if ok:
+                        _partners_add_history(
+                            state,
+                            partner_key,
+                            "Cabeçalho alterado",
+                            f"{old_header} -> {new_header}",
+                            {"tipo_acao": "alteração de cabeçalho", "linha": "", "campo": old_header, "valor_antigo": old_header, "valor_novo": new_header}
+                        )
+                        _partners_save_state(state)
+                        st.success("Cabeçalho salvo.")
+                        app_rerun()
+                    else:
+                        st.warning(msg or "Não foi possível alterar o cabeçalho.")
+
     st.markdown("##### Tabela espelhada estilo Excel")
+    if can_write_treatment:
+        st.caption("Campos de tratativa disponíveis na tabela: Tratativa, Descrição / Observação, Última Alteração e Usuário Responsável.")
     f1, f2, f3 = st.columns([1.4, 1, 1.2])
     with f1:
         search = st.text_input("Buscar informações", key=f"partner_search_{partner_key}")
@@ -4280,58 +4463,134 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
         hidden_cols = st.multiselect("Ocultar colunas", hidable, key=f"partner_hidden_cols_{partner_key}")
 
     filtered = _partners_filter_dataframe(df, search, statuses)
-    visible_ids = [str(v) for v in filtered.get(PARTNER_ROW_ID, [])]
+    max_visible_rows = 1000
+    render_df = filtered.head(max_visible_rows)
+    if len(filtered) > max_visible_rows:
+        st.info(f"Mostrando as primeiras {max_visible_rows} linhas filtradas para manter a tela leve. A exportação continua usando a planilha completa.")
+    visible_ids = [str(v) for v in render_df.get(PARTNER_ROW_ID, [])]
     display_cols = [PARTNER_ROW_ID] + [col for col in df.columns if col not in hidden_cols and col != PARTNER_ROW_ID]
-    disabled_cols = [col for col in [PARTNER_ROW_ID, "Última Alteração", "Usuário Responsável"] if col in display_cols]
-    edited = st.data_editor(
-        filtered[display_cols],
-        use_container_width=True,
-        hide_index=True,
-        num_rows="dynamic",
-        key=f"partner_editor_{partner_key}_{len(df)}_{len(visible_ids)}",
-        disabled=disabled_cols,
-        column_config={
-            PARTNER_ROW_ID: st.column_config.TextColumn("ID", width="small"),
-            "Status de Execução": st.column_config.SelectboxColumn(
-                "Status de Execução",
-                options=PARTNER_STATUS_OPTIONS,
-                required=False,
-            ),
-            "Descrição / Observação": st.column_config.TextColumn("Descrição / Observação", width="large"),
-        },
-    )
+    editable_cols = set()
+    if can_edit_rows:
+        editable_cols = {col for col in display_cols if col not in (PARTNER_ROW_ID, "Última Alteração", "Usuário Responsável")}
+    elif can_write_treatment:
+        editable_cols = {col for col in ("Tratativa", "Descrição / Observação") if col in display_cols}
+    disabled_cols = [col for col in display_cols if col not in editable_cols]
 
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        if st.button("💾 Salvar alterações da tabela", key=f"partner_save_editor_{partner_key}", type="primary", use_container_width=True):
+    edited = render_df[display_cols]
+    if editable_cols:
+        st.markdown("##### Editar linha")
+        st.caption("Altere os campos liberados na tabela e clique em Salvar alteração. Use Cancelar alteração para descartar o que ainda não foi salvo.")
+        edited = st.data_editor(
+            render_df[display_cols],
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key=f"partner_editor_{partner_key}_{len(df)}_{len(visible_ids)}_{len(editable_cols)}",
+            disabled=disabled_cols,
+            column_config={
+                PARTNER_ROW_ID: st.column_config.TextColumn("ID", width="small"),
+                "Status de Execução": st.column_config.SelectboxColumn(
+                    "Status de Execução",
+                    options=PARTNER_STATUS_OPTIONS,
+                    required=False,
+                ),
+                "Tratativa": st.column_config.TextColumn("Tratativa", width="large"),
+                "Descrição / Observação": st.column_config.TextColumn("Descrição / Observação", width="large"),
+            },
+        )
+    else:
+        st.dataframe(render_df[display_cols], use_container_width=True, hide_index=True)
+
+    action_cols = st.columns(5)
+    with action_cols[0]:
+        if editable_cols and st.button("💾 Salvar alteração", key=f"partner_save_editor_{partner_key}", type="primary", use_container_width=True):
             merged, logs = _partners_merge_edited_rows(df, visible_ids, edited, partner.get("columns", []))
             partner["rows"] = merged.to_dict(orient="records")
-            for acao, detalhes in logs:
-                _partners_add_history(state, partner_key, acao, detalhes)
+            for log_item in logs:
+                acao, detalhes = log_item[0], log_item[1]
+                extra = log_item[2] if len(log_item) > 2 and isinstance(log_item[2], dict) else {}
+                _partners_add_history(state, partner_key, acao, detalhes, extra)
             if not logs:
-                _partners_add_history(state, partner_key, "Dados internos salvos", "Sem alterações detectadas")
+                _partners_add_history(state, partner_key, "Dados internos salvos", "Sem alterações detectadas", {"tipo_acao": "edição"})
             _partners_save_state(state)
             st.success("Alterações salvas.")
             app_rerun()
+    with action_cols[1]:
+        if editable_cols and st.button("↩ Cancelar alteração", key=f"partner_cancel_editor_{partner_key}", use_container_width=True):
+            app_rerun()
+    with action_cols[2]:
+        if can_edit_rows and st.button("➕ Adicionar linha", key=f"partner_add_row_{partner_key}", use_container_width=True):
+            row = _partners_add_blank_row(partner, partner_key)
+            _partners_add_history(
+                state,
+                partner_key,
+                "Linha criada",
+                row.get(PARTNER_ROW_ID, ""),
+                {"tipo_acao": "edição", "linha": row.get(PARTNER_ROW_ID, ""), "campo": "", "valor_antigo": "", "valor_novo": "linha criada"}
+            )
+            _partners_save_state(state)
+            st.success("Linha adicionada.")
+            app_rerun()
+
+    if can_delete_rows:
+        with st.expander("Excluir linha", expanded=False):
+            row_records = df.to_dict(orient="records")
+            row_options = { _partners_row_label(row, idx): str(row.get(PARTNER_ROW_ID, "")) for idx, row in enumerate(row_records) }
+            if row_options:
+                selected_label = st.selectbox("Linha para excluir", list(row_options.keys()), key=f"partner_delete_select_{partner_key}")
+                confirm_delete = st.checkbox("Confirmo a exclusão desta linha", key=f"partner_delete_confirm_{partner_key}")
+                if st.button("🗑️ Excluir linha selecionada", key=f"partner_delete_row_{partner_key}", use_container_width=True):
+                    row_id = row_options.get(selected_label, "")
+                    if not confirm_delete:
+                        st.warning("Marque a confirmação antes de excluir.")
+                    elif _partners_delete_row(partner, row_id):
+                        _partners_add_history(
+                            state,
+                            partner_key,
+                            "Linha excluída",
+                            row_id,
+                            {"tipo_acao": "exclusão", "linha": row_id, "campo": "", "valor_antigo": "linha existente", "valor_novo": "linha removida"}
+                        )
+                        _partners_save_state(state)
+                        st.success("Linha excluída.")
+                        app_rerun()
+                    else:
+                        st.warning("Não foi possível localizar a linha selecionada.")
+
     export_df = df.drop(columns=[PARTNER_ROW_ID], errors="ignore")
-    with s2:
-        st.download_button(
-            "⬇️ Exportar CSV",
-            data=export_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"{_partner_label(partner_key)}_controle.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-    with s3:
-        excel_buf = BytesIO()
-        export_df.to_excel(excel_buf, index=False)
-        st.download_button(
-            "⬇️ Exportar Excel",
-            data=excel_buf.getvalue(),
-            file_name=f"{_partner_label(partner_key)}_controle.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+    if can_export:
+        e1, e2 = st.columns(2)
+        with e1:
+            try:
+                csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
+            except Exception:
+                csv_data = None
+                st.warning("Não foi possível exportar para CSV. Revise a planilha e tente novamente.")
+            if csv_data is not None:
+                if st.download_button(
+                    "⬇️ Exportar CSV",
+                    data=csv_data,
+                    file_name=f"{_partner_label(partner_key)}_controle.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                ):
+                    _partners_add_history(state, partner_key, "Planilha exportada", "CSV", {"tipo_acao": "exportação", "valor_novo": "CSV"})
+                    _partners_save_state(state)
+        with e2:
+            excel_data, excel_error = _partners_safe_excel_bytes(export_df)
+            if excel_error:
+                st.info(excel_error)
+            elif st.download_button(
+                "⬇️ Exportar Excel",
+                data=excel_data,
+                file_name=f"{_partner_label(partner_key)}_controle.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            ):
+                _partners_add_history(state, partner_key, "Planilha exportada", "Excel", {"tipo_acao": "exportação", "valor_novo": "Excel"})
+                _partners_save_state(state)
+    else:
+        st.caption("Exportação desabilitada para este usuário.")
 
     last_update = partner.get("last_update") or {}
     if last_update:
@@ -4353,6 +4612,9 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
         st.dataframe(_partners_style_diff(diff_df), use_container_width=True, hide_index=True)
 
 def _render_partner_chat(state: dict, partner_key: str) -> None:
+    if not _auth_partner_permission("partner_sheet_write_treatment"):
+        st.warning("Seu usuário não possui permissão para registrar tratativas.")
+        return
     partner = state["partners"][partner_key]
     mention_options, mention_labels = _auth_mention_options()
     st.markdown(
@@ -4444,6 +4706,9 @@ def _render_partner_chat(state: dict, partner_key: str) -> None:
                 st.caption(f"Última atualização: {item.get('status_atualizado_em')} por {item.get('status_atualizado_por','')}")
 
 def _render_partner_history(state: dict, partner_key: str) -> None:
+    if not _auth_partner_permission("partner_sheet_history"):
+        st.warning("Seu usuário não possui permissão para acessar o histórico.")
+        return
     partner = state["partners"][partner_key]
     st.markdown(
         "<div class='partner-window-title'>Histórico</div>"
@@ -4575,12 +4840,17 @@ def _render_partner_selection(state: dict, allowed: list) -> None:
                 app_rerun()
 
 def _render_partner_section_buttons(partner_key: str) -> None:
-    sections = [
-        ("sheet", "Planilha", "Espelho Excel/CSV, edição e comparação"),
-        ("chat", "Tratativa", "Assuntos, prazos e citações"),
-        ("history", "Histórico", "Registros e auditoria"),
-    ]
-    cols = st.columns(3, gap="large")
+    sections = []
+    if _auth_partner_permission("partner_sheet_view"):
+        sections.append(("sheet", "Planilha", "Espelho Excel/CSV, edição e comparação"))
+    if _auth_partner_permission("partner_sheet_write_treatment"):
+        sections.append(("chat", "Tratativa", "Assuntos, prazos e citações"))
+    if _auth_partner_permission("partner_sheet_history"):
+        sections.append(("history", "Histórico", "Registros e auditoria"))
+    if not sections:
+        st.warning("Seu usuário não possui permissões liberadas para abrir as áreas desta parceira.")
+        return
+    cols = st.columns(len(sections), gap="large")
     for col, (section_key, label, desc) in zip(cols, sections):
         with col:
             st.markdown(
@@ -4603,14 +4873,28 @@ def _render_partner_workspace(state: dict, partner_key: str) -> None:
             app_rerun()
     with top_cols[1]:
         st.markdown(f"<div class='partner-window-title'>{partner_name}</div>", unsafe_allow_html=True)
-    _render_partner_alerts(partner)
-    _render_partner_section_buttons(partner_key)
     section = st.session_state.get("partner_section", "")
     if not section:
+        st.markdown(_partners_logo_html(partner_key), unsafe_allow_html=True)
+        _render_partner_alerts(partner)
+        _render_partner_section_buttons(partner_key)
         st.info("Selecione Planilha, Tratativa ou Histórico para abrir a janela correspondente.")
         return
-    st.markdown("<hr class='separator-glow'>", unsafe_allow_html=True)
+    allowed_sections = []
+    if _auth_partner_permission("partner_sheet_view"):
+        allowed_sections.append("sheet")
+    if _auth_partner_permission("partner_sheet_write_treatment"):
+        allowed_sections.append("chat")
+    if _auth_partner_permission("partner_sheet_history"):
+        allowed_sections.append("history")
+    if section not in allowed_sections:
+        st.warning("Seu usuário não possui permissão para abrir esta área.")
+        return
     if section == "sheet":
+        st.markdown(
+            f"<div class='partner-section-card'><div class='partner-card-title'>{partner_name}</div>{_partners_logo_html(partner_key)}</div>",
+            unsafe_allow_html=True,
+        )
         _render_partner_sheet_controls(state, partner_key)
         _render_partner_table(state, partner_key)
     elif section == "chat":
