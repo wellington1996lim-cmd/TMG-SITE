@@ -892,6 +892,16 @@ def _partners_safe_excel_bytes(export_df: pd.DataFrame) -> tuple:
     except Exception:
         return None, "Não foi possível exportar para Excel. Use a exportação CSV ou revise a planilha."
 
+def _partners_export_csv_file(export_df: pd.DataFrame, partner_key: str) -> tuple:
+    try:
+        export_dir = PARTNERS_ROOT / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        target = export_dir / f"{partner_key}_controle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        export_df.replace({np.nan: ""}).to_csv(target, index=False, encoding="utf-8-sig")
+        return target, ""
+    except Exception:
+        return None, "Não foi possível preparar o CSV para download. Tente filtrar ou revisar a planilha."
+
 def _partners_rename_column(partner: dict, old_name: str, new_name: str) -> tuple:
     old_name = str(old_name or "").strip()
     new_name = str(new_name or "").strip()
@@ -4560,35 +4570,65 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
     export_df = df.drop(columns=[PARTNER_ROW_ID], errors="ignore")
     if can_export:
         e1, e2 = st.columns(2)
-        with e1:
-            try:
-                csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
-            except Exception:
-                csv_data = None
-                st.warning("Não foi possível exportar para CSV. Revise a planilha e tente novamente.")
-            if csv_data is not None:
-                if st.download_button(
-                    "⬇️ Exportar CSV",
-                    data=csv_data,
-                    file_name=f"{_partner_label(partner_key)}_controle.csv",
-                    mime="text/csv",
+        immediate_export_limit = 50000
+        if len(export_df) <= immediate_export_limit:
+            with e1:
+                try:
+                    csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
+                except Exception:
+                    csv_data = None
+                    st.warning("Não foi possível exportar para CSV. Revise a planilha e tente novamente.")
+                if csv_data is not None:
+                    if st.download_button(
+                        "⬇️ Exportar CSV",
+                        data=csv_data,
+                        file_name=f"{_partner_label(partner_key)}_controle.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    ):
+                        _partners_add_history(state, partner_key, "Planilha exportada", "CSV", {"tipo_acao": "exportação", "valor_novo": "CSV"})
+                        _partners_save_state(state)
+            with e2:
+                excel_data, excel_error = _partners_safe_excel_bytes(export_df)
+                if excel_error:
+                    st.info(excel_error)
+                elif st.download_button(
+                    "⬇️ Exportar Excel",
+                    data=excel_data,
+                    file_name=f"{_partner_label(partner_key)}_controle.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 ):
-                    _partners_add_history(state, partner_key, "Planilha exportada", "CSV", {"tipo_acao": "exportação", "valor_novo": "CSV"})
+                    _partners_add_history(state, partner_key, "Planilha exportada", "Excel", {"tipo_acao": "exportação", "valor_novo": "Excel"})
                     _partners_save_state(state)
-        with e2:
-            excel_data, excel_error = _partners_safe_excel_bytes(export_df)
-            if excel_error:
-                st.info(excel_error)
-            elif st.download_button(
-                "⬇️ Exportar Excel",
-                data=excel_data,
-                file_name=f"{_partner_label(partner_key)}_controle.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            ):
-                _partners_add_history(state, partner_key, "Planilha exportada", "Excel", {"tipo_acao": "exportação", "valor_novo": "Excel"})
-                _partners_save_state(state)
+        else:
+            st.info("Planilha grande detectada. Para evitar erro no Streamlit Cloud, a exportação será preparada somente quando você solicitar.")
+            with e1:
+                if st.button("Preparar CSV para download", key=f"partner_prepare_big_csv_{partner_key}", use_container_width=True):
+                    target, err = _partners_export_csv_file(export_df, partner_key)
+                    if err:
+                        st.warning(err)
+                    else:
+                        partner["last_export_csv_path"] = str(target)
+                        _partners_add_history(state, partner_key, "Planilha exportada", "CSV grande preparado", {"tipo_acao": "exportação", "valor_novo": "CSV"})
+                        _partners_save_state(state)
+                        st.success("CSV preparado para download.")
+                        app_rerun()
+                export_path = Path(str(partner.get("last_export_csv_path", "")))
+                if export_path.exists():
+                    size_mb = export_path.stat().st_size / (1024 * 1024)
+                    if size_mb <= 100:
+                        st.download_button(
+                            "⬇️ Baixar CSV preparado",
+                            data=export_path.read_bytes(),
+                            file_name=export_path.name,
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+                    else:
+                        st.caption(f"CSV preparado em `{export_path}` com {size_mb:.1f} MB. Use Backup/Sincronizar para transferir arquivos muito grandes.")
+            with e2:
+                st.info("Exportação Excel fica disponível apenas para planilhas dentro do limite do Excel e do Streamlit Cloud. Use CSV para bases grandes.")
     else:
         st.caption("Exportação desabilitada para este usuário.")
 
