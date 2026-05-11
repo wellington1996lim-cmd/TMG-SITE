@@ -1,7 +1,0 @@
-[server]
-# Aumenta o limite de upload para ortofotos TIF/GeoTIFF grandes no Streamlit Cloud.
-# Valor em MB. Se quiser mais/menos, ajuste este número antes do deploy.
-maxUploadSize = 2048
-
-[browser]
-gatherUsageStats = false
