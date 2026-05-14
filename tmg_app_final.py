@@ -7235,10 +7235,10 @@ btnExport.onclick = () => {{
     .sort((a,b) => String(a.name).localeCompare(String(b.name), 'pt-BR', {{numeric:true}}))
     .forEach(grid => {{
     const R=parseInt(grid.rows)||1, C=parseInt(grid.cols)||1;
-    for(let c=0;c<C;c++) for(let r=0;r<R;r++) {{
+    for(let r=0;r<R;r++) for(let c=0;c<C;c++) {{
       const ann=(grid.annotations[r]||{{}})[c];
       const nota=Number(ann && ann.nota ? ann.nota : 1);
-      dados.push([grid.name, c+1, r+1, nota, ann ? (ann.obs || '') : '']);
+      dados.push([grid.name, r+1, c+1, nota, ann ? (ann.obs || '') : '']);
     }}
   }});
   const ws = XLSX.utils.aoa_to_sheet(dados);
