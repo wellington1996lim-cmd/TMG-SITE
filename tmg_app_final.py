@@ -322,7 +322,10 @@ def _preview_jpeg_quality() -> int:
 
 def _preview_max_payload_mb() -> int:
     # Evita que o HTML do visualizador fique pesado demais para carregar no navegador.
-    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 48, 8, 120)
+    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 16, 4, 80)
+
+def _preview_min_dim() -> int:
+    return _int_setting("TMG_PREVIEW_MIN_DIM", 2048, 900, 4096)
 
 def _upload_limit_mb() -> int:
     # Valor informativo mostrado na interface; o limite real do Streamlit Cloud é definido em .streamlit/config.toml.
@@ -1701,41 +1704,72 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
     spatial_meta["preview_width"] = img.width
     spatial_meta["preview_height"] = img.height
 
+    def _save_preview_jpeg(pil_img, jpeg_quality):
+        save_options = [
+            {"subsampling": 0, "optimize": True, "progressive": True},
+            {"subsampling": 0, "optimize": True, "progressive": False},
+            {"subsampling": 1, "optimize": False, "progressive": False},
+            {"subsampling": 2, "optimize": False, "progressive": False},
+        ]
+        last_error = None
+        for options in save_options:
+            target = BytesIO()
+            try:
+                pil_img.save(target, format='JPEG', quality=jpeg_quality, **options)
+                return target
+            except OSError as exc:
+                last_error = exc
+        if last_error:
+            raise last_error
+        raise OSError("Falha ao salvar preview JPEG.")
+
     max_payload_bytes = _preview_max_payload_mb() * 1024 * 1024
-    min_preview_dim = min(4096, _preview_max_dim())
+    min_preview_dim = min(_preview_min_dim(), _preview_max_dim())
     quality = _preview_jpeg_quality()
     preview_img = img
     buf = BytesIO()
 
-    for _ in range(10):
-        buf = BytesIO()
-        # JPEG progressivo em alta qualidade reduz tamanho no navegador mantendo detalhe visual.
-        preview_img.save(buf, format='JPEG', quality=quality, subsampling=0, optimize=True, progressive=True)
-        payload_size = buf.tell()
-        if payload_size <= max_payload_bytes:
+    try:
+        for _ in range(18):
+            buf = _save_preview_jpeg(preview_img, quality)
+            payload_size = buf.tell()
+            if payload_size <= max_payload_bytes:
+                break
+            if quality > 82:
+                quality = max(82, quality - 5)
+                continue
+            current_max_dim = max(preview_img.size)
+            if current_max_dim > min_preview_dim:
+                scale = max(min_preview_dim / current_max_dim, 0.75)
+                new_size = (
+                    max(1, int(preview_img.width * scale)),
+                    max(1, int(preview_img.height * scale)),
+                )
+                resample_filter = getattr(Image, 'Resampling', Image).LANCZOS
+                preview_img = preview_img.resize(new_size, resample_filter)
+                quality = min(quality, 90)
+                continue
+            if quality > 70:
+                quality = max(70, quality - 4)
+                continue
+            if current_max_dim > 1200:
+                scale = 0.85
+                new_size = (
+                    max(1, int(preview_img.width * scale)),
+                    max(1, int(preview_img.height * scale)),
+                )
+                resample_filter = getattr(Image, 'Resampling', Image).LANCZOS
+                preview_img = preview_img.resize(new_size, resample_filter)
+                continue
             break
-        if quality > 88:
-            quality -= 4
-            continue
-        if max(preview_img.size) > min_preview_dim:
-            scale = max(min_preview_dim / max(preview_img.size), 0.82)
-            new_size = (
-                max(1, int(preview_img.width * scale)),
-                max(1, int(preview_img.height * scale)),
-            )
-            resample_filter = getattr(Image, 'Resampling', Image).LANCZOS
-            preview_img = preview_img.resize(new_size, resample_filter)
-            quality = min(quality, 90)
-            continue
-        if quality > 78:
-            quality -= 4
-            continue
-        break
+    except Exception as exc:
+        return None, None, f"Falha ao preparar visualização da ortofoto: {exc}", spatial_meta
 
     img = preview_img
     spatial_meta["preview_width"] = img.width
     spatial_meta["preview_height"] = img.height
     spatial_meta["preview_quality"] = quality
+    spatial_meta["preview_payload_mb"] = round(buf.tell() / (1024 * 1024), 2)
     if spatial_meta["orig_width"]:
         spatial_meta["ratio"] = img.width / spatial_meta["orig_width"]
     b64 = base64.b64encode(buf.getvalue()).decode()
