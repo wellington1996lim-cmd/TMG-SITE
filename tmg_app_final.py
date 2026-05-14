@@ -16,6 +16,7 @@ import csv
 import cv2
 import warnings
 import hashlib
+import html
 import re
 import subprocess
 import sqlite3
@@ -469,6 +470,7 @@ components.html = _themed_components_html
 # MODULO ISOLADO - USUARIOS E PARCEIROS
 # ==========================================
 AUTH_USERS_PATH = SYSTEM_DATABASE_DIR / "usuarios_sistema.json"
+CHAT_MESSAGES_PATH = SYSTEM_DATABASE_DIR / "chat_mensagens.json"
 PARTNERS_ROOT = SYSTEM_DATABASE_DIR / "parceiros_controle_voos_dados"
 PARTNERS_STATE_PATH = PARTNERS_ROOT / "parceiros_estado.json"
 PARTNERS_LOGOS_DIR = PARTNERS_ROOT / "logos"
@@ -696,6 +698,238 @@ def _auth_allowed_partners(user: dict = None) -> list:
         allowed.append("alvaz")
     return allowed
 
+def _chat_user_login(user: dict) -> str:
+    return str((user or {}).get("usuario", "")).strip()
+
+def _chat_user_display(user: dict) -> str:
+    login = _chat_user_login(user)
+    nome = str((user or {}).get("nome") or login or "Usuário").strip()
+    return f"{nome} ({login})" if login and nome.lower() != login.lower() else (login or nome)
+
+def _chat_load_state() -> dict:
+    CHAT_MESSAGES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(CHAT_MESSAGES_PATH.read_text(encoding="utf-8")) if CHAT_MESSAGES_PATH.exists() else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("messages", [])
+    if not isinstance(data["messages"], list):
+        data["messages"] = []
+    return data
+
+def _chat_save_state(data: dict) -> None:
+    CHAT_MESSAGES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data.setdefault("messages", [])
+    CHAT_MESSAGES_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def _chat_registered_users(current_user: dict) -> list:
+    current_login = _chat_user_login(current_user).lower()
+    users = []
+    for user in _auth_load_users().get("users", []):
+        login = _chat_user_login(user)
+        if not login or login.lower() == current_login or not bool(user.get("ativo", True)):
+            continue
+        users.append(user)
+    return users
+
+def _chat_unread_count(login: str, other_login: str = "") -> int:
+    login_norm = str(login or "").strip().lower()
+    other_norm = str(other_login or "").strip().lower()
+    total = 0
+    for msg in _chat_load_state().get("messages", []):
+        if str(msg.get("destinatario", "")).strip().lower() != login_norm:
+            continue
+        if bool(msg.get("lida", False)):
+            continue
+        if other_norm and str(msg.get("remetente", "")).strip().lower() != other_norm:
+            continue
+        total += 1
+    return total
+
+def _chat_thread_messages(login_a: str, login_b: str) -> list:
+    a = str(login_a or "").strip().lower()
+    b = str(login_b or "").strip().lower()
+    rows = []
+    for msg in _chat_load_state().get("messages", []):
+        sender = str(msg.get("remetente", "")).strip().lower()
+        target = str(msg.get("destinatario", "")).strip().lower()
+        if (sender == a and target == b) or (sender == b and target == a):
+            rows.append(msg)
+    rows.sort(key=lambda item: str(item.get("timestamp", "")))
+    return rows
+
+def _chat_mark_thread_read(current_login: str, other_login: str) -> None:
+    current_norm = str(current_login or "").strip().lower()
+    other_norm = str(other_login or "").strip().lower()
+    data = _chat_load_state()
+    changed = False
+    for msg in data.get("messages", []):
+        if (
+            str(msg.get("destinatario", "")).strip().lower() == current_norm
+            and str(msg.get("remetente", "")).strip().lower() == other_norm
+            and not bool(msg.get("lida", False))
+        ):
+            msg["lida"] = True
+            msg["lida_em"] = _now_iso()
+            changed = True
+    if changed:
+        _chat_save_state(data)
+
+def _chat_send_message(sender_user: dict, target_login: str, text: str) -> tuple:
+    sender_login = _chat_user_login(sender_user)
+    target_login = str(target_login or "").strip()
+    text = str(text or "").strip()
+    if not sender_login:
+        return False, "Faça login para acessar o chat."
+    if not target_login:
+        return False, "Selecione um usuário para enviar a mensagem."
+    if sender_login.lower() == target_login.lower():
+        return False, "Não é possível conversar consigo mesmo."
+    if not text:
+        return False, "Digite uma mensagem antes de enviar."
+
+    users = {str(u.get("usuario", "")).strip().lower(): u for u in _auth_load_users().get("users", [])}
+    target_user = users.get(target_login.lower())
+    if not target_user or not bool(target_user.get("ativo", True)):
+        return False, "Usuário destinatário não encontrado ou inativo."
+
+    now = datetime.now()
+    msg_id = hashlib.sha1(f"{sender_login}-{target_login}-{now.isoformat()}-{text}".encode("utf-8")).hexdigest()[:18]
+    data = _chat_load_state()
+    data.setdefault("messages", []).append({
+        "id": msg_id,
+        "remetente": sender_login,
+        "remetente_nome": str(sender_user.get("nome") or sender_login),
+        "destinatario": target_login,
+        "destinatario_nome": str(target_user.get("nome") or target_login),
+        "texto": text,
+        "data": now.strftime("%d/%m/%Y"),
+        "hora": now.strftime("%H:%M:%S"),
+        "timestamp": now.isoformat(timespec="seconds"),
+        "lida": False,
+    })
+    _chat_save_state(data)
+    return True, "Mensagem enviada."
+
+def _render_chat_body(current_user: dict) -> None:
+    current_login = _chat_user_login(current_user)
+    st.markdown("""
+    <style>
+      .tmg-chat-title { color: var(--tmg-primary); font-weight: 800; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 8px; }
+      .tmg-chat-scroll { max-height: 320px; overflow-y: auto; padding: 8px; border: 1px solid #2a2a2a; border-radius: 10px; background: #0d0d0d; }
+      .tmg-chat-msg { padding: 8px 10px; border-radius: 10px; margin: 7px 0; max-width: 86%; box-shadow: 0 4px 12px rgba(0,0,0,.22); }
+      .tmg-chat-sent { margin-left: auto; background: linear-gradient(145deg,#0d2b45,#071a2c); border: 1px solid var(--tmg-primary); color: #f2f7fb; }
+      .tmg-chat-received { margin-right: auto; background: #151515; border: 1px solid #333; color: #eee; }
+      .tmg-chat-meta { color: #9aa7b5; font-size: .72rem; margin-bottom: 3px; }
+      .tmg-chat-text { font-size: .88rem; line-height: 1.35; white-space: pre-wrap; }
+      .tmg-chat-unread { color: #ff4d4d; font-weight: 800; }
+    </style>
+    """, unsafe_allow_html=True)
+    st.markdown("<div class='tmg-chat-title'>Chat</div>", unsafe_allow_html=True)
+
+    users = _chat_registered_users(current_user)
+    if not current_login:
+        st.warning("Acesse o sistema para usar o chat.")
+        return
+    if not users:
+        st.info("Nenhum outro usuário cadastrado para conversar.")
+        return
+
+    search = st.text_input("Pesquisar usuário", key="tmg_chat_search", placeholder="Pesquisar usuário cadastrado")
+    filtered = [
+        user for user in users
+        if not search
+        or search.lower() in _chat_user_display(user).lower()
+        or search.lower() in _chat_user_login(user).lower()
+    ]
+    if not filtered:
+        st.info("Nenhum usuário encontrado para a busca.")
+        return
+
+    labels = {}
+    for user in filtered:
+        login = _chat_user_login(user)
+        unread = _chat_unread_count(current_login, login)
+        labels[login] = _chat_user_display(user) + (f"  • {unread} nova(s)" if unread else "")
+
+    logins = [_chat_user_login(user) for user in filtered]
+    current_selected = st.session_state.get("tmg_chat_selected_user")
+    selected_index = logins.index(current_selected) if current_selected in logins else 0
+    selected_login = st.selectbox(
+        "Usuário",
+        logins,
+        index=selected_index,
+        format_func=lambda value: labels.get(value, value),
+        key="tmg_chat_user_select",
+    )
+    st.session_state["tmg_chat_selected_user"] = selected_login
+    _chat_mark_thread_read(current_login, selected_login)
+
+    messages = _chat_thread_messages(current_login, selected_login)
+    if not messages:
+        st.caption("Sem mensagens nesta conversa.")
+    else:
+        parts = ["<div class='tmg-chat-scroll'>"]
+        for msg in messages[-80:]:
+            sent = str(msg.get("remetente", "")).strip().lower() == current_login.lower()
+            cls = "tmg-chat-sent" if sent else "tmg-chat-received"
+            author = "Você" if sent else html.escape(str(msg.get("remetente_nome") or msg.get("remetente") or "Usuário"))
+            when = html.escape(f"{msg.get('data', '')} {msg.get('hora', '')}".strip())
+            status = " · lida" if sent and bool(msg.get("lida", False)) else (" · não lida" if sent else "")
+            text = html.escape(str(msg.get("texto", "")))
+            parts.append(
+                f"<div class='tmg-chat-msg {cls}'>"
+                f"<div class='tmg-chat-meta'>{author} · {when}{status}</div>"
+                f"<div class='tmg-chat-text'>{text}</div>"
+                "</div>"
+            )
+        parts.append("</div>")
+        st.markdown("".join(parts), unsafe_allow_html=True)
+
+    with st.form("tmg_chat_send_form", clear_on_submit=True):
+        msg_text = st.text_area("Mensagem", key="tmg_chat_message", height=70, placeholder="Digite sua mensagem")
+        send = st.form_submit_button("Enviar", type="primary", use_container_width=True)
+        if send:
+            ok, feedback = _chat_send_message(current_user, selected_login, msg_text)
+            if ok:
+                st.success(feedback)
+                app_rerun()
+            else:
+                st.warning(feedback)
+
+    if st.button("Minimizar / Fechar", key="tmg_chat_close", use_container_width=True):
+        st.session_state["tmg_chat_open"] = False
+        app_rerun()
+
+def _render_system_chat(current_user: dict) -> None:
+    if not st.session_state.get("logged_in", False):
+        return
+    current_login = _chat_user_login(current_user)
+    if not current_login:
+        return
+
+    unread_total = _chat_unread_count(current_login)
+    label = "💬" + (f"  ● {unread_total}" if unread_total else "")
+    st.markdown("""
+    <style>
+      div[data-testid="stPopover"] button, div[data-testid="stButton"] button {
+        transition: all .18s ease;
+      }
+    </style>
+    """, unsafe_allow_html=True)
+    chat_cols = st.columns([0.90, 0.10])
+    with chat_cols[1]:
+        if hasattr(st, "popover"):
+            with st.popover(label, help="Abrir chat", use_container_width=True):
+                _render_chat_body(current_user)
+        else:
+            if st.button(label, key="tmg_chat_toggle", help="Abrir chat", use_container_width=True):
+                st.session_state["tmg_chat_open"] = not st.session_state.get("tmg_chat_open", False)
+            if st.session_state.get("tmg_chat_open", False):
+                _render_chat_body(current_user)
+
 def _partners_default_partner() -> dict:
     return {
         "link": "",
@@ -920,7 +1154,50 @@ def _partners_safe_excel_bytes(export_df: pd.DataFrame) -> tuple:
         return None, "A planilha ultrapassa o limite do Excel. Use a exportação CSV para baixar todos os dados."
     try:
         excel_buf = BytesIO()
-        export_df.replace({np.nan: ""}).to_excel(excel_buf, index=False)
+        clean_df = export_df.replace({np.nan: ""}).copy()
+        with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
+            clean_df.to_excel(writer, index=False, sheet_name="Planilha Tratada")
+            ws = writer.book["Planilha Tratada"]
+            try:
+                from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+                from openpyxl.utils import get_column_letter
+
+                header_fill = PatternFill("solid", fgColor="B7DEE8")
+                data_fill = PatternFill("solid", fgColor="FFFFFF")
+                internal_fill = PatternFill("solid", fgColor="EAF3F8")
+                thin = Side(style="thin", color="808080")
+                border = Border(left=thin, right=thin, top=thin, bottom=thin)
+                header_font = Font(bold=True, color="000000")
+                default_font = Font(color="000000")
+                center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+                internal_cols = set(PARTNER_INTERNAL_COLUMNS)
+                for cell in ws[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.border = border
+                    cell.alignment = center
+
+                for row in ws.iter_rows(min_row=2):
+                    for cell in row:
+                        header = str(ws.cell(row=1, column=cell.column).value or "")
+                        cell.fill = internal_fill if header in internal_cols else data_fill
+                        cell.font = default_font
+                        cell.border = border
+                        cell.alignment = left
+
+                for col_idx, column_cells in enumerate(ws.columns, start=1):
+                    max_len = 12
+                    for cell in column_cells:
+                        value = "" if cell.value is None else str(cell.value)
+                        max_len = max(max_len, min(len(value) + 2, 55))
+                    ws.column_dimensions[get_column_letter(col_idx)].width = max_len
+
+                ws.freeze_panes = "A2"
+                ws.auto_filter.ref = ws.dimensions
+            except Exception:
+                pass
         return excel_buf.getvalue(), ""
     except Exception:
         return None, "Não foi possível exportar para Excel. Use a exportação CSV ou revise a planilha."
@@ -4479,7 +4756,9 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
                 {"tipo_acao": "importação", "linha": "", "campo": "", "valor_antigo": "", "valor_novo": uploaded_sheet.name}
             )
             _partners_save_state(state)
-            st.success("Planilha importada e espelhada no sistema.")
+            st.session_state[f"partner_planilha_tratada_open_{partner_key}"] = True
+            st.session_state[f"partner_panel_mode_{partner_key}"] = "Resumo de Atualizações"
+            st.success("Planilha importada e a janela de tratamento foi aberta no módulo de Parceiras.")
             app_rerun()
         except Exception:
             st.warning("Não foi possível importar a planilha. Verifique o formato do arquivo e tente novamente.")
@@ -4514,221 +4793,356 @@ def _render_partner_table(state: dict, partner_key: str) -> None:
         st.info("Importe uma planilha Excel ou CSV para iniciar a tabela espelhada.")
         return
 
-    if can_edit_header and partner.get("columns"):
-        with st.expander("Editar cabeçalho da tabela", expanded=False):
-            h1, h2, h3 = st.columns([1.2, 1.4, .8])
-            with h1:
-                old_header = st.selectbox("Cabeçalho atual", partner.get("columns", []), key=f"partner_header_old_{partner_key}")
-            with h2:
-                new_header = st.text_input("Novo cabeçalho", value=old_header, key=f"partner_header_new_{partner_key}")
-            with h3:
-                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-                if st.button("Salvar cabeçalho", key=f"partner_header_save_{partner_key}", type="primary", use_container_width=True):
-                    ok, msg = _partners_rename_column(partner, old_header, new_header)
-                    if ok:
-                        _partners_add_history(
-                            state,
-                            partner_key,
-                            "Cabeçalho alterado",
-                            f"{old_header} -> {new_header}",
-                            {"tipo_acao": "alteração de cabeçalho", "linha": "", "campo": old_header, "valor_antigo": old_header, "valor_novo": new_header}
-                        )
-                        _partners_save_state(state)
-                        st.success("Cabeçalho salvo.")
-                        app_rerun()
-                    else:
-                        st.warning(msg or "Não foi possível alterar o cabeçalho.")
+    st.session_state.setdefault(f"partner_planilha_tratada_open_{partner_key}", True)
+    st.session_state.setdefault(f"partner_panel_mode_{partner_key}", "Filtrar Informações")
+    st.session_state.setdefault(f"partner_hidden_cols_{partner_key}", [])
+    st.session_state.setdefault(f"partner_search_{partner_key}", "")
+    st.session_state.setdefault(f"partner_status_filter_{partner_key}", [])
 
-    st.markdown("##### Tabela espelhada estilo Excel")
-    if can_write_treatment:
-        st.caption("Campos de tratativa disponíveis na tabela: Tratativa, Descrição / Observação, Última Alteração e Usuário Responsável.")
-    f1, f2, f3 = st.columns([1.4, 1, 1.2])
-    with f1:
-        search = st.text_input("Buscar informações", key=f"partner_search_{partner_key}")
-    with f2:
-        statuses = st.multiselect("Filtrar status", PARTNER_STATUS_OPTIONS, key=f"partner_status_filter_{partner_key}")
-    with f3:
-        hidable = [col for col in df.columns if col != PARTNER_ROW_ID]
-        hidden_cols = st.multiselect("Ocultar colunas", hidable, key=f"partner_hidden_cols_{partner_key}")
+    st.markdown(
+        """
+        <style>
+        .partner-excel-window {
+            background: linear-gradient(145deg, #10243a, #0b1728);
+            border: 1px solid rgba(66,165,245,.35);
+            border-radius: 18px;
+            padding: 16px 18px;
+            box-shadow: 0 12px 30px rgba(0,0,0,.35);
+            margin-top: 12px;
+            margin-bottom: 14px;
+        }
+        .partner-excel-title {
+            color: #ffffff;
+            font-weight: 900;
+            font-size: 1.25rem;
+            letter-spacing: .5px;
+        }
+        .partner-excel-subtitle { color: #b8c7d8; font-size: .92rem; margin-top: 4px; }
+        .partner-toolbox {
+            background: #0d1e35;
+            border: 1px solid rgba(144,202,249,.25);
+            border-radius: 16px;
+            padding: 12px;
+        }
+        .partner-toolbox-title {
+            color: #90caf9;
+            font-weight: 800;
+            text-align: center;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            font-size: .82rem;
+            letter-spacing: 1px;
+        }
+        .partner-history-card {
+            background: rgba(255,255,255,.04);
+            border: 1px solid rgba(255,255,255,.08);
+            border-radius: 14px;
+            padding: 10px 12px;
+            margin: 8px 0;
+        }
+        </style>
+        <div class='partner-excel-window'>
+            <div class='partner-excel-title'>📊 Janela de Tratamento de Planilha Importada</div>
+            <div class='partner-excel-subtitle'>Mini editor estilo Excel para filtrar, editar, excluir, exportar e acompanhar alterações da planilha da parceira.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    filtered = _partners_filter_dataframe(df, search, statuses)
-    max_visible_rows = 1000
-    render_df = filtered.head(max_visible_rows)
-    if len(filtered) > max_visible_rows:
-        st.info(f"Mostrando as primeiras {max_visible_rows} linhas filtradas para manter a tela leve. A exportação continua usando a planilha completa.")
-    visible_ids = [str(v) for v in render_df.get(PARTNER_ROW_ID, [])]
-    display_cols = [PARTNER_ROW_ID] + [col for col in df.columns if col not in hidden_cols and col != PARTNER_ROW_ID]
-    editable_cols = set()
-    if can_edit_rows:
-        editable_cols = {col for col in display_cols if col not in (PARTNER_ROW_ID, "Última Alteração", "Usuário Responsável")}
-    elif can_write_treatment:
-        editable_cols = {col for col in ("Tratativa", "Descrição / Observação") if col in display_cols}
-    disabled_cols = [col for col in display_cols if col not in editable_cols]
+    toolbox, main_area = st.columns([1.05, 3.95], gap="large")
 
-    edited = render_df[display_cols]
-    if editable_cols:
-        st.markdown("##### Editar linha")
-        st.caption("Altere os campos liberados na tabela e clique em Salvar alteração. Use Cancelar alteração para descartar o que ainda não foi salvo.")
-        edited = st.data_editor(
-            render_df[display_cols],
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            key=f"partner_editor_{partner_key}_{len(df)}_{len(visible_ids)}_{len(editable_cols)}",
-            disabled=disabled_cols,
-            column_config={
-                PARTNER_ROW_ID: st.column_config.TextColumn("ID", width="small"),
-                "Status de Execução": st.column_config.SelectboxColumn(
-                    "Status de Execução",
-                    options=PARTNER_STATUS_OPTIONS,
-                    required=False,
-                ),
-                "Tratativa": st.column_config.TextColumn("Tratativa", width="large"),
-                "Descrição / Observação": st.column_config.TextColumn("Descrição / Observação", width="large"),
-            },
-        )
-    else:
-        st.dataframe(render_df[display_cols], use_container_width=True, hide_index=True)
+    with toolbox:
+        st.markdown("<div class='partner-toolbox'><div class='partner-toolbox-title'>Funções</div>", unsafe_allow_html=True)
+        panel_buttons = [
+            ("Filtrar Colunas", "🧩 Filtrar Colunas"),
+            ("Filtrar Informações", "🔎 Filtrar Informações"),
+            ("Editar Cabeçalho", "✏️ Editar Cabeçalho"),
+            ("Editar Célula", "📝 Editar Célula"),
+            ("Adicionar Linha", "➕ Adicionar Linha"),
+            ("Excluir Linha", "🗑️ Excluir Linha"),
+            ("Excluir Coluna", "🧹 Excluir Coluna"),
+            ("Resumo de Atualizações", "📋 Resumo de Atualizações"),
+            ("Exportar CSV", "⬇️ Exportar CSV"),
+            ("Exportar Excel", "📗 Exportar Excel"),
+        ]
+        for mode, label in panel_buttons:
+            if st.button(label, key=f"partner_panel_{partner_key}_{mode}", use_container_width=True):
+                st.session_state[f"partner_panel_mode_{partner_key}"] = mode
+                app_rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    action_cols = st.columns(5)
-    with action_cols[0]:
-        if editable_cols and st.button("💾 Salvar alteração", key=f"partner_save_editor_{partner_key}", type="primary", use_container_width=True):
-            merged, logs = _partners_merge_edited_rows(df, visible_ids, edited, partner.get("columns", []))
-            partner["rows"] = merged.to_dict(orient="records")
-            for log_item in logs:
-                acao, detalhes = log_item[0], log_item[1]
-                extra = log_item[2] if len(log_item) > 2 and isinstance(log_item[2], dict) else {}
-                _partners_add_history(state, partner_key, acao, detalhes, extra)
-            if not logs:
-                _partners_add_history(state, partner_key, "Dados internos salvos", "Sem alterações detectadas", {"tipo_acao": "edição"})
-            _partners_save_state(state)
-            st.success("Alterações salvas.")
-            app_rerun()
-    with action_cols[1]:
-        if editable_cols and st.button("↩ Cancelar alteração", key=f"partner_cancel_editor_{partner_key}", use_container_width=True):
-            app_rerun()
-    with action_cols[2]:
-        if can_edit_rows and st.button("➕ Adicionar linha", key=f"partner_add_row_{partner_key}", use_container_width=True):
-            row = _partners_add_blank_row(partner, partner_key)
-            _partners_add_history(
-                state,
-                partner_key,
-                "Linha criada",
-                row.get(PARTNER_ROW_ID, ""),
-                {"tipo_acao": "edição", "linha": row.get(PARTNER_ROW_ID, ""), "campo": "", "valor_antigo": "", "valor_novo": "linha criada"}
+    mode = st.session_state.get(f"partner_panel_mode_{partner_key}", "Filtrar Informações")
+    hidden_cols_key = f"partner_hidden_cols_{partner_key}"
+    search_key = f"partner_search_{partner_key}"
+    status_key = f"partner_status_filter_{partner_key}"
+
+    with main_area:
+        st.markdown(f"##### {mode}")
+
+        if mode == "Filtrar Colunas":
+            hidable = [col for col in df.columns if col != PARTNER_ROW_ID]
+            col_search = st.text_input("Buscar coluna", key=f"partner_column_search_{partner_key}")
+            choices = [c for c in hidable if str(col_search).strip().lower() in c.lower()] if col_search else hidable
+            selected_visible = st.multiselect(
+                "Colunas visíveis",
+                choices,
+                default=[c for c in choices if c not in st.session_state.get(hidden_cols_key, [])],
+                key=f"partner_visible_cols_{partner_key}",
             )
-            _partners_save_state(state)
-            st.success("Linha adicionada.")
-            app_rerun()
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("Aplicar filtro de colunas", key=f"partner_apply_visible_cols_{partner_key}", type="primary", use_container_width=True):
+                    st.session_state[hidden_cols_key] = [c for c in hidable if c not in selected_visible]
+                    app_rerun()
+            with b2:
+                if st.button("Restaurar colunas ocultas", key=f"partner_restore_cols_{partner_key}", use_container_width=True):
+                    st.session_state[hidden_cols_key] = []
+                    app_rerun()
+            st.caption("Ocultar colunas não apaga dados. As informações permanecem salvas e podem voltar a aparecer.")
 
-    if can_delete_rows:
-        with st.expander("Excluir linha", expanded=False):
-            row_records = df.to_dict(orient="records")
-            row_options = { _partners_row_label(row, idx): str(row.get(PARTNER_ROW_ID, "")) for idx, row in enumerate(row_records) }
-            if row_options:
-                selected_label = st.selectbox("Linha para excluir", list(row_options.keys()), key=f"partner_delete_select_{partner_key}")
-                confirm_delete = st.checkbox("Confirmo a exclusão desta linha", key=f"partner_delete_confirm_{partner_key}")
-                if st.button("🗑️ Excluir linha selecionada", key=f"partner_delete_row_{partner_key}", use_container_width=True):
-                    row_id = row_options.get(selected_label, "")
-                    if not confirm_delete:
-                        st.warning("Marque a confirmação antes de excluir.")
-                    elif _partners_delete_row(partner, row_id):
-                        _partners_add_history(
-                            state,
-                            partner_key,
-                            "Linha excluída",
-                            row_id,
-                            {"tipo_acao": "exclusão", "linha": row_id, "campo": "", "valor_antigo": "linha existente", "valor_novo": "linha removida"}
-                        )
-                        _partners_save_state(state)
-                        st.success("Linha excluída.")
+        elif mode == "Filtrar Informações":
+            f1, f2 = st.columns([1.4, 1])
+            with f1:
+                st.text_input("Pesquisar qualquer informação da tabela", key=search_key)
+            with f2:
+                st.multiselect("Filtrar status", PARTNER_STATUS_OPTIONS, key=status_key)
+            st.caption("A busca aceita termos parciais e filtra a tabela em tempo real.")
+
+        elif mode == "Editar Cabeçalho":
+            if not can_edit_header:
+                st.warning("Seu usuário não possui permissão para editar cabeçalho.")
+            elif partner.get("columns"):
+                h1, h2 = st.columns([1, 1.2])
+                with h1:
+                    old_header = st.selectbox("Cabeçalho atual", partner.get("columns", []), key=f"partner_header_old_{partner_key}")
+                with h2:
+                    new_header = st.text_input("Novo nome do cabeçalho", value=old_header, key=f"partner_header_new_{partner_key}")
+                s1, s2 = st.columns(2)
+                with s1:
+                    if st.button("💾 Salvar cabeçalho", key=f"partner_header_save_{partner_key}", type="primary", use_container_width=True):
+                        ok, msg = _partners_rename_column(partner, old_header, new_header)
+                        if ok:
+                            _partners_add_history(
+                                state,
+                                partner_key,
+                                "Cabeçalho alterado",
+                                f"{old_header} -> {new_header}",
+                                {"tipo_acao": "alteração de cabeçalho", "linha": "", "campo": old_header, "valor_antigo": old_header, "valor_novo": new_header}
+                            )
+                            _partners_save_state(state)
+                            st.success("Cabeçalho salvo e atualizado na tabela, filtros e exportações.")
+                            app_rerun()
+                        else:
+                            st.warning(msg or "Não foi possível alterar o cabeçalho.")
+                with s2:
+                    if st.button("Cancelar", key=f"partner_header_cancel_{partner_key}", use_container_width=True):
                         app_rerun()
-                    else:
-                        st.warning("Não foi possível localizar a linha selecionada.")
 
-    export_df = df.drop(columns=[PARTNER_ROW_ID], errors="ignore")
-    if can_export:
-        e1, e2 = st.columns(2)
-        immediate_export_limit = 50000
-        if len(export_df) <= immediate_export_limit:
-            with e1:
+        elif mode == "Adicionar Linha":
+            if not can_edit_rows:
+                st.warning("Seu usuário não possui permissão para adicionar linhas.")
+            elif st.button("➕ Criar nova linha vazia", key=f"partner_add_row_panel_{partner_key}", type="primary", use_container_width=True):
+                row = _partners_add_blank_row(partner, partner_key)
+                _partners_add_history(
+                    state,
+                    partner_key,
+                    "Linha criada",
+                    row.get(PARTNER_ROW_ID, ""),
+                    {"tipo_acao": "edição", "linha": row.get(PARTNER_ROW_ID, ""), "campo": "", "valor_antigo": "", "valor_novo": "linha criada"}
+                )
+                _partners_save_state(state)
+                st.success("Linha adicionada.")
+                app_rerun()
+
+        elif mode == "Excluir Linha":
+            if not can_delete_rows:
+                st.warning("Seu usuário não possui permissão para excluir linhas.")
+            else:
+                row_records = df.to_dict(orient="records")
+                row_options = {_partners_row_label(row, idx): str(row.get(PARTNER_ROW_ID, "")) for idx, row in enumerate(row_records)}
+                if row_options:
+                    selected_label = st.selectbox("Linha para excluir", list(row_options.keys()), key=f"partner_delete_select_{partner_key}")
+                    confirm_delete = st.checkbox("Confirmo a exclusão desta linha", key=f"partner_delete_confirm_{partner_key}")
+                    if st.button("🗑️ Excluir linha selecionada", key=f"partner_delete_row_panel_{partner_key}", type="primary", use_container_width=True):
+                        row_id = row_options.get(selected_label, "")
+                        if not confirm_delete:
+                            st.warning("Marque a confirmação antes de excluir.")
+                        elif _partners_delete_row(partner, row_id):
+                            _partners_add_history(
+                                state,
+                                partner_key,
+                                "Linha excluída",
+                                row_id,
+                                {"tipo_acao": "exclusão", "linha": row_id, "campo": "", "valor_antigo": "linha existente", "valor_novo": "linha removida"}
+                            )
+                            _partners_save_state(state)
+                            st.success("Linha excluída.")
+                            app_rerun()
+                        else:
+                            st.warning("Não foi possível localizar a linha selecionada.")
+
+        elif mode == "Excluir Coluna":
+            if not can_edit_header:
+                st.warning("Seu usuário não possui permissão para excluir colunas.")
+            else:
+                removable_cols = [col for col in partner.get("columns", []) if col not in PARTNER_INTERNAL_COLUMNS and col != PARTNER_ROW_ID]
+                if removable_cols:
+                    col_to_delete = st.selectbox("Coluna para excluir", removable_cols, key=f"partner_delete_col_select_{partner_key}")
+                    confirm_col = st.checkbox("Confirmo a exclusão desta coluna", key=f"partner_delete_col_confirm_{partner_key}")
+                    if st.button("🧹 Excluir coluna", key=f"partner_delete_col_button_{partner_key}", type="primary", use_container_width=True):
+                        if not confirm_col:
+                            st.warning("Marque a confirmação antes de excluir a coluna.")
+                        else:
+                            partner["columns"] = [col for col in partner.get("columns", []) if col != col_to_delete]
+                            partner["baseline_columns"] = [col for col in partner.get("baseline_columns", []) if col != col_to_delete]
+                            for collection_name in ("rows", "baseline_rows", "diff_rows"):
+                                for row in partner.get(collection_name, []) or []:
+                                    if isinstance(row, dict):
+                                        row.pop(col_to_delete, None)
+                            st.session_state[hidden_cols_key] = [col for col in st.session_state.get(hidden_cols_key, []) if col != col_to_delete]
+                            _partners_add_history(
+                                state,
+                                partner_key,
+                                "Coluna excluída",
+                                col_to_delete,
+                                {"tipo_acao": "exclusão", "linha": "", "campo": col_to_delete, "valor_antigo": col_to_delete, "valor_novo": "coluna removida"}
+                            )
+                            _partners_save_state(state)
+                            st.success("Coluna excluída da tabela e das exportações.")
+                            app_rerun()
+                else:
+                    st.info("Não há colunas importadas disponíveis para exclusão.")
+
+        elif mode == "Resumo de Atualizações":
+            history = _partners_history_rows(partner.get("history", []))
+            st.metric("Quantidade de alterações registradas", len(history))
+            if history:
+                hist_df = pd.DataFrame(history)
+                preferred_cols = ["data_hora", "usuario", "acao", "detalhes", "linha", "campo", "tipo_acao"]
+                hist_cols = [col for col in preferred_cols if col in hist_df.columns] + [col for col in hist_df.columns if col not in preferred_cols]
+                st.dataframe(hist_df[hist_cols].head(300), use_container_width=True, hide_index=True)
+            else:
+                st.info("Nenhuma alteração registrada ainda.")
+
+        elif mode == "Exportar CSV":
+            if not can_export:
+                st.warning("Exportação desabilitada para este usuário.")
+            else:
+                export_df_panel = df.drop(columns=[PARTNER_ROW_ID], errors="ignore")
                 try:
-                    csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
+                    csv_data = export_df_panel.to_csv(index=False).encode("utf-8-sig")
                 except Exception:
                     csv_data = None
                     st.warning("Não foi possível exportar para CSV. Revise a planilha e tente novamente.")
-                if csv_data is not None:
-                    if st.download_button(
-                        "⬇️ Exportar CSV",
-                        data=csv_data,
-                        file_name=f"{_partner_label(partner_key)}_controle.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    ):
-                        _partners_add_history(state, partner_key, "Planilha exportada", "CSV", {"tipo_acao": "exportação", "valor_novo": "CSV"})
-                        _partners_save_state(state)
-            with e2:
-                excel_data, excel_error = _partners_safe_excel_bytes(export_df)
+                if csv_data is not None and st.download_button(
+                    "⬇️ Baixar CSV tratado",
+                    data=csv_data,
+                    file_name=f"{_partner_label(partner_key)}_controle_tratado.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                ):
+                    _partners_add_history(state, partner_key, "Planilha exportada", "CSV", {"tipo_acao": "exportação", "valor_novo": "CSV"})
+                    _partners_save_state(state)
+
+        elif mode == "Exportar Excel":
+            if not can_export:
+                st.warning("Exportação desabilitada para este usuário.")
+            else:
+                export_df_panel = df.drop(columns=[PARTNER_ROW_ID], errors="ignore")
+                excel_data, excel_error = _partners_safe_excel_bytes(export_df_panel)
                 if excel_error:
                     st.info(excel_error)
                 elif st.download_button(
-                    "⬇️ Exportar Excel",
+                    "📗 Baixar Excel tratado (.xlsx)",
                     data=excel_data,
-                    file_name=f"{_partner_label(partner_key)}_controle.xlsx",
+                    file_name=f"{_partner_label(partner_key)}_controle_tratado.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 ):
                     _partners_add_history(state, partner_key, "Planilha exportada", "Excel", {"tipo_acao": "exportação", "valor_novo": "Excel"})
                     _partners_save_state(state)
-        else:
-            st.info("Planilha grande detectada. Para evitar erro no Streamlit Cloud, a exportação será preparada somente quando você solicitar.")
-            with e1:
-                if st.button("Preparar CSV para download", key=f"partner_prepare_big_csv_{partner_key}", use_container_width=True):
-                    target, err = _partners_export_csv_file(export_df, partner_key)
-                    if err:
-                        st.warning(err)
-                    else:
-                        partner["last_export_csv_path"] = str(target)
-                        _partners_add_history(state, partner_key, "Planilha exportada", "CSV grande preparado", {"tipo_acao": "exportação", "valor_novo": "CSV"})
-                        _partners_save_state(state)
-                        st.success("CSV preparado para download.")
-                        app_rerun()
-                export_path = Path(str(partner.get("last_export_csv_path", "")))
-                if export_path.exists():
-                    size_mb = export_path.stat().st_size / (1024 * 1024)
-                    if size_mb <= 100:
-                        st.download_button(
-                            "⬇️ Baixar CSV preparado",
-                            data=export_path.read_bytes(),
-                            file_name=export_path.name,
-                            mime="text/csv",
-                            use_container_width=True,
-                        )
-                    else:
-                        st.caption(f"CSV preparado em `{export_path}` com {size_mb:.1f} MB. Use Backup/Sincronizar para transferir arquivos muito grandes.")
-            with e2:
-                st.info("Exportação Excel fica disponível apenas para planilhas dentro do limite do Excel e do Streamlit Cloud. Use CSV para bases grandes.")
-    else:
-        st.caption("Exportação desabilitada para este usuário.")
 
-    last_update = partner.get("last_update") or {}
-    if last_update:
-        st.markdown("##### Resumo da atualização")
-        st.json({
-            "Última atualização": last_update.get("data_hora", ""),
-            "Usuário que atualizou": last_update.get("usuario", ""),
-            "Fonte": last_update.get("fonte", ""),
-            "Base de comparação": last_update.get("base_comparacao", ""),
-            "Linhas novas": last_update.get("linhas_novas", 0),
-            "Linhas alteradas": last_update.get("linhas_alteradas", 0),
-            "Linhas removidas": last_update.get("linhas_removidas", 0),
-            "Total de diferenças": last_update.get("total_diferencas", 0),
-        })
-    diff_rows = partner.get("diff_rows", [])
-    if diff_rows:
-        st.markdown("##### Destaques visuais da última atualização")
-        diff_df = pd.DataFrame(diff_rows).drop(columns=[PARTNER_ROW_ID], errors="ignore")
-        st.dataframe(_partners_style_diff(diff_df), use_container_width=True, hide_index=True)
+        if mode == "Editar Célula":
+            st.info("Edite diretamente nas células da tabela abaixo e clique em Salvar alteração.")
+
+        filtered = _partners_filter_dataframe(df, st.session_state.get(search_key, ""), st.session_state.get(status_key, []))
+        max_visible_rows = 1000
+        render_df = filtered.head(max_visible_rows)
+        if len(filtered) > max_visible_rows:
+            st.info(f"Mostrando as primeiras {max_visible_rows} linhas filtradas para manter a tela leve. A exportação continua usando a planilha completa.")
+        visible_ids = [str(v) for v in render_df.get(PARTNER_ROW_ID, [])]
+        hidden_cols = st.session_state.get(hidden_cols_key, [])
+        display_cols = [PARTNER_ROW_ID] + [col for col in df.columns if col not in hidden_cols and col != PARTNER_ROW_ID]
+        editable_cols = set()
+        if can_edit_rows:
+            editable_cols = {col for col in display_cols if col not in (PARTNER_ROW_ID, "Última Alteração", "Usuário Responsável")}
+        elif can_write_treatment:
+            editable_cols = {col for col in ("Tratativa", "Descrição / Observação") if col in display_cols}
+        disabled_cols = [col for col in display_cols if col not in editable_cols]
+
+        st.markdown("##### Tabela central da planilha")
+        if can_write_treatment:
+            st.caption("Campos de tratativa disponíveis: Tratativa, Descrição / Observação, Última Alteração e Usuário Responsável.")
+        edited = render_df[display_cols]
+        if editable_cols:
+            edited = st.data_editor(
+                render_df[display_cols],
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                height=520,
+                key=f"partner_editor_{partner_key}_{len(df)}_{len(visible_ids)}_{len(editable_cols)}_{len(hidden_cols)}",
+                disabled=disabled_cols,
+                column_config={
+                    PARTNER_ROW_ID: st.column_config.TextColumn("ID", width="small"),
+                    "Status de Execução": st.column_config.SelectboxColumn(
+                        "Status de Execução",
+                        options=PARTNER_STATUS_OPTIONS,
+                        required=False,
+                    ),
+                    "Tratativa": st.column_config.TextColumn("Tratativa", width="large"),
+                    "Descrição / Observação": st.column_config.TextColumn("Descrição / Observação", width="large"),
+                },
+            )
+        else:
+            st.dataframe(render_df[display_cols], use_container_width=True, hide_index=True, height=520)
+
+        save_cols = st.columns([1, 1, 2])
+        with save_cols[0]:
+            if editable_cols and st.button("💾 Salvar alteração", key=f"partner_save_editor_{partner_key}", type="primary", use_container_width=True):
+                merged, logs = _partners_merge_edited_rows(df, visible_ids, edited, partner.get("columns", []))
+                partner["rows"] = merged.to_dict(orient="records")
+                for log_item in logs:
+                    acao, detalhes = log_item[0], log_item[1]
+                    extra = log_item[2] if len(log_item) > 2 and isinstance(log_item[2], dict) else {}
+                    _partners_add_history(state, partner_key, acao, detalhes, extra)
+                if not logs:
+                    _partners_add_history(state, partner_key, "Dados internos salvos", "Sem alterações detectadas", {"tipo_acao": "edição"})
+                _partners_save_state(state)
+                st.success("Alterações salvas.")
+                app_rerun()
+        with save_cols[1]:
+            if editable_cols and st.button("↩ Cancelar alteração", key=f"partner_cancel_editor_{partner_key}", use_container_width=True):
+                app_rerun()
+
+        last_update = partner.get("last_update") or {}
+        if last_update:
+            with st.expander("Resumo rápido da última importação/atualização", expanded=False):
+                st.json({
+                    "Última atualização": last_update.get("data_hora", ""),
+                    "Usuário que atualizou": last_update.get("usuario", ""),
+                    "Fonte": last_update.get("fonte", ""),
+                    "Base de comparação": last_update.get("base_comparacao", ""),
+                    "Linhas novas": last_update.get("linhas_novas", 0),
+                    "Linhas alteradas": last_update.get("linhas_alteradas", 0),
+                    "Linhas removidas": last_update.get("linhas_removidas", 0),
+                    "Total de diferenças": last_update.get("total_diferencas", 0),
+                })
+        diff_rows = partner.get("diff_rows", [])
+        if diff_rows:
+            with st.expander("Destaques visuais da última atualização", expanded=False):
+                diff_df = pd.DataFrame(diff_rows).drop(columns=[PARTNER_ROW_ID], errors="ignore")
+                st.dataframe(_partners_style_diff(diff_df), use_container_width=True, hide_index=True)
 
 def _render_partner_chat(state: dict, partner_key: str) -> None:
     if not _auth_partner_permission("partner_sheet_write_treatment"):
@@ -5057,33 +5471,7 @@ def render_parceiros_controle() -> None:
             app_rerun()
 
 def _render_partner_mention_notifications() -> None:
-    if not st.session_state.get("logged_in", False):
-        return
-    user = _auth_current_user()
-    if not _auth_can_partners(user):
-        return
-    notes = _partners_mentions_for_user(_partners_load_state(), user)
-    if not notes:
-        return
-    items = "".join(
-        f"<div style='margin-top:6px;'><b>{note['parceira']}</b> · {note['assunto']}<br>"
-        f"<span style='color:#9fb3c8;'>Citado por {note['usuario']} em {note['data']} {note['hora']}</span></div>"
-        for note in notes
-    )
-    st.markdown(
-        f"""
-        <div style='position:fixed;right:22px;bottom:24px;z-index:999999;max-width:360px;
-                    background:linear-gradient(145deg,rgba(17,27,42,.98),rgba(6,12,22,.98));
-                    border:1px solid var(--tmg-primary);border-radius:12px;padding:14px 16px;
-                    box-shadow:0 10px 28px rgba(0,0,0,.5),0 0 18px var(--tmg-primary-glow);'>
-            <div style='color:var(--tmg-primary);font-weight:900;letter-spacing:1.4px;text-transform:uppercase;'>
-                Notificações de tratativas
-            </div>
-            <div style='color:#dce9f8;font-size:.82rem;'>{items}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    return
 
 def _render_partner_logo_settings() -> None:
     if not _auth_is_admin():
@@ -5893,6 +6281,7 @@ with st.sidebar:
 # TOPO (LOGO FIXA)[cite: 1]
 # ==========================================
 _render_logged_user_chip()
+_render_system_chat(current_user)
 
 if st.session_state.logo_sistema and st.session_state.pagina_ativa not in ('TransferenciaVoos', 'VoosDirecionados'):
     col1, col2, col3 = st.columns([1,1,1])
@@ -6117,9 +6506,10 @@ with main_container:
     <label>📍 MARCAÇÃO DE GRID</label>
     <div class="row-col"><span>Nome:</span><input type="text" id="inpGridName" value="Grid 1"></div>
     <div class="row-col"><span>Ativo:</span><select id="selGridList"></select></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px;">
       <button class="grid-btn" id="btnSaveGrid">Salvar Grid</button>
       <button class="grid-btn" id="btnNewGrid">Novo Grid</button>
+      <button class="grid-btn" id="btnDeleteGrid" style="color:#ff6b6b;border-color:#552222;">Excluir Grid</button>
     </div>
     <div class="grid-status" id="gridStatus">Grid ativo: Grid 1</div>
     <div class="grid-all-status" id="gridAllStatus">👁️ Todos os grids salvos visíveis: ATIVO</div>
@@ -6190,6 +6580,7 @@ const inpGridName = document.getElementById('inpGridName');
 const selGridList = document.getElementById('selGridList');
 const btnSaveGrid = document.getElementById('btnSaveGrid');
 const btnNewGrid = document.getElementById('btnNewGrid');
+const btnDeleteGrid = document.getElementById('btnDeleteGrid');
 const gridStatus = document.getElementById('gridStatus');
 const btnGrid = document.getElementById('btnGridTool');
 const btnAnnot = document.getElementById('btnAnnotTool');
@@ -6440,6 +6831,42 @@ function renameActiveGrid() {{
   activeGridName = makeUniqueGridName(next);
   if(savedGrids[old]) delete savedGrids[old];
   saveActiveGrid(false);
+}}
+
+function deleteActiveGrid() {{
+  const target = activeGridName;
+  if(!savedGrids[target]) {{
+    points = [];
+    annotations = {{}};
+    closePopup();
+    draw();
+    return;
+  }}
+  if(!confirm('Excluir definitivamente o grid "' + target + '"? Ele sairá da lista, da visualização e da exportação.')) return;
+  delete savedGrids[target];
+  const remaining = Object.keys(savedGrids);
+  if(remaining.length > 0) {{
+    activeGridName = remaining[0];
+    const rec = savedGrids[activeGridName] || {{}};
+    points = clonePoints(rec.points);
+    annotations = cloneAnnotations(rec.annotations);
+    inpRows.value = rec.rows || inpRows.value;
+    inpCols.value = rec.cols || inpCols.value;
+  }} else {{
+    activeGridName = 'Grid 1';
+    points = [];
+    annotations = {{}};
+    savedGrids[activeGridName] = {{
+      points: [],
+      annotations: {{}},
+      rows: parseInt(inpRows.value)||1,
+      cols: parseInt(inpCols.value)||1
+    }};
+  }}
+  closePopup();
+  updateGridSelect();
+  persistGrids();
+  draw();
 }}
 
 function getExportGridRecords() {{
@@ -6793,41 +7220,87 @@ btnExport.onclick = () => {{
   const safeName = (nome.trim() || 'checklist_notas_parcelas')
     .replace(/[\\\\/:*?"<>|]+/g,'_')
     .replace(/\\s+/g,'_');
-  const gridRecords = getExportGridRecords();
-  const esc = (value) => String(value || '')
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;');
-  let html = '<html><head><meta charset="utf-8"></head><body>';
-  for(const grid of gridRecords) {{
-    html += '<table border="1" style="border-collapse:collapse;font-family:Arial;font-size:11pt;margin-bottom:18px;">';
-    html += '<tr><td colspan="4" style="background:#ff8c00;color:#000;font-weight:bold;font-size:13pt;">Grid: '+esc(grid.name)+'</td></tr>';
-    html += '<tr style="background:#1f1f1f;color:#ff8c00;font-weight:bold;">';
-    html += '<th>Disparo</th><th>Tiro</th><th>Nota</th><th>Observação</th></tr>';
+  const gridRecords = getExportGridRecords().filter(grid => grid.points && grid.points.length === 4);
+  if(gridRecords.length === 0) {{
+    alert('Nenhum grid salvo/marcado disponível para exportar.');
+    return;
+  }}
+  if(typeof XLSX === 'undefined') {{
+    alert('Biblioteca Excel não carregada. Tente novamente em alguns segundos.');
+    return;
+  }}
+  const headers = ['Quadra','Disparo','Tiro','Nota','Observação'];
+  const dados = [headers];
+  gridRecords
+    .sort((a,b) => String(a.name).localeCompare(String(b.name), 'pt-BR', {{numeric:true}}))
+    .forEach(grid => {{
     const R=parseInt(grid.rows)||1, C=parseInt(grid.cols)||1;
-    for(let r=0;r<R;r++) for(let c=0;c<C;c++) {{
+    for(let c=0;c<C;c++) for(let r=0;r<R;r++) {{
       const ann=(grid.annotations[r]||{{}})[c];
       const nota=Number(ann && ann.nota ? ann.nota : 1);
-      const notaStyle = nota===9
-        ? 'background:#ff0000;color:#ffffff;font-weight:bold;text-align:center;'
-        : (nota===1
-            ? 'background:#00b050;color:#ffffff;font-weight:bold;text-align:center;'
-            : 'background:#ffd966;color:#000000;font-weight:bold;text-align:center;');
-      html += '<tr>';
-      html += '<td>'+(r+1)+'</td>';
-      html += '<td>'+(c+1)+'</td>';
-      html += '<td style="'+notaStyle+'">'+nota+'</td>';
-      html += '<td>'+esc(ann?ann.obs:'')+'</td>';
-      html += '</tr>';
+      dados.push([grid.name, c+1, r+1, nota, ann ? (ann.obs || '') : '']);
     }}
-    html += '</table><br>';
+  }});
+  const ws = XLSX.utils.aoa_to_sheet(dados);
+  ws['!cols'] = [{{wch:14}},{{wch:10}},{{wch:10}},{{wch:10}},{{wch:34}}];
+  ws['!freeze'] = {{xSplit:0,ySplit:1}};
+
+  const border = {{
+    top:{{style:'thin',color:{{rgb:'808080'}}}},
+    bottom:{{style:'thin',color:{{rgb:'808080'}}}},
+    left:{{style:'thin',color:{{rgb:'808080'}}}},
+    right:{{style:'thin',color:{{rgb:'808080'}}}}
+  }};
+  const headerStyle = {{
+    font:{{bold:true,color:{{rgb:'00B0F0'}}}},
+    fill:{{patternType:'solid',fgColor:{{rgb:'1F1F1F'}}}},
+    alignment:{{horizontal:'center',vertical:'center'}},
+    border
+  }};
+  const defaultStyle = {{
+    font:{{color:{{rgb:'000000'}}}},
+    alignment:{{horizontal:'center',vertical:'center',wrapText:true}},
+    border
+  }};
+  const notaStyles = {{
+    1: {{fill:'00B050', font:'FFFFFF'}},
+    2: {{fill:'FFF2CC', font:'000000'}},
+    3: {{fill:'DDEBF7', font:'000000'}},
+    4: {{fill:'FCE4D6', font:'000000'}},
+    5: {{fill:'E7E6E6', font:'000000'}},
+    6: {{fill:'E4DFEC', font:'000000'}},
+    7: {{fill:'DDEBF7', font:'000000'}},
+    8: {{fill:'EADCC8', font:'000000'}},
+    9: {{fill:'C00000', font:'FFFFFF'}}
+  }};
+  function notaStyle(nota) {{
+    const item = notaStyles[Number(nota)] || {{fill:'FFFFFF', font:'000000'}};
+    return {{
+      font:{{bold:true,color:{{rgb:item.font}}}},
+      fill:{{patternType:'solid',fgColor:{{rgb:item.fill}}}},
+      alignment:{{horizontal:'center',vertical:'center'}},
+      border
+    }};
   }}
-  html += '</body></html>';
-  const blob = new Blob(['\\ufeff'+html], {{type:'application/vnd.ms-excel;charset=utf-8;'}});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download=safeName+'.xls';
-  a.click();
+
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  for(let row=range.s.r; row<=range.e.r; row++) {{
+    for(let col=range.s.c; col<=range.e.c; col++) {{
+      const addr = XLSX.utils.encode_cell({{r:row,c:col}});
+      if(!ws[addr]) continue;
+      ws[addr].s = row === 0 ? headerStyle : (col === 3 ? notaStyle(ws[addr].v) : defaultStyle);
+      if(row > 0 && col === 3) ws[addr].t = 'n';
+    }}
+  }}
+  const wb = XLSX.utils.book_new();
+  wb.Props = {{
+    Title:'Checklist de Notas',
+    Subject:'Notas por Quadra, Disparo e Tiro',
+    Author:'TMG Sistema de Análise',
+    CreatedDate:new Date()
+  }};
+  XLSX.utils.book_append_sheet(wb, ws, 'Checklist Notas');
+  XLSX.writeFile(wb, safeName+'.xlsx', {{bookType:'xlsx',cellStyles:true}});
 }};
 
 vc.addEventListener('wheel', e=>{{
@@ -6924,6 +7397,7 @@ btnGrid.onclick=()=>{{
 
 btnSaveGrid.onclick=()=>saveActiveGrid(true);
 btnNewGrid.onclick=createNewGrid;
+btnDeleteGrid.onclick=deleteActiveGrid;
 selGridList.onchange=()=>loadGridByName(selGridList.value);
 inpGridName.onchange=renameActiveGrid;
 
@@ -7031,6 +7505,11 @@ updateGridSelect();
                     f"📐 {orto_nome_exibicao} &nbsp;·&nbsp; Resolução final processada: {w}×{h} px</p>",
                     unsafe_allow_html=True
                 )
+                grid_spatial_json = json.dumps({
+                    "ratio": (spatial_meta or {}).get("ratio", 1.0),
+                    "transform": (spatial_meta or {}).get("transform"),
+                    "crs": str((spatial_meta or {}).get("crs") or ""),
+                }, ensure_ascii=False)
 
                 viewer_html = f"""
 <!DOCTYPE html>
@@ -7123,9 +7602,24 @@ updateGridSelect();
   .grid-btn:hover {{ border-color: #ff8c00; color: #ff8c00; }}
   .grid-btn.active {{ border-color: #ff8c00; color: #ff8c00; box-shadow: 0 0 8px rgba(255,140,0,0.3); background: #2a1a00; }}
 
+  .shp-ref-panel {{
+    position:absolute; top:12px; left:12px; z-index:25;
+    width:360px; max-width:calc(100% - 430px);
+    background:rgba(10,10,10,.90); border:1px solid #2a2a2a; border-radius:8px;
+    padding:9px; display:flex; flex-direction:column; gap:6px;
+    font-family:'Segoe UI',sans-serif; box-shadow:0 8px 22px rgba(0,0,0,.45);
+  }}
+  .shp-ref-panel label {{ color:#ff00ff; font-size:11px; font-weight:800; letter-spacing:1px; text-transform:uppercase; }}
+  .shp-ref-panel input {{
+    width:100%; background:#111; border:1px solid #333; color:#fff; border-radius:5px;
+    padding:6px 8px; font-size:11px; outline:none;
+  }}
+  .shp-ref-panel input:focus {{ border-color:#ff00ff; box-shadow:0 0 8px rgba(255,0,255,.22); }}
+  .shp-ref-status {{ color:#888; font-size:9px; line-height:1.25; }}
+
   .zoom-badge {{
     position: absolute;
-    top: 12px; left: 12px;
+    top: 116px; left: 12px;
     background: rgba(10,10,10,0.82);
     border: 1px solid #2a2a2a;
     border-radius: 8px;
@@ -7171,6 +7665,13 @@ updateGridSelect();
 <div id="vc">
   <canvas id="cv"></canvas>
 
+  <div class="shp-ref-panel">
+      <label>🗺️ Referências para exportar SHP</label>
+      <input type="text" id="inpShpRef" placeholder="Digite coordenadas/referências e pressione ENTER">
+      <div class="shp-ref-status" id="shpRefStatus">Aguardando referência. O botão SHP será liberado após ENTER.</div>
+      <button class="grid-btn" id="btnExportSHP" style="display:none;color:#ff00ff; border-color:#990099;">🗺️ Exportar Shapefile (.SHP)</button>
+  </div>
+
   <div class="zoom-badge" id="zbadge">100%</div>
 
   <div class="grid-panel">
@@ -7201,7 +7702,6 @@ updateGridSelect();
       <div class="tb-sep" style="width:100%"></div>
       <button class="grid-btn" id="btnExportFull" style="color:#00ee55; border-color:#006600;">📥 Exportar Ortofoto + Grid</button>
       <button class="grid-btn" id="btnExportGrid" style="color:#00cfff; border-color:#006699;">📥 Exportar Apenas Grid</button>
-      <button class="grid-btn" id="btnExportSHP" style="color:#ff00ff; border-color:#990099;">🗺️ Exportar Shapefile (.SHP)</button>
   </div>
 
   <div class="toolbar">
@@ -7231,9 +7731,14 @@ const inpCols = document.getElementById('inpCols');
 const cbShowSummary = document.getElementById('cbShowSummary');
 const btnGrid = document.getElementById('btnGridTool');
 const btnClear = document.getElementById('btnClearGrid');
+const btnExportSHP = document.getElementById('btnExportSHP');
+const inpShpRef = document.getElementById('inpShpRef');
+const shpRefStatus = document.getElementById('shpRefStatus');
+const GRID_SPATIAL_META = {grid_spatial_json};
 let gridMode = false;
 let points = [];
 let draggingPoint = -1;
+let shpReferenceReady = false;
 
 let sc = 1, ox = 0, oy = 0;
 let drag = false, lx = 0, ly = 0;
@@ -7266,11 +7771,105 @@ function syncToPython() {{
         const data = {{ 
             points: points, 
             rows: parseInt(inpRows.value)||1, 
-            cols: parseInt(inpCols.value)||1 
+            cols: parseInt(inpCols.value)||1,
+            referencia: (inpShpRef ? inpShpRef.value.trim() : ''),
+            referencia_pronta: shpReferenceReady
         }};
+        const payload = JSON.stringify(data);
         try {{
-            window.localStorage.setItem('tmg_grid_payload', JSON.stringify(data));
+            window.localStorage.setItem('tmg_grid_payload', payload);
+            const parentDoc = window.parent && window.parent.document;
+            if(parentDoc) {{
+                const inputs = Array.from(parentDoc.querySelectorAll('input'));
+                const target = inputs.find(el => el.getAttribute('aria-label') === 'grid_payload');
+                if(target) {{
+                    const setter = Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype, 'value').set;
+                    setter.call(target, payload);
+                    target.dispatchEvent(new Event('input', {{bubbles:true}}));
+                    target.dispatchEvent(new Event('change', {{bubbles:true}}));
+                }}
+            }}
         }} catch(e) {{ console.log("Sincronização local indisponível", e); }}
+    }}
+}}
+
+function validateShpReference(showAlert=false) {{
+    const value = (inpShpRef ? inpShpRef.value.trim() : '');
+    shpReferenceReady = value.length > 0;
+    if(shpReferenceReady) {{
+        btnExportSHP.style.display = 'block';
+        shpRefStatus.textContent = 'Referência reconhecida. A exportação SHP está liberada para o grid marcado.';
+        syncToPython();
+        if(showAlert) alert('Referência reconhecida. Agora use Exportar Shapefile (.SHP).');
+    }} else {{
+        btnExportSHP.style.display = 'none';
+        shpRefStatus.textContent = 'Aguardando referência. O botão SHP será liberado após ENTER.';
+    }}
+}}
+
+function pixelToGeo(pt) {{
+    const ratio = Number(GRID_SPATIAL_META && GRID_SPATIAL_META.ratio ? GRID_SPATIAL_META.ratio : 1) || 1;
+    const x = pt.x / ratio;
+    const y = pt.y / ratio;
+    const tr = GRID_SPATIAL_META && Array.isArray(GRID_SPATIAL_META.transform) ? GRID_SPATIAL_META.transform : null;
+    if(tr && tr.length >= 6) {{
+        return [
+            Number(tr[0]) + x * Number(tr[1]) + y * Number(tr[2]),
+            Number(tr[3]) + x * Number(tr[4]) + y * Number(tr[5])
+        ];
+    }}
+    return [x, -y];
+}}
+
+function buildGridGeoJSON() {{
+    const R = parseInt(inpRows.value) || 1;
+    const C = parseInt(inpCols.value) || 1;
+    const p0 = points[0], p1 = points[1], p2 = points[2], p3 = points[3];
+    const features = [];
+    for(let r=0; r<R; r++) {{
+        for(let c=0; c<C; c++) {{
+            const u0=c/C, u1=(c+1)/C, v0=r/R, v1=(r+1)/R;
+            const tl=bilerp(p0,p1,p2,p3,u0,v0);
+            const tr=bilerp(p0,p1,p2,p3,u1,v0);
+            const br=bilerp(p0,p1,p2,p3,u1,v1);
+            const bl=bilerp(p0,p1,p2,p3,u0,v1);
+            const coords = [tl,tr,br,bl,tl].map(pixelToGeo);
+            features.push({{
+                type:'Feature',
+                properties:{{
+                    ID:'T'+(c+1)+' D'+(r+1),
+                    TIRO:c+1,
+                    DISPARO:r+1,
+                    REFERENCIA:(inpShpRef ? inpShpRef.value.trim() : '')
+                }},
+                geometry:{{type:'Polygon', coordinates:[coords]}}
+            }});
+        }}
+    }}
+    return {{type:'FeatureCollection', features}};
+}}
+
+function exportGridShapefile() {{
+    if(points.length !== 4) {{
+        alert('Por favor, marque os 4 pontos do Grid antes de exportar o Shapefile.');
+        return;
+    }}
+    validateShpReference(false);
+    if(!shpReferenceReady) {{
+        alert('Digite as coordenadas/referências e pressione ENTER antes de exportar o SHP.');
+        return;
+    }}
+    syncToPython();
+    const geojson = buildGridGeoJSON();
+    try {{
+        if(typeof shpwrite === 'undefined' || !shpwrite.download) {{
+            throw new Error('Biblioteca shp-write não carregada.');
+        }}
+        shpwrite.download(geojson, {{file:'TMG_Grid_Shapefile'}});
+        shpRefStatus.textContent = 'SHP gerado com sucesso para o grid marcado.';
+    }} catch(err) {{
+        console.error(err);
+        alert('Não foi possível gerar o SHP direto no visualizador. Verifique a conexão da biblioteca shp-write ou use o ambiente com dependências geoespaciais.');
     }}
 }}
 
@@ -7537,15 +8136,16 @@ document.getElementById('btnExportGrid').onclick = () => {{
     draw();
 }};
 
-// NOVO: EXPORTAÇÃO DE SHAPEFILE INTEGRADA COM PYTHON PARA VALIDACAO ROBUSTA
-document.getElementById('btnExportSHP').onclick = () => {{
-    if(points.length !== 4) {{
-        alert('Por favor, marque os 4 pontos do Grid antes de exportar o Shapefile.');
-        return;
+inpShpRef.addEventListener('keydown', (e) => {{
+    if(e.key === 'Enter') {{
+        e.preventDefault();
+        validateShpReference(true);
     }}
-    syncToPython();
-    alert('✅ Dados geométricos validados e sincronizados com sucesso! Role a página um pouco para baixo e clique em "📥 Baixar Shapefile (.SHP)" na área de Exportação Robusta para garantir a integridade e CRS corretos.');
-}};
+}});
+inpShpRef.addEventListener('input', () => {{
+    if(!inpShpRef.value.trim()) validateShpReference(false);
+}});
+btnExportSHP.onclick = exportGridShapefile;
 
 window.addEventListener('resize', resize);
 </script>
@@ -7967,6 +8567,7 @@ window.addEventListener('resize', resize);
                     st.error(f"Erro: {cnt_err}")
                 else:
                     cw_cnt, ch_cnt = cnt_dims
+                    cnt_storage_id = json.dumps(_tv_hash_bytes(cnt_bytes)[:32])
                     st.markdown(
                         f"<p style='color:#666;font-size:0.78rem;margin-bottom:6px;'>"
                         f"📐 {cnt_name} · {cw_cnt}×{ch_cnt} px</p>",
@@ -8018,7 +8619,12 @@ window.addEventListener('resize', resize);
     background:#1a1a1a; border:1px solid #333; color:#fff;
     border-radius:4px; padding:4px; width:50px; text-align:center; font-size:11px;
   }}
+  .grid-panel input[type=text], .grid-panel select {{
+    background:#1a1a1a; border:1px solid #333; color:#fff;
+    border-radius:4px; padding:4px; font-size:11px; min-width:104px;
+  }}
   .grid-panel .row-col {{ display:flex; gap:8px; align-items:center; justify-content:space-between; color:#ccc; font-size:11px; }}
+  .grid-status {{ color:#777; font-size:9px; line-height:1.25; max-width:190px; }}
   .grid-btn {{
     background:linear-gradient(145deg,#1e1e1e,#111); border:1px solid #3a3a3a;
     color:#ccc; cursor:pointer; border-radius:4px; padding:6px; font-size:11px; font-weight:bold; transition:.2s;
@@ -8090,6 +8696,18 @@ window.addEventListener('resize', resize);
   <div class="grid-panel">
     <label>🌱 CONTAGEM</label>
     <div class="row-col">
+      <span>Quadra:</span><input type="text" id="inpGridName" value="Grid 1">
+    </div>
+    <div class="row-col">
+      <span>Ativo:</span><select id="selGridList"></select>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px;">
+      <button class="grid-btn" id="btnSaveGrid">Salvar</button>
+      <button class="grid-btn" id="btnNewGrid">Novo</button>
+      <button class="grid-btn" id="btnDeleteGrid" style="color:#ff6b6b;border-color:#552222;">Excluir</button>
+    </div>
+    <div class="grid-status" id="gridStatus">Grid ativo: Grid 1</div>
+    <div class="row-col">
       <span>Disp:</span><input type="number" id="inpRows" value="5" min="1" max="200">
     </div>
     <div class="row-col">
@@ -8098,7 +8716,12 @@ window.addEventListener('resize', resize);
     <button class="cnt-btn" id="btnCountAuto">🌱 Contar</button>
     <button class="cnt-btn manual" id="btnManual2">✏️ Manual</button>
     <button class="cnt-btn danger" id="btnUndoMark">❌ Desfazer</button>
+    <div class="row-col" style="justify-content:flex-start; gap:4px;">
+      <input type="checkbox" id="cbExportAll" style="width:auto;accent-color:#00ee55;">
+      <span style="font-size:10px;">Exportar todos os grids salvos</span>
+    </div>
     <button id="btnExportCnt">💾 Exportar CSV</button>
+    <button class="cnt-btn" id="btnExportXLSXCnt" style="background:linear-gradient(145deg,#1a003a,#0a001a);border-color:#660099;color:#cc66ff;">📗 Exportar Excel</button>
     <button class="cnt-btn" id="btnResumo" style="background:linear-gradient(145deg,#2a1a00,#1a0a00);border-color:#ff8c00;color:#ff8c00;">📊 Resumo</button>
   </div>
 
@@ -8163,9 +8786,19 @@ const btnCountAuto = document.getElementById('btnCountAuto');
 const btnManual2 = document.getElementById('btnManual2');
 const btnUndoMark = document.getElementById('btnUndoMark');
 const btnExportCnt = document.getElementById('btnExportCnt');
+const btnExportXLSXCnt = document.getElementById('btnExportXLSXCnt');
+const inpGridName = document.getElementById('inpGridName');
+const selGridList = document.getElementById('selGridList');
+const btnSaveGrid = document.getElementById('btnSaveGrid');
+const btnNewGrid = document.getElementById('btnNewGrid');
+const btnDeleteGrid = document.getElementById('btnDeleteGrid');
+const cbExportAll = document.getElementById('cbExportAll');
+const gridStatus = document.getElementById('gridStatus');
 const countPanel = document.getElementById('countPanel');
 const totalCountEl = document.getElementById('totalCount');
 const countInfoEl = document.getElementById('countInfo');
+const ORTHO_STORAGE_ID = {cnt_storage_id};
+const STORAGE_KEY = 'tmg_contagem_plantas_grids_' + ORTHO_STORAGE_ID;
 
 let gridMode = false;
 let manualMode = false;
@@ -8179,6 +8812,9 @@ let imgW = 0, imgH = 0;
 let plantCenters = [];
 let manualMarks = [];
 let parcelCounts = {{}};
+let savedGrids = {{}};
+let activeGridName = 'Grid 1';
+let suppressPersist = false;
 
 const img = new Image();
 
@@ -8205,6 +8841,293 @@ function pointInPolygon(px, py, polygon) {{
     }}
   }}
   return inside;
+}}
+
+function cleanGridName(name) {{
+  const value = String(name || '').trim();
+  return value || 'Grid 1';
+}}
+
+function makeUniqueGridName(base) {{
+  let name = cleanGridName(base);
+  if(!savedGrids[name]) return name;
+  let i = 2;
+  while(savedGrids[name + ' ' + i]) i++;
+  return name + ' ' + i;
+}}
+
+function clonePoints(src) {{
+  return (src || []).map(p => ({{x:Number(p.x)||0, y:Number(p.y)||0}}));
+}}
+
+function cloneMarks(src) {{
+  return (src || []).map(p => ({{x:Number(p.x)||0, y:Number(p.y)||0}}));
+}}
+
+function cloneCounts(src) {{
+  return JSON.parse(JSON.stringify(src || {{}}));
+}}
+
+function persistGrids() {{
+  if(suppressPersist) return;
+  try {{
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({{
+      activeGridName,
+      savedGrids,
+      updatedAt: new Date().toISOString()
+    }}));
+  }} catch(e) {{ console.warn('Não foi possível salvar grids de contagem:', e); }}
+}}
+
+function applyGridRecord(rec) {{
+  rec = rec || {{}};
+  points = clonePoints(rec.points);
+  plantCenters = cloneMarks(rec.plantCenters);
+  manualMarks = cloneMarks(rec.manualMarks);
+  parcelCounts = cloneCounts(rec.parcelCounts);
+  inpRows.value = rec.rows || inpRows.value;
+  inpCols.value = rec.cols || inpCols.value;
+  countPanel.style.display = Object.keys(parcelCounts).length ? 'block' : 'none';
+  totalCountEl.textContent = plantCenters.length || 0;
+  countInfoEl.textContent = Object.keys(parcelCounts).length
+    ? 'Grid ' + (parseInt(inpRows.value)||1) + '×' + (parseInt(inpCols.value)||1) + ' | ' + (plantCenters.length||0) + ' plantas'
+    : 'Marque o grid e clique Contar';
+}}
+
+function saveActiveGrid(showMsg=false) {{
+  activeGridName = cleanGridName(inpGridName.value || activeGridName);
+  savedGrids[activeGridName] = {{
+    points: clonePoints(points),
+    plantCenters: cloneMarks(plantCenters),
+    manualMarks: cloneMarks(manualMarks),
+    parcelCounts: cloneCounts(parcelCounts),
+    rows: parseInt(inpRows.value)||1,
+    cols: parseInt(inpCols.value)||1
+  }};
+  updateGridSelect();
+  persistGrids();
+  if(showMsg) gridStatus.textContent = 'Grid salvo: ' + activeGridName;
+}}
+
+function restoreGrids() {{
+  try {{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(!raw) return false;
+    const data = JSON.parse(raw);
+    if(!data || !data.savedGrids) return false;
+    savedGrids = data.savedGrids || {{}};
+    activeGridName = cleanGridName(data.activeGridName || Object.keys(savedGrids)[0] || 'Grid 1');
+    const rec = savedGrids[activeGridName] || savedGrids[Object.keys(savedGrids)[0]];
+    if(rec) applyGridRecord(rec);
+    return Object.keys(savedGrids).length > 0;
+  }} catch(e) {{ console.warn('Não foi possível restaurar grids de contagem:', e); return false; }}
+}}
+
+function updateGridSelect() {{
+  if(!savedGrids[activeGridName]) {{
+    savedGrids[activeGridName] = {{
+      points: clonePoints(points),
+      plantCenters: cloneMarks(plantCenters),
+      manualMarks: cloneMarks(manualMarks),
+      parcelCounts: cloneCounts(parcelCounts),
+      rows: parseInt(inpRows.value)||1,
+      cols: parseInt(inpCols.value)||1
+    }};
+  }}
+  const names = Object.keys(savedGrids);
+  selGridList.innerHTML = '';
+  names.forEach(name => {{
+    const rec = savedGrids[name] || {{}};
+    const opt = document.createElement('option');
+    opt.value = name;
+    const counted = rec.parcelCounts && Object.keys(rec.parcelCounts).length > 0;
+    opt.textContent = name + (counted ? ' ✓' : '');
+    selGridList.appendChild(opt);
+  }});
+  selGridList.value = activeGridName;
+  inpGridName.value = activeGridName;
+  const marked = points.length === 4 ? 'marcado' : 'sem 4 pontos';
+  const counted = Object.keys(parcelCounts).length > 0 ? 'com contagem' : 'sem contagem';
+  gridStatus.textContent = 'Grid ativo: ' + activeGridName + ' · ' + marked + ' · ' + counted + ' · salvos: ' + names.length;
+}}
+
+function loadGridByName(name) {{
+  const target = cleanGridName(String(name || '').replace(/ ✓$/,''));
+  if(target === activeGridName) return;
+  saveActiveGrid(false);
+  const rec = savedGrids[target];
+  if(!rec) return;
+  activeGridName = target;
+  applyGridRecord(rec);
+  updateGridSelect();
+  drawAll();
+}}
+
+function createNewGrid() {{
+  saveActiveGrid(false);
+  const suggested = makeUniqueGridName('Grid ' + (Object.keys(savedGrids).length + 1));
+  const typed = prompt('Nome da Quadra/Grid:', suggested);
+  if(typed === null) return;
+  activeGridName = makeUniqueGridName(typed);
+  points = [];
+  plantCenters = [];
+  manualMarks = [];
+  parcelCounts = {{}};
+  savedGrids[activeGridName] = {{
+    points: [],
+    plantCenters: [],
+    manualMarks: [],
+    parcelCounts: {{}},
+    rows: parseInt(inpRows.value)||1,
+    cols: parseInt(inpCols.value)||1
+  }};
+  countPanel.style.display = 'none';
+  updateGridSelect();
+  persistGrids();
+  drawAll();
+}}
+
+function renameActiveGrid() {{
+  const next = cleanGridName(inpGridName.value);
+  if(next === activeGridName) return;
+  const old = activeGridName;
+  activeGridName = makeUniqueGridName(next);
+  if(savedGrids[old]) delete savedGrids[old];
+  saveActiveGrid(false);
+}}
+
+function deleteActiveGrid() {{
+  const target = activeGridName;
+  if(!confirm('Excluir definitivamente o grid "' + target + '"? Ele sairá da lista, da visualização e das exportações.')) return;
+  delete savedGrids[target];
+  const remaining = Object.keys(savedGrids);
+  if(remaining.length) {{
+    activeGridName = remaining[0];
+    applyGridRecord(savedGrids[activeGridName]);
+  }} else {{
+    activeGridName = 'Grid 1';
+    points = [];
+    plantCenters = [];
+    manualMarks = [];
+    parcelCounts = {{}};
+    savedGrids[activeGridName] = {{
+      points: [],
+      plantCenters: [],
+      manualMarks: [],
+      parcelCounts: {{}},
+      rows: parseInt(inpRows.value)||1,
+      cols: parseInt(inpCols.value)||1
+    }};
+    countPanel.style.display = 'none';
+  }}
+  updateGridSelect();
+  persistGrids();
+  drawAll();
+}}
+
+function getExportGridRecords(exportAll=false) {{
+  saveActiveGrid(false);
+  const names = exportAll ? Object.keys(savedGrids) : [activeGridName];
+  return names
+    .map(name => {{
+      const rec = savedGrids[name] || {{}};
+      return {{
+        name,
+        rows: parseInt(rec.rows)||1,
+        cols: parseInt(rec.cols)||1,
+        parcelCounts: cloneCounts(rec.parcelCounts)
+      }};
+    }})
+    .filter(grid => grid.parcelCounts && Object.keys(grid.parcelCounts).length > 0);
+}}
+
+function countForCell(grid, disparo, tiro) {{
+  const key = Number(disparo) + '_' + Number(tiro);
+  return Number(grid.parcelCounts[key] || 0);
+}}
+
+function buildExportRows(exportAll=false) {{
+  const rows = [];
+  const grids = getExportGridRecords(exportAll)
+    .sort((a,b) => String(a.name).localeCompare(String(b.name), 'pt-BR', {{numeric:true}}));
+  grids.forEach(grid => {{
+    const R = parseInt(grid.rows)||1;
+    const C = parseInt(grid.cols)||1;
+    for(let d=1; d<=R; d++) {{
+      for(let t=1; t<=C; t++) {{
+        rows.push({{
+          quadra: grid.name,
+          disparo: d,
+          tiro: t,
+          quantidade: countForCell(grid, d, t)
+        }});
+      }}
+    }}
+  }});
+  return rows;
+}}
+
+function csvEscape(value) {{
+  const s = String(value ?? '');
+  return /[",\\n\\r]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+}}
+
+function safeFilePart(value) {{
+  return String(value || 'grid').trim().replace(/[\\\\/:*?"<>|]+/g,'_').replace(/\\s+/g,'_') || 'grid';
+}}
+
+function exportContagemCSV(exportAll=false) {{
+  const rows = buildExportRows(exportAll);
+  if(rows.length === 0) {{ alert('Nenhuma contagem realizada para o(s) grid(s) selecionado(s).'); return; }}
+  let csv = '\\uFEFF' + 'Quadra,Disparo,Tiro,Quantidade de Plantas\\n';
+  rows.forEach(row => {{
+    csv += [row.quadra,row.disparo,row.tiro,row.quantidade].map(csvEscape).join(',') + '\\n';
+  }});
+  const blob = new Blob([csv], {{type:'text/csv;charset=utf-8;'}});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = exportAll ? 'contagem_plantas_todos_grids.csv' : 'contagem_plantas_' + safeFilePart(activeGridName) + '.csv';
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}}
+
+function exportContagemExcel(exportAll=false) {{
+  const rows = buildExportRows(exportAll);
+  if(rows.length === 0) {{ alert('Nenhuma contagem realizada para o(s) grid(s) selecionado(s).'); return; }}
+  if(typeof XLSX === 'undefined') {{ alert('Biblioteca Excel não carregou. Use Exportar CSV.'); return; }}
+  const headers = ['Quadra','Disparo','Tiro','Quantidade de Plantas'];
+  const data = [headers, ...rows.map(row => [row.quadra,row.disparo,row.tiro,row.quantidade])];
+  const ws = XLSX.utils.aoa_to_sheet(data);
+  ws['!cols'] = [{{wch:14}},{{wch:10}},{{wch:10}},{{wch:24}}];
+  const border = {{
+    top:{{style:'thin',color:{{rgb:'808080'}}}},
+    bottom:{{style:'thin',color:{{rgb:'808080'}}}},
+    left:{{style:'thin',color:{{rgb:'808080'}}}},
+    right:{{style:'thin',color:{{rgb:'808080'}}}}
+  }};
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  for(let R=range.s.r; R<=range.e.r; R++) {{
+    for(let C=range.s.c; C<=range.e.c; C++) {{
+      const addr = XLSX.utils.encode_cell({{r:R,c:C}});
+      if(!ws[addr]) continue;
+      ws[addr].s = {{
+        font: R===0 ? {{bold:true,color:{{rgb:'00B0F0'}}}} : {{color:{{rgb:'000000'}}}},
+        fill: R===0
+          ? {{patternType:'solid',fgColor:{{rgb:'1F1F1F'}}}}
+          : (C===3 ? {{patternType:'solid',fgColor:{{rgb:'00B050'}}}} : undefined),
+        alignment: {{horizontal:C===3 || R===0 ? 'center' : 'left', vertical:'center'}},
+        border
+      }};
+      if(R>0 && C===3) {{
+        ws[addr].s.font = {{bold:true,color:{{rgb:'FFFFFF'}}}};
+        ws[addr].s.alignment = {{horizontal:'center',vertical:'center'}};
+        ws[addr].t = 'n';
+      }}
+    }}
+  }}
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Contagem');
+  XLSX.writeFile(wb, exportAll ? 'contagem_plantas_todos_grids.xlsx' : 'contagem_plantas_' + safeFilePart(activeGridName) + '.xlsx', {{bookType:'xlsx',cellStyles:true}});
 }}
 
 function countPlantsInGrid() {{
@@ -8332,6 +9255,7 @@ function countPlantsInGrid() {{
   countInfoEl.textContent = 'Grid ' + R + '×' + C + ' | Dentro da área marcada';
 
   drawAll();
+  saveActiveGrid(false);
 }}
 
 function drawAll() {{
@@ -8483,6 +9407,7 @@ vc.addEventListener('mousedown', e => {{
   if (gridMode && points.length < 4) {{
     points.push({{x:pt.x, y:pt.y}});
     if (points.length === 4) gridMode = false;
+    saveActiveGrid(false);
     drawAll();
     return;
   }}
@@ -8494,6 +9419,7 @@ vc.addEventListener('mousedown', e => {{
       plantCenters.push({{x:pt.x, y:pt.y}});
       // Recontabilizar
       recount();
+      saveActiveGrid(false);
       drawAll();
     }}
     return;
@@ -8521,6 +9447,7 @@ vc.addEventListener('mousemove', e => {{
 }});
 
 vc.addEventListener('mouseup', () => {{
+  if(draggingPoint >= 0) saveActiveGrid(false);
   drag = false; draggingPoint = -1;
   vc.style.cursor = 'grab';
 }});
@@ -8552,6 +9479,7 @@ function recount() {{
   countPanel.style.display = 'block';
   totalCountEl.textContent = plantCenters.length;
   countInfoEl.textContent = 'Grid ' + R + '×' + C + ' | ' + plantCenters.length + ' plantas';
+  saveActiveGrid(false);
 }}
 
 // Botões
@@ -8559,7 +9487,7 @@ btnGridTool.onclick = () => {{
   gridMode = !gridMode; manualMode = false;
   btnGridTool.style.borderColor = gridMode ? '#ff8c00' : '#3a3a3a';
   btnManualMode.style.borderColor = '#3a3a3a';
-  if (gridMode) {{ points = []; plantCenters = []; manualMarks = []; parcelCounts = {{}}; countPanel.style.display='none'; drawAll(); }}
+  if (gridMode) {{ points = []; plantCenters = []; manualMarks = []; parcelCounts = {{}}; countPanel.style.display='none'; saveActiveGrid(false); drawAll(); }}
 }};
 
 btnCountPlants.onclick = () => countPlantsInGrid();
@@ -8579,7 +9507,7 @@ btnRemoveLast.onclick = () => {{
   if (manualMarks.length > 0) {{
     const removed = manualMarks.pop();
     plantCenters = plantCenters.filter(p => p.x !== removed.x || p.y !== removed.y);
-    recount(); drawAll();
+    recount(); saveActiveGrid(false); drawAll();
   }}
 }};
 btnUndoMark.onclick = btnRemoveLast.onclick;
@@ -8589,32 +9517,20 @@ btnClearAll.onclick = () => {{
   countPanel.style.display = 'none'; gridMode = false; manualMode = false;
   btnGridTool.style.borderColor = '#3a3a3a';
   btnManualMode.style.borderColor = '#3a3a3a';
+  saveActiveGrid(false);
   drawAll();
 }};
 
-btnExportCnt.onclick = () => {{
-  if (Object.keys(parcelCounts).length === 0) {{ alert('Nenhuma contagem realizada.'); return; }}
-  const R = parseInt(inpRows.value)||1;
-  const C = parseInt(inpCols.value)||1;
-  let csvContent = '\\uFEFF' + 'Disparo;Tiro;Quantidade de Plantas\\n';
-  const keys = Object.keys(parcelCounts).sort((a,b) => {{
-    const [da,ta] = a.split('_').map(Number);
-    const [db,tb] = b.split('_').map(Number);
-    return da===db ? ta-tb : da-db;
-  }});
-  let total = 0;
-  for (const k of keys) {{
-    const [d,t] = k.split('_');
-    csvContent += d + ';' + t + ';' + parcelCounts[k] + '\\n';
-    total += parcelCounts[k];
-  }}
-  csvContent += '\\n;Total Geral;' + total + '\\n';
-  const blob = new Blob([csvContent], {{type:'text/csv;charset=utf-8;'}});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'contagem_plantas.csv';
-  a.click();
-}};
+btnSaveGrid.onclick = () => saveActiveGrid(true);
+btnNewGrid.onclick = createNewGrid;
+btnDeleteGrid.onclick = deleteActiveGrid;
+selGridList.onchange = () => loadGridByName(selGridList.value);
+inpGridName.onchange = renameActiveGrid;
+inpRows.onchange = () => {{ recount(); saveActiveGrid(false); drawAll(); }};
+inpCols.onchange = () => {{ recount(); saveActiveGrid(false); drawAll(); }};
+
+btnExportCnt.onclick = () => exportContagemCSV(cbExportAll.checked);
+btnExportXLSXCnt.onclick = () => exportContagemExcel(cbExportAll.checked);
 
 // NOVO - Resumo Modal Logic
 const resumoModal = document.getElementById('resumoModal');
@@ -8692,47 +9608,16 @@ resumoFilterTiro.onchange = () => buildResumoTable(resumoSearch.value, resumoFil
 resumoFilterDisp.onchange = () => buildResumoTable(resumoSearch.value, resumoFilterTiro.value, resumoFilterDisp.value);
 
 document.getElementById('btnResumoCSV').onclick = () => {{
-  const R = parseInt(inpRows.value)||1, C = parseInt(inpCols.value)||1;
-  let csv = '\\uFEFF' + 'ID Parcela;Tiro;Disparo;Quantidade Plantas\\n';
-  const keys = Object.keys(parcelCounts).sort((a,b) => {{
-    const [da,ta] = a.split('_').map(Number);
-    const [db,tb] = b.split('_').map(Number);
-    return da===db ? ta-tb : da-db;
-  }});
-  let total = 0, idx = 0;
-  for (const k of keys) {{
-    const [d,t] = k.split('_'); idx++;
-    csv += 'P'+(idx<10?'0':'')+idx+';'+t+';'+d+';'+parcelCounts[k]+'\\n';
-    total += parcelCounts[k];
-  }}
-  csv += '\\n;;Total Geral;'+total+'\\n';
-  const blob = new Blob([csv], {{type:'text/csv;charset=utf-8;'}});
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-  a.download = 'resumo_contagem_plantas.csv'; a.click();
+  exportContagemCSV(cbExportAll.checked);
 }};
 
 document.getElementById('btnResumoXLSX').onclick = () => {{
-  if (typeof XLSX === 'undefined') {{ alert('Biblioteca XLSX não carregada.'); return; }}
-  const R = parseInt(inpRows.value)||1, C = parseInt(inpCols.value)||1;
-  const rows = [['ID Parcela','Tiro','Disparo','Quantidade Plantas']];
-  const keys = Object.keys(parcelCounts).sort((a,b) => {{
-    const [da,ta] = a.split('_').map(Number);
-    const [db,tb] = b.split('_').map(Number);
-    return da===db ? ta-tb : da-db;
-  }});
-  let total = 0, idx = 0;
-  for (const k of keys) {{
-    const [d,t] = k.split('_').map(Number); idx++;
-    rows.push(['P'+(idx<10?'0':'')+idx, t, d, parcelCounts[k]]);
-    total += parcelCounts[k];
-  }}
-  rows.push([]); rows.push(['','','Total Geral', total]);
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws['!cols'] = [{{wch:12}},{{wch:8}},{{wch:10}},{{wch:18}}];
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Resumo Contagem');
-  XLSX.writeFile(wb, 'resumo_contagem_plantas.xlsx');
+  exportContagemExcel(cbExportAll.checked);
 }};
+
+restoreGrids();
+saveActiveGrid(false);
+updateGridSelect();
 
 // Resize
 new ResizeObserver(() => drawAll()).observe(vc);
@@ -10985,6 +11870,12 @@ new ResizeObserver(() => drawAll()).observe(viewer);
     <div class="row-col">
       <span>Tiros:</span><input type="number" id="inpCols" value="5" min="1" max="200">
     </div>
+    <div class="row-col">
+      <span>Quadra:</span><input type="text" id="inpQuadraName" value="Q-1" style="width:96px;background:#1a1a1a;border:1px solid #333;color:#fff;border-radius:4px;padding:2px 4px;height:21px;font-size:10px;">
+    </div>
+    <div class="row-col">
+      <span>Linhas/parcela:</span><input type="number" id="inpLinhasParcela" value="4" min="1" max="20" style="width:46px;">
+    </div>
     <button class="cnt-btn" id="btnManual2" style="background:linear-gradient(145deg,#1a1a3a,#0a0a2a);border-color:#000066;color:#5599ff;">✏️ Manual</button>
     <div class="qual-sep"></div>
     <label style="color:#ff4444;">⚠️ FALHAS LINEARES</label>
@@ -11022,6 +11913,8 @@ new ResizeObserver(() => drawAll()).observe(viewer);
     </div>
     <button class="cnt-btn red" id="btnDetectFalhas">⚠️ Detectar Falhas</button>
     <button class="cnt-btn red" id="btnMedirPlantados">📏 Medir Metros Plantados</button>
+    <button class="cnt-btn danger" id="btnDeleteFalhaMode">🧽 Selecionar/Apagar Falha</button>
+    <div style="font-size:9px;color:#777;line-height:1.25;">Duplo clique na parcela sem contagem = 100% FALHADA.</div>
     <div class="qual-sep"></div>
     <label style="color:#ffd21f;">🔧 AJUSTE DE PARCELA</label>
     <button class="cnt-btn orange" id="btnSelectParcel">Marcar Parcela</button>
@@ -11044,7 +11937,7 @@ new ResizeObserver(() => drawAll()).observe(viewer);
     <button class="cnt-btn danger" id="btnUndoMark">❌ Desfazer</button>
     <button id="btnExportCnt" style="background:linear-gradient(145deg,#003a00,#001a00);border:1px solid #006600;
       color:#00ee55;border-radius:4px;padding:4px 6px;min-height:22px;font-size:10px;font-weight:bold;cursor:pointer;
-      transition:.2s;width:100%;margin-top:1px;">💾 Exportar CSV</button>
+      transition:.2s;width:100%;margin-top:1px;">📗 Exportar Excel</button>
   </div>
 
   <div class="count-panel" id="countPanel" style="display:none;">
@@ -11120,6 +12013,8 @@ const coordEl = document.getElementById('coord');
 
 const inpRows      = document.getElementById('inpRows');
 const inpCols      = document.getElementById('inpCols');
+const inpQuadraName = document.getElementById('inpQuadraName');
+const inpLinhasParcela = document.getElementById('inpLinhasParcela');
 const btnGridTool  = document.getElementById('btnGridTool');
 const btnCountPlants = document.getElementById('btnCountPlants');
 const btnManualMode= document.getElementById('btnManualMode');
@@ -11135,6 +12030,7 @@ const countInfoEl  = document.getElementById('countInfo');
 const falhasSumario = document.getElementById('falhasSumario');
 const btnDetectFalhas = document.getElementById('btnDetectFalhas');
 const btnMedirPlantados = document.getElementById('btnMedirPlantados');
+const btnDeleteFalhaMode = document.getElementById('btnDeleteFalhaMode');
 const chkShowFalhas   = document.getElementById('chkShowFalhas');
 const chkLabels       = document.getElementById('chkLabels');
 const inpMinDist      = document.getElementById('inpMinDist');
@@ -11157,6 +12053,7 @@ const inpMoveStep     = document.getElementById('inpMoveStep');
 const parcelAdjustStatus = document.getElementById('parcelAdjustStatus');
 
 let gridMode = false, manualMode = false;
+let deleteFalhaMode = false;
 let parcelSelectMode = false, parcelMoveMode = false, draggingParcelSelection = false;
 let points = [], draggingPoint = -1;
 let sc = 1, ox = 0, oy = 0;
@@ -11172,7 +12069,17 @@ let areasUteis   = [];
 let metrosPlantadosLinhas = [];
 let metrosPlantadosSegmentos = [];
 let qualidadeModoVisual = '';
-const LINHAS_PLANTIO_POR_PARCELA = 4;
+let manualFailedParcels = {{}};
+let deletedFalhaKeys = new Set();
+function getLinhasPlantioPorParcela() {{
+  const v=Math.max(1,Math.min(20,parseInt(inpLinhasParcela && inpLinhasParcela.value)||4));
+  if(inpLinhasParcela) inpLinhasParcela.value=v;
+  return v;
+}}
+function getQuadraNome() {{
+  const v=(inpQuadraName && inpQuadraName.value ? inpQuadraName.value.trim() : 'Q-1');
+  return v || 'Q-1';
+}}
 let parcelAdjustments = {{}};
 let selectedParcels = new Set();
 let lastParcelDragPt = null;
@@ -11206,6 +12113,31 @@ function getParcelLabel(key) {{
 function parseParcelKey(key) {{
   const parts=String(key||'').split('_').map(Number);
   return {{disp:parts[0]||0, tiro:parts[1]||0}};
+}}
+
+function getManualFailKeyByLabels(tiro,disp) {{
+  return String(disp)+'_'+String(tiro);
+}}
+
+function getFalhaSignature(f) {{
+  const id=f.parcelaId||('T'+f.tiro+' D'+f.disp);
+  return [id,f.linha||'',f.tipo||'',Math.round((f.p1&&f.p1.x)||0),Math.round((f.p1&&f.p1.y)||0),Math.round((f.p2&&f.p2.x)||0),Math.round((f.p2&&f.p2.y)||0)].join('|');
+}}
+
+function findNearestFalha(pt) {{
+  if(!falhas.length) return -1;
+  let best=-1, bestD=Infinity;
+  for(let i=0;i<falhas.length;i++) {{
+    const f=falhas[i];
+    const a=f.p1, b=f.p2;
+    const dx=b.x-a.x, dy=b.y-a.y;
+    const len2=dx*dx+dy*dy || 1;
+    const t=Math.max(0,Math.min(1,((pt.x-a.x)*dx+(pt.y-a.y)*dy)/len2));
+    const px=a.x+dx*t, py=a.y+dy*t;
+    const d=Math.sqrt((pt.x-px)*(pt.x-px)+(pt.y-py)*(pt.y-py));
+    if(d<bestD) {{ bestD=d; best=i; }}
+  }}
+  return bestD <= Math.max(10/sc,10) ? best : -1;
 }}
 
 function getBaseParcelPoly(r2,c,R,C,p0,p1,p2,p3) {{
@@ -12071,13 +13003,27 @@ function processarQualidadePorLinhas(modo) {{
       const axes=getParcelaAxes(tl,tr,br,bl);
       const pts=centrosAnalise.filter(p=>pointInPolygon(p.x,p.y,areaUtil));
 
-      if(pts.length<1) {{
+      if(pts.length<1 && !manualFailedParcels[getManualFailKeyByLabels(tiroLabel,dispLabel)]) {{
+        continue;
+      }}
+
+      if(manualFailedParcels[getManualFailKeyByLabels(tiroLabel,dispLabel)]) {{
+        const linhasManuais=getLinhasPlantioPorParcela();
+        for(let li=1; li<=linhasManuais; li++) {{
+          const sLinha=(li-0.5)/linhasManuais;
+          const rowGeom=getRowGeometry(tl,tr,br,bl,axes.horiz,sLinha);
+          rowGeom.pxPorMetro=pxPorMetro;
+          if(calcularFalhas) falhas.push({{
+            p1:rowGeom.p1,p2:rowGeom.p2,dist:rowGeom.dist,distM:getParcelRealMeters(),
+            tiro:tiroLabel,disp:dispLabel,linha:li,tipo:'100% falhada',parcelaId:parcelaId,obs:'100% FALHADA',manual:true
+          }});
+        }}
         continue;
       }}
 
       const rowInfos=pts.map(p=>getPlantRowInfo(p,axes,tl,tr,br,bl));
       const rowTol=Math.max(3,Math.min(10,axes.secondaryLen*0.045));
-      const linhas=limitarLinhasPlantio(clusterPlantRows(rowInfos,rowTol),LINHAS_PLANTIO_POR_PARCELA);
+      const linhas=limitarLinhasPlantio(clusterPlantRows(rowInfos,rowTol),getLinhasPlantioPorParcela());
       const means=linhas.map(l=>l.meanPx).sort((a,b)=>a-b);
       let spacing=axes.secondaryLen/Math.max(1,linhas.length+1);
       for(let mi=1;mi<means.length;mi++) spacing=Math.min(spacing,Math.max(2,means[mi]-means[mi-1]));
@@ -12096,6 +13042,9 @@ function processarQualidadePorLinhas(modo) {{
         if(calcularFalhas) addFalhasSomenteEntrePlantasDaLinha(rowGeom,linhas[li].items,minDistM,tiroLabel,dispLabel,li+1,parcelaId,sampler,plantRanges);
       }}
     }}
+  }}
+  if(deletedFalhaKeys && deletedFalhaKeys.size>0) {{
+    falhas=falhas.filter(f=>!deletedFalhaKeys.has(getFalhaSignature(f)));
   }}
   return true;
 }}
@@ -12291,6 +13240,28 @@ function drawAll() {{
     ctx.restore();
     clearParcelAdjustmentResidues(R,C,p0,p1,p2,p3);
     drawParcelAdjustmentOverlay(R,C,p0,p1,p2,p3);
+    for(let r2=0;r2<R;r2++) for(let c=0;c<C;c++) {{
+      const key=getParcelKeyByRC(r2,c,R,C);
+      if(!manualFailedParcels[key]) continue;
+      const poly=getAdjustedParcelPoly(r2,c,R,C,p0,p1,p2,p3);
+      const center=getParcelCenter(poly);
+      ctx.save();
+      drawPolyPath(poly);
+      ctx.fillStyle='rgba(255,0,0,0.32)';
+      ctx.strokeStyle='#ff2222';
+      ctx.lineWidth=4/sc;
+      ctx.shadowColor='rgba(255,0,0,0.7)';
+      ctx.shadowBlur=10/sc;
+      ctx.fill(); ctx.stroke(); ctx.shadowBlur=0;
+      ctx.fillStyle='rgba(0,0,0,0.78)';
+      ctx.font='bold '+(Math.max(8,12/sc))+'px Arial';
+      const label='100% FALHADA';
+      const tw=ctx.measureText(label).width;
+      ctx.fillRect(center.x-tw/2-4/sc,center.y-8/sc,tw+8/sc,16/sc);
+      ctx.fillStyle='#ff7777'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(label,center.x,center.y);
+      ctx.restore();
+    }}
 
     // Área útil do buffer interno usada na medição das falhas.
     if(areasUteis.length>0) {{
@@ -12477,6 +13448,17 @@ vc.addEventListener('wheel',e=>{{
 
 vc.addEventListener('mousedown',e=>{{
   const pt=getImgCoords(e.clientX,e.clientY);
+  if(deleteFalhaMode && points.length===4) {{
+    const idx=findNearestFalha(pt);
+    if(idx>=0) {{
+      deletedFalhaKeys.add(getFalhaSignature(falhas[idx]));
+      falhas.splice(idx,1);
+      totalCountEl.textContent=falhas.length;
+      countInfoEl.textContent='Medição apagada manualmente e descontabilizada dos totais.';
+      drawAll();
+      return;
+    }}
+  }}
   if((parcelSelectMode || parcelMoveMode) && points.length===4) {{
     const hit=findParcelAtPoint(pt);
     if(hit) {{
@@ -12547,11 +13529,30 @@ vc.addEventListener('mouseleave',()=>{{
   drag=false; draggingPoint=-1; draggingParcelSelection=false; lastParcelDragPt=null;
 }});
 
+vc.addEventListener('dblclick',e=>{{
+  if(points.length<4) return;
+  const pt=getImgCoords(e.clientX,e.clientY);
+  const hit=findParcelAtPoint(pt);
+  if(!hit) return;
+  const currentCount=parcelCounts[hit.key] || 0;
+  if(currentCount>0 && !confirm('Esta parcela tem contagem. Marcar mesmo assim como 100% FALHADA?')) return;
+  manualFailedParcels[hit.key]=!manualFailedParcels[hit.key];
+  if(manualFailedParcels[hit.key]) {{
+    countPanel.style.display='block';
+    countPanel.querySelector('h3').textContent='AJUSTE MANUAL';
+    totalCountEl.textContent='100%';
+    countInfoEl.textContent=getParcelLabel(hit.key)+' marcada como 100% FALHADA.';
+    falhasSumario.textContent='OBS: 100% FALHADA';
+  }}
+  if(falhas.length>0 || qualidadeModoVisual==='falhas') detectarFalhas();
+  else drawAll();
+}});
+
 // ── Botões ────────────────────────────────────────────────────────────────
 btnGridTool.onclick=()=>{{
-  gridMode=!gridMode; manualMode=false; parcelSelectMode=false; parcelMoveMode=false; selectedParcels.clear();
+  gridMode=!gridMode; manualMode=false; deleteFalhaMode=false; parcelSelectMode=false; parcelMoveMode=false; selectedParcels.clear();
   btnGridTool.style.borderColor=gridMode?'#ff8c00':'#3a3a3a';
-  if(gridMode) {{ points=[]; plantCenters=[]; manualMarks=[]; parcelCounts={{}}; falhas=[]; areasUteis=[]; metrosPlantadosLinhas=[]; metrosPlantadosSegmentos=[]; qualidadeModoVisual=''; parcelAdjustments={{}}; if(parcelAdjustStorageKey) localStorage.removeItem(parcelAdjustStorageKey); countPanel.style.display='none'; updateParcelAdjustStatus(); drawAll(); }}
+  if(gridMode) {{ points=[]; plantCenters=[]; manualMarks=[]; parcelCounts={{}}; falhas=[]; areasUteis=[]; metrosPlantadosLinhas=[]; metrosPlantadosSegmentos=[]; qualidadeModoVisual=''; parcelAdjustments={{}}; manualFailedParcels={{}}; deletedFalhaKeys=new Set(); if(parcelAdjustStorageKey) localStorage.removeItem(parcelAdjustStorageKey); countPanel.style.display='none'; updateParcelAdjustStatus(); drawAll(); }}
 }};
 if(btnCountPlants) btnCountPlants.onclick=()=>countPlantsInGrid();
 if(btnCountAuto) btnCountAuto.onclick  =()=>countPlantsInGrid();
@@ -12609,7 +13610,7 @@ btnRemoveLast.onclick=btnUndoMark.onclick=()=>{{
   }}
 }};
 btnClearAll.onclick=()=>{{
-  points=[]; plantCenters=[]; manualMarks=[]; parcelCounts={{}}; falhas=[]; areasUteis=[]; metrosPlantadosLinhas=[]; metrosPlantadosSegmentos=[]; qualidadeModoVisual=''; parcelAdjustments={{}}; selectedParcels.clear();
+  points=[]; plantCenters=[]; manualMarks=[]; parcelCounts={{}}; falhas=[]; areasUteis=[]; metrosPlantadosLinhas=[]; metrosPlantadosSegmentos=[]; qualidadeModoVisual=''; parcelAdjustments={{}}; manualFailedParcels={{}}; deletedFalhaKeys=new Set(); selectedParcels.clear();
   if(parcelAdjustStorageKey) localStorage.removeItem(parcelAdjustStorageKey);
   countPanel.style.display='none'; gridMode=false; manualMode=false; parcelSelectMode=false; parcelMoveMode=false;
   btnGridTool.style.borderColor='#3a3a3a'; btnManualMode.style.borderColor='#3a3a3a';
@@ -12618,6 +13619,12 @@ btnClearAll.onclick=()=>{{
 }};
 btnDetectFalhas.onclick=()=>detectarFalhas();
 btnMedirPlantados.onclick=()=>medirMetrosPlantados();
+btnDeleteFalhaMode.onclick=()=>{{
+  deleteFalhaMode=!deleteFalhaMode;
+  manualMode=false; gridMode=false; parcelSelectMode=false; parcelMoveMode=false;
+  btnDeleteFalhaMode.style.borderColor=deleteFalhaMode?'#ff5555':'#660000';
+  countInfoEl.textContent=deleteFalhaMode?'Clique em uma linha de falha para apagar e descontabilizar.':'Modo apagar falha desativado.';
+}};
 chkShowFalhas.onchange=()=>drawAll();
 chkLabels.onchange=()=>drawAll();
 inpMinDist.onchange=()=>{{ if(falhas.length>0) detectarFalhas(); }};
@@ -12625,6 +13632,8 @@ inpBufferCm.onchange=()=>{{ if(falhas.length>0) detectarFalhas(); }};
 inpParcelLen.onchange=()=>{{ if(falhas.length>0) detectarFalhas(); }};
 selUnit.onchange=()=>{{ if(falhas.length>0) detectarFalhas(); else drawAll(); }};
 inpLineWidth.onchange=()=>drawAll();
+inpLinhasParcela.onchange=()=>{{ drawAll(); }};
+inpQuadraName.onchange=()=>drawAll();
 
 function parseFalhaParcelaSort(id) {{
   const m=String(id||'').match(/T(\\d+)\\s*D(\\d+)/i);
@@ -12632,7 +13641,7 @@ function parseFalhaParcelaSort(id) {{
 }}
 
 function getLinhaPlantioExport(linha) {{
-  return Math.max(1,Math.min(LINHAS_PLANTIO_POR_PARCELA,parseInt(linha)||1));
+  return Math.max(1,Math.min(getLinhasPlantioPorParcela(),parseInt(linha)||1));
 }}
 
 function getResumoPlantadoFalhaRows() {{
@@ -12653,7 +13662,7 @@ function getResumoPlantadoFalhaRows() {{
   }}
   const parcelas=[...new Set(Object.values(mapa).map(row=>row.parcela))];
   for(const parcela of parcelas) {{
-    for(let linha=1; linha<=LINHAS_PLANTIO_POR_PARCELA; linha++) {{
+    for(let linha=1; linha<=getLinhasPlantioPorParcela(); linha++) {{
       const key=parcela+'|'+linha;
       if(!mapa[key]) mapa[key]={{parcela:parcela,linha:linha,plantadoM:0,falhaM:0}};
     }}
@@ -12676,7 +13685,13 @@ function downloadQualidadeCSV(nomeArquivo,csvContent) {{
 }}
 
 function exportFalhasPorLinhaCSV() {{
+  exportQualidadeExcelCompleto();
+}}
+
+function exportQualidadeExcelCompleto() {{
   if(points.length<4) {{ alert('Marque o grid primeiro.'); return; }}
+  if(typeof XLSX==='undefined') {{ alert('Biblioteca XLSX não carregada.'); return; }}
+
   const estadoAnterior={{
     falhas:[...falhas],
     areasUteis:[...areasUteis],
@@ -12684,33 +13699,109 @@ function exportFalhasPorLinhaCSV() {{
     metrosPlantadosSegmentos:[...metrosPlantadosSegmentos],
     qualidadeModoVisual:qualidadeModoVisual
   }};
-  if(!processarQualidadePorLinhas('csv')) return;
-  const rows=getResumoPlantadoFalhaRows();
-  if(rows.length===0) {{
-    falhas=estadoAnterior.falhas; areasUteis=estadoAnterior.areasUteis;
+
+  function restaurarEstadoQualidade() {{
+    falhas=estadoAnterior.falhas;
+    areasUteis=estadoAnterior.areasUteis;
     metrosPlantadosLinhas=estadoAnterior.metrosPlantadosLinhas;
     metrosPlantadosSegmentos=estadoAnterior.metrosPlantadosSegmentos;
     qualidadeModoVisual=estadoAnterior.qualidadeModoVisual;
-    alert('Nenhuma linha de plantio detectada para exportar.'); return;
   }}
+
+  if(!processarQualidadePorLinhas('csv')) {{ restaurarEstadoQualidade(); return; }}
+  const rows=getResumoPlantadoFalhaRows();
+  if(rows.length===0) {{
+    restaurarEstadoQualidade();
+    alert('Nenhuma linha de plantio detectada para exportar.');
+    return;
+  }}
+
   const totalFalhaParcela={{}};
   const totalPlantadoParcela={{}};
+  const obsPorParcela={{}};
   for(const row of rows) {{
-    totalFalhaParcela[row.parcela]=(totalFalhaParcela[row.parcela]||0)+(row.falhaM||0);
-    totalPlantadoParcela[row.parcela]=(totalPlantadoParcela[row.parcela]||0)+(row.plantadoM||0);
+    const parcela=row.parcela||'';
+    totalFalhaParcela[parcela]=(totalFalhaParcela[parcela]||0)+(Number(row.falhaM)||0);
+    totalPlantadoParcela[parcela]=(totalPlantadoParcela[parcela]||0)+(Number(row.plantadoM)||0);
   }}
-  let csvFalhas='\\uFEFF'+'Parcela,Linha,Metros_Falha_Linha,Total_Falha_Parcela\\n';
-  let csvPlantados='\\uFEFF'+'Parcela,Linha,Metros_Plantados_Linha,Total_Plantado_Parcela\\n';
+  for(const f of falhas) {{
+    const parcela=f.parcelaId||('T'+f.tiro+' D'+f.disp);
+    if(f.obs) obsPorParcela[parcela]=f.obs;
+  }}
+
+  const round2=(v)=>Math.round((Number(v)||0)*100)/100;
+  const headers=['Quadras','Parcela','Linha','Metros_Falha_Linha','Total_Falha_Parcela','Metros_Plantados_Linha','Total_Plantado_Parcela','OBS'];
+  const dados=[headers];
+
   for(const row of rows) {{
-    csvFalhas+=row.parcela+',Linha '+row.linha+','+(row.falhaM||0).toFixed(2)+','+(totalFalhaParcela[row.parcela]||0).toFixed(2)+'\\n';
-    csvPlantados+=row.parcela+',Linha '+row.linha+','+(row.plantadoM||0).toFixed(2)+','+(totalPlantadoParcela[row.parcela]||0).toFixed(2)+'\\n';
+    const parcela=row.parcela||'';
+    dados.push([
+      getQuadraNome(),
+      parcela,
+      'Linha '+row.linha,
+      round2(row.falhaM),
+      round2(totalFalhaParcela[parcela]),
+      round2(row.plantadoM),
+      round2(totalPlantadoParcela[parcela]),
+      obsPorParcela[parcela]||''
+    ]);
   }}
-  falhas=estadoAnterior.falhas; areasUteis=estadoAnterior.areasUteis;
-  metrosPlantadosLinhas=estadoAnterior.metrosPlantadosLinhas;
-  metrosPlantadosSegmentos=estadoAnterior.metrosPlantadosSegmentos;
-  qualidadeModoVisual=estadoAnterior.qualidadeModoVisual;
-  downloadQualidadeCSV('falhas_por_linha.csv',csvFalhas);
-  setTimeout(()=>downloadQualidadeCSV('metros_plantados_por_linha.csv',csvPlantados),250);
+
+  const ws=XLSX.utils.aoa_to_sheet(dados);
+  ws['!cols']=headers.map((header,idx)=>{{
+    let maxLen=String(header).length;
+    for(let r=1;r<dados.length;r++) maxLen=Math.max(maxLen,String(dados[r][idx]===undefined?'':dados[r][idx]).length);
+    return {{wch:Math.min(Math.max(maxLen+3,12),34)}};
+  }});
+  ws['!freeze']={{xSplit:0,ySplit:1}};
+
+  const border={{
+    top:{{style:'thin',color:{{rgb:'808080'}}}},
+    bottom:{{style:'thin',color:{{rgb:'808080'}}}},
+    left:{{style:'thin',color:{{rgb:'808080'}}}},
+    right:{{style:'thin',color:{{rgb:'808080'}}}}
+  }};
+  const alignCenter={{horizontal:'center',vertical:'center',wrapText:true}};
+  const fillAzul={{fgColor:{{rgb:'D9EAF7'}}}};
+  const fillVermelho={{fgColor:{{rgb:'F4CCCC'}}}};
+  const fillVerde={{fgColor:{{rgb:'D9EAD3'}}}};
+
+  function fillByCol(c) {{
+    if(c===3 || c===4) return fillVermelho;
+    if(c===5 || c===6) return fillVerde;
+    return fillAzul;
+  }}
+
+  const range=XLSX.utils.decode_range(ws['!ref']);
+  for(let R=range.s.r; R<=range.e.r; ++R) {{
+    for(let C=range.s.c; C<=range.e.c; ++C) {{
+      const addr=XLSX.utils.encode_cell({{r:R,c:C}});
+      if(!ws[addr]) continue;
+      ws[addr].s={{
+        font:R===0 ? {{bold:true,name:'Arial',sz:11,color:{{rgb:'000000'}}}} : {{name:'Arial',sz:10,color:{{rgb:'000000'}}}},
+        fill:{{patternType:'solid',...fillByCol(C)}},
+        alignment:alignCenter,
+        border:border
+      }};
+      if(R>0 && (C===3 || C===4 || C===5 || C===6)) {{
+        ws[addr].t='n';
+        ws[addr].v=round2(ws[addr].v);
+        ws[addr].z='0.00';
+      }}
+    }}
+  }}
+
+  const wb=XLSX.utils.book_new();
+  wb.Props={{
+    Title:'Qualidade de Parcelas',
+    Subject:'Falhas e Metros Plantados por Linha',
+    Author:'TMG Sistema de Análise',
+    CreatedDate:new Date()
+  }};
+  XLSX.utils.book_append_sheet(wb,ws,'Qualidade Parcelas');
+  const safeQuadra=getQuadraNome().replace(/[^a-zA-Z0-9_-]+/g,'_');
+  XLSX.writeFile(wb,'qualidade_parcelas_'+safeQuadra+'.xlsx',{{bookType:'xlsx',cellStyles:true}});
+  restaurarEstadoQualidade();
 }}
 
 btnExportCnt.onclick=()=>exportFalhasPorLinhaCSV();
@@ -12837,7 +13928,7 @@ document.getElementById('btnExportFalhasGeoJSON').onclick=()=>{{
 }};
 
 // ── Exportação Falhas Excel ───────────────────────────────────────────────
-document.getElementById('btnExportFalhasXLSX').onclick=()=>{{
+document.getElementById('btnExportFalhasXLSX').onclick=()=>{{ exportQualidadeExcelCompleto(); return;
   if(typeof XLSX==='undefined') {{ alert('Biblioteca XLSX não carregada.'); return; }}
   const rows=[['ID Parcela','Linha','Tipo Falha','Distância','Unidade','X Início','Y Início','X Fim','Y Fim']];
   for(const f of falhas) rows.push([f.parcelaId||('T'+f.tiro+' D'+f.disp),f.linha,f.tipo||'entre plantas',formatFalhaNumber(f),selUnit.value,Math.round(f.p1.x),Math.round(f.p1.y),Math.round(f.p2.x),Math.round(f.p2.y)]);

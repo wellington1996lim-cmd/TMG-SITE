@@ -229,3 +229,6 @@ tmg_data/transferencia_voos/ortofotos/
 tmg_data/transferencia_voos/grids/
 tmg_data/transferencia_voos/importacoes/
 tmg_data/transferencia_voos/retornos/
+
+# TMG chat runtime messages
+tmg_data/chat_mensagens.json
