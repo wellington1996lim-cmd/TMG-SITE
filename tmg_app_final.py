@@ -6357,6 +6357,7 @@ with main_container:
 <html>
 <head>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <style>
   * {{ box-sizing:border-box; margin:0; padding:0; }}
   body {{ background:#0d0d0d; overflow:auto; font-family:'Segoe UI',sans-serif; }}
@@ -7269,7 +7270,7 @@ btnExport.onclick = () => {{
     4: {{fill:'FCE4D6', font:'000000'}},
     5: {{fill:'E7E6E6', font:'000000'}},
     6: {{fill:'E4DFEC', font:'000000'}},
-    7: {{fill:'DDEBF7', font:'000000'}},
+    7: {{fill:'CCFFFF', font:'000000'}},
     8: {{fill:'EADCC8', font:'000000'}},
     9: {{fill:'C00000', font:'FFFFFF'}}
   }};
