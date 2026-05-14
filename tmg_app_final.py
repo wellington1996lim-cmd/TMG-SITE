@@ -320,6 +320,10 @@ def _preview_jpeg_quality() -> int:
     # Qualidade alta para preservar detalhes de TIF/GeoTIFF/RGB no visualizador.
     return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 97, 70, 98)
 
+def _preview_max_payload_mb() -> int:
+    # Evita que o HTML do visualizador fique pesado demais para carregar no navegador.
+    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 48, 8, 120)
+
 def _upload_limit_mb() -> int:
     # Valor informativo mostrado na interface; o limite real do Streamlit Cloud é definido em .streamlit/config.toml.
     return _int_setting("TMG_UPLOAD_LIMIT_MB", 2048, 200, 4096)
@@ -1697,9 +1701,43 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
     spatial_meta["preview_width"] = img.width
     spatial_meta["preview_height"] = img.height
 
+    max_payload_bytes = _preview_max_payload_mb() * 1024 * 1024
+    min_preview_dim = min(4096, _preview_max_dim())
+    quality = _preview_jpeg_quality()
+    preview_img = img
     buf = BytesIO()
-    # JPEG progressivo em alta qualidade reduz tamanho no navegador mantendo detalhe visual.
-    img.save(buf, format='JPEG', quality=_preview_jpeg_quality(), subsampling=0, optimize=True, progressive=True)
+
+    for _ in range(10):
+        buf = BytesIO()
+        # JPEG progressivo em alta qualidade reduz tamanho no navegador mantendo detalhe visual.
+        preview_img.save(buf, format='JPEG', quality=quality, subsampling=0, optimize=True, progressive=True)
+        payload_size = buf.tell()
+        if payload_size <= max_payload_bytes:
+            break
+        if quality > 88:
+            quality -= 4
+            continue
+        if max(preview_img.size) > min_preview_dim:
+            scale = max(min_preview_dim / max(preview_img.size), 0.82)
+            new_size = (
+                max(1, int(preview_img.width * scale)),
+                max(1, int(preview_img.height * scale)),
+            )
+            resample_filter = getattr(Image, 'Resampling', Image).LANCZOS
+            preview_img = preview_img.resize(new_size, resample_filter)
+            quality = min(quality, 90)
+            continue
+        if quality > 78:
+            quality -= 4
+            continue
+        break
+
+    img = preview_img
+    spatial_meta["preview_width"] = img.width
+    spatial_meta["preview_height"] = img.height
+    spatial_meta["preview_quality"] = quality
+    if spatial_meta["orig_width"]:
+        spatial_meta["ratio"] = img.width / spatial_meta["orig_width"]
     b64 = base64.b64encode(buf.getvalue()).decode()
 
     return b64, img.size, None, spatial_meta
@@ -6356,8 +6394,6 @@ with main_container:
 <!DOCTYPE html>
 <html>
 <head>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <style>
   * {{ box-sizing:border-box; margin:0; padding:0; }}
   body {{ background:#0d0d0d; overflow:auto; font-family:'Segoe UI',sans-serif; }}
@@ -7215,7 +7251,52 @@ document.getElementById('btnExportCellData').onclick = () => {{
   a.click();
 }};
 
-btnExport.onclick = () => {{
+function loadScriptOnce(src) {{
+  return new Promise((resolve, reject) => {{
+    const existing = document.querySelector('script[data-tmg-src="' + src + '"]');
+    if(existing) {{
+      if(existing.dataset.loaded === 'true') {{
+        resolve(true);
+        return;
+      }}
+      existing.addEventListener('load', () => resolve(true), {{once:true}});
+      existing.addEventListener('error', () => reject(new Error('Falha ao carregar ' + src)), {{once:true}});
+      return;
+    }}
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.dataset.tmgSrc = src;
+    script.onload = () => {{
+      script.dataset.loaded = 'true';
+      resolve(true);
+    }};
+    script.onerror = () => reject(new Error('Falha ao carregar ' + src));
+    document.head.appendChild(script);
+  }});
+}}
+
+async function ensureChecklistExcelStyles() {{
+  if(window.__tmgChecklistXlsxStyleReady && typeof XLSX !== 'undefined') return true;
+  const urls = [
+    'https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js',
+    'https://unpkg.com/xlsx-js-style@1.2.0/dist/xlsx.bundle.js'
+  ];
+  for(const url of urls) {{
+    try {{
+      await loadScriptOnce(url);
+      if(typeof XLSX !== 'undefined') {{
+        window.__tmgChecklistXlsxStyleReady = true;
+        return true;
+      }}
+    }} catch(e) {{
+      console.warn(e);
+    }}
+  }}
+  return false;
+}}
+
+btnExport.onclick = async () => {{
   const nome = prompt('Digite o nome do arquivo Excel:', 'checklist_notas_parcelas');
   if(nome === null) return;
   const safeName = (nome.trim() || 'checklist_notas_parcelas')
@@ -7226,8 +7307,12 @@ btnExport.onclick = () => {{
     alert('Nenhum grid salvo/marcado disponível para exportar.');
     return;
   }}
-  if(typeof XLSX === 'undefined') {{
+  if(typeof XLSX === 'undefined' && !(await ensureChecklistExcelStyles())) {{
     alert('Biblioteca Excel não carregada. Tente novamente em alguns segundos.');
+    return;
+  }}
+  if(!(await ensureChecklistExcelStyles())) {{
+    alert('Biblioteca de estilos do Excel não carregada. Verifique a conexão e tente exportar novamente.');
     return;
   }}
   const headers = ['Quadra','Disparo','Tiro','Nota','Observação'];
