@@ -4,7 +4,11 @@ numpy
 pandas
 openpyxl
 xlrd
-opencv-python-headless
+opencv-python
+ultralytics
+torch
+torchvision
+git+https://github.com/ultralytics/CLIP.git
 rasterio
 geopandas
 shapely

@@ -219,6 +219,11 @@ __marimo__/
 .streamlit/secrets.toml
 .chrome-streamlit-profile/
 
+# Pesos de modelos YOLO/IA devem ser configurados fora do Git ou baixados em runtime.
+*.pt
+*.onnx
+*.engine
+
 # TMG runtime uploads generated inside the deployed app
 tmg_data/mosaicos_importados/
 tmg_data/usuarios_sistema.json

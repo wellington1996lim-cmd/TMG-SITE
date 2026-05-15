@@ -1821,7 +1821,32 @@ PENDAO_AVANCADO_PARAMS = {
     "lab_b_min": 124,
     "lab_ba_diff_min": -6,
     "difficult_texture_ratio_min": 0.035,
+    "yolo_enabled": True,
+    "yolo_world_enabled": True,
+    "yolo_world_model": "yolov8s-world.pt",
+    "yolo_imgsz": 1280,
+    "yolo_conf": 0.04,
+    "yolo_iou": 0.45,
+    "yolo_max_det": 20000,
+    "yolo_max_dim": 1800,
+    "yolo_min_visual_score": 1.2,
+    "yolo_min_yellow_ratio": 0.015,
+    "yolo_min_texture_ratio": 0.015,
+    "yolo_max_green_ratio": 0.78,
+    "yolo_merge_distance": 18,
 }
+
+PENDAO_YOLO_CLASSES = (
+    "corn tassel",
+    "maize tassel",
+    "tassel",
+    "corn flower",
+    "maize flower",
+    "pendao de milho",
+    "pendão de milho",
+    "pendao",
+    "pendão",
+)
 
 
 def _pendao_params(params=None) -> dict:
@@ -2258,6 +2283,241 @@ def processar_grid_pendao_avancado(rgb_img, grade, params=None):
     return detectar_pendoes_opencv_puro(rgb_img, grade=grade, params=params)
 
 
+def _pendao_model_candidates():
+    env_candidates = [
+        os.getenv("PENDAO_YOLO_MODEL", "").strip(),
+        os.getenv("TMG_PENDAO_YOLO_MODEL", "").strip(),
+    ]
+    local_candidates = [
+        APP_ROOT / "models" / "pendoes.pt",
+        APP_ROOT / "models" / "pendao.pt",
+        APP_ROOT / "models" / "tassel.pt",
+        APP_ROOT / "models" / "best.pt",
+        APP_ROOT / "tmg_assets" / "models" / "pendoes.pt",
+        APP_ROOT / "tmg_assets" / "models" / "pendao.pt",
+        APP_ROOT / "tmg_assets" / "models" / "best.pt",
+    ]
+    for candidate in env_candidates:
+        if candidate and Path(candidate).exists():
+            return str(Path(candidate).resolve()), "custom"
+    for candidate in local_candidates:
+        if candidate.exists():
+            return str(candidate.resolve()), "custom"
+    return None, None
+
+
+@st.cache_resource(show_spinner=False)
+def _carregar_modelo_yolo_pendao(model_key: str, world_classes: tuple):
+    try:
+        if model_key == "__YOLO_WORLD__":
+            from ultralytics import YOLOWorld
+            model = YOLOWorld(PENDAO_AVANCADO_PARAMS.get("yolo_world_model", "yolov8s-world.pt"))
+            model.set_classes(list(world_classes))
+            return model, "YOLO-World"
+        from ultralytics import YOLO
+        model = YOLO(model_key)
+        return model, f"YOLO:{Path(model_key).name}"
+    except ImportError as exc:
+        raise RuntimeError("Ultralytics não instalado. Instale com: pip install -U ultralytics") from exc
+
+
+def _resolver_modelo_yolo_pendao(params=None):
+    params = _pendao_params(params)
+    if not bool(params.get("yolo_enabled", True)):
+        return None, "YOLO desativado nos parâmetros."
+    try:
+        import ultralytics  # noqa: F401
+    except ImportError:
+        return None, "Ultralytics não instalado. Instale com: pip install -U ultralytics"
+    model_path, model_kind = _pendao_model_candidates()
+    if model_path:
+        return model_path, f"Modelo YOLO customizado: {Path(model_path).name}"
+    if bool(params.get("yolo_world_enabled", True)):
+        return "__YOLO_WORLD__", "YOLO-World sem modelo customizado local."
+    return None, "YOLO instalado, mas nenhum modelo .pt de pendão foi encontrado. Usando OpenCV."
+
+
+def _roi_features_pendao(rgb_img, bbox, params=None):
+    params = _pendao_params(params)
+    rgb = _as_rgb_uint8(rgb_img)
+    if rgb is None:
+        return None
+    h_img, w_img = rgb.shape[:2]
+    x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
+    x1 = max(0, min(w_img - 1, x1))
+    y1 = max(0, min(h_img - 1, y1))
+    x2 = max(x1 + 1, min(w_img, x2))
+    y2 = max(y1 + 1, min(h_img, y2))
+    roi = rgb[y1:y2, x1:x2]
+    if roi.size == 0:
+        return None
+    proc, hsv, lab, gray, lab_l = _preprocessar_pendao_opencv(roi, params)
+    if proc is None:
+        return None
+    sem_verde, green_mask = remover_verde_agressivo(proc, params)
+    cor_mask, _ = criar_mascara_pendoes_multicor(proc, lab_l, params)
+    textura_mask = calcular_mascara_textura(gray, params)
+    brilho_mask = cv2.threshold(lab_l, int(params.get("lab_l_threshold", 128)), 255, cv2.THRESH_BINARY)[1]
+    valid_mask = cv2.bitwise_and(cv2.bitwise_and(cor_mask, sem_verde), cv2.bitwise_or(textura_mask, brilho_mask))
+    active = valid_mask > 0
+    green_ratio = float(np.mean(green_mask > 0))
+    yellow_ratio = float(np.mean(cor_mask > 0))
+    texture_ratio = float(np.mean(textura_mask > 0))
+    clear_ratio = float(np.mean(brilho_mask > 0))
+    if np.any(active):
+        moments = cv2.moments(valid_mask, binaryImage=True)
+        if moments.get("m00", 0):
+            cx = x1 + moments["m10"] / moments["m00"]
+            cy = y1 + moments["m01"] / moments["m00"]
+        else:
+            ys, xs = np.where(active)
+            cx = x1 + float(np.mean(xs))
+            cy = y1 + float(np.mean(ys))
+    else:
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+    score = (
+        yellow_ratio * 2.4
+        + texture_ratio * 1.8
+        + clear_ratio * 1.2
+        + (1.0 - green_ratio) * 1.4
+    )
+    return {
+        "center": (float(cx), float(cy)),
+        "bbox": (float(x1), float(y1), float(x2 - x1), float(y2 - y1)),
+        "size": float(np.clip(max(x2 - x1, y2 - y1) * 0.34, params.get("x_min_size", 6), params.get("x_max_size", 20))),
+        "score": float(score),
+        "tipo": classificar_tipo_pendao(hsv[int(np.clip(cy - y1, 0, hsv.shape[0] - 1)), int(np.clip(cx - x1, 0, hsv.shape[1] - 1))], lab[int(np.clip(cy - y1, 0, lab.shape[0] - 1)), int(np.clip(cx - x1, 0, lab.shape[1] - 1))], params),
+        "yellow_ratio": yellow_ratio,
+        "texture_ratio": texture_ratio,
+        "clear_ratio": clear_ratio,
+        "green_ratio": green_ratio,
+    }
+
+
+def _detections_from_result(result):
+    if not result or not result.get("parcelas"):
+        return []
+    return [dict(det) for det in result["parcelas"][0].get("detections", [])]
+
+
+def _inferir_pendoes_yolo(rgb_img, params=None):
+    params = _pendao_params(params)
+    rgb = _as_rgb_uint8(rgb_img)
+    if rgb is None:
+        return [], "Imagem inválida para YOLO."
+    model_key, model_status = _resolver_modelo_yolo_pendao(params)
+    if not model_key:
+        return [], model_status
+    try:
+        model, model_name = _carregar_modelo_yolo_pendao(model_key, tuple(PENDAO_YOLO_CLASSES))
+        orig_h, orig_w = rgb.shape[:2]
+        max_dim = int(params.get("yolo_max_dim", 1800))
+        scale_back = 1.0
+        if max(orig_h, orig_w) > max_dim:
+            scale = max_dim / max(orig_h, orig_w)
+            rgb_work = cv2.resize(rgb, (max(1, int(orig_w * scale)), max(1, int(orig_h * scale))), interpolation=cv2.INTER_AREA)
+            scale_back = 1.0 / scale
+        else:
+            rgb_work = rgb
+        results = model.predict(
+            source=rgb_work,
+            imgsz=int(params.get("yolo_imgsz", 1280)),
+            conf=float(params.get("yolo_conf", 0.04)),
+            iou=float(params.get("yolo_iou", 0.45)),
+            max_det=int(params.get("yolo_max_det", 20000)),
+            verbose=False,
+        )
+        detections = []
+        result0 = results[0] if results else None
+        if result0 is None or getattr(result0, "boxes", None) is None:
+            return [], f"{model_name}: nenhum resultado."
+        boxes = result0.boxes
+        names = getattr(result0, "names", {}) or {}
+        xyxy = boxes.xyxy.detach().cpu().numpy() if getattr(boxes, "xyxy", None) is not None else np.empty((0, 4))
+        confs = boxes.conf.detach().cpu().numpy() if getattr(boxes, "conf", None) is not None else np.zeros((len(xyxy),), dtype=float)
+        classes = boxes.cls.detach().cpu().numpy().astype(int) if getattr(boxes, "cls", None) is not None else np.zeros((len(xyxy),), dtype=int)
+        allowed_tokens = ("tassel", "pendao", "pendão", "maize", "corn", "flower")
+        for box, conf, cls_id in zip(xyxy, confs, classes):
+            class_name = str(names.get(int(cls_id), cls_id)).lower()
+            if model_key != "__YOLO_WORLD__" and isinstance(names, dict) and names:
+                if not any(tok in class_name for tok in allowed_tokens) and len(names) > 1:
+                    continue
+            x1, y1, x2, y2 = [float(v) for v in box]
+            roi = _roi_features_pendao(rgb_work, (x1, y1, x2, y2), params)
+            if not roi:
+                continue
+            visual_ok = (
+                roi["score"] >= float(params.get("yolo_min_visual_score", 1.2))
+                and roi["yellow_ratio"] >= float(params.get("yolo_min_yellow_ratio", 0.015))
+                and roi["texture_ratio"] >= float(params.get("yolo_min_texture_ratio", 0.015))
+                and roi["green_ratio"] <= float(params.get("yolo_max_green_ratio", 0.78))
+            )
+            if not visual_ok and float(conf) < 0.22:
+                continue
+            cx, cy = roi["center"]
+            x, y, w, h = roi["bbox"]
+            score = float(conf) * 4.0 + roi["score"]
+            detections.append({
+                "center": (float(cx * scale_back), float(cy * scale_back)),
+                "bbox": (float(x * scale_back), float(y * scale_back), float(w * scale_back), float(h * scale_back)),
+                "size": float(np.clip(roi["size"] * scale_back, params.get("x_min_size", 6), params.get("x_max_size", 20))),
+                "score": score,
+                "confianca": "alta" if score >= 3.2 else "media",
+                "tipo": roi.get("tipo", "yolo"),
+                "yellow_ratio": roi.get("yellow_ratio", 0),
+                "texture_ratio": roi.get("texture_ratio", 0),
+                "clear_ratio": roi.get("clear_ratio", 0),
+                "green_ratio": roi.get("green_ratio", 0),
+                "source": model_name,
+                "yolo_conf": float(conf),
+                "class_name": class_name,
+                "area": float(w * h * scale_back * scale_back),
+            })
+        return detections, f"{model_name}: {len(detections)} detecções validadas por OpenCV."
+    except Exception as exc:
+        return [], f"YOLO falhou ({exc}). Usando OpenCV avançado."
+
+
+def detectar_pendoes_hibrido_yolo_opencv(rgb_img, grade=None, params=None):
+    params = _pendao_params(params)
+    opencv_result = detectar_pendoes_opencv_puro(rgb_img, grade=None, params=params)
+    opencv_detections = _detections_from_result(opencv_result)
+    yolo_detections, yolo_status = _inferir_pendoes_yolo(rgb_img, params=params)
+    combined = []
+    for det in yolo_detections:
+        item = dict(det)
+        item["source"] = item.get("source", "YOLO")
+        combined.append(item)
+    for det in opencv_detections:
+        item = dict(det)
+        item["source"] = item.get("source", "OpenCV")
+        combined.append(item)
+    if combined:
+        merge_params = dict(params)
+        merge_params["nms_distance"] = float(params.get("yolo_merge_distance", params.get("nms_distance", 18)))
+        combined = agrupar_componentes_estrelados(combined, merge_params)
+        combined = remover_deteccoes_duplicadas(combined, merge_params)
+    rows = int((grade or {}).get("rows") or (grade or {}).get("linhas") or 1)
+    cols = int((grade or {}).get("cols") or (grade or {}).get("colunas") or 1)
+    rgb = _as_rgb_uint8(rgb_img)
+    img_h, img_w = rgb.shape[:2] if rgb is not None else (0, 0)
+    cells = _grid_cells_from_grade(grade, img_w, img_h)
+    parcelas = []
+    total = 0
+    for index, row, col, poly in cells:
+        dets = []
+        for det in combined:
+            cx, cy = det["center"]
+            if cv2.pointPolygonTest(poly.astype(np.float32), (float(cx), float(cy)), False) >= 0:
+                dets.append({k: v for k, v in det.items() if k != "area"})
+        total += len(dets)
+        parcelas.append({"index": int(index), "row": int(row), "col": int(col), "count": len(dets), "detections": dets})
+    mode = "YOLO+OpenCV" if yolo_detections else "OpenCV fallback"
+    status = f"{mode}: {total} centros. {yolo_status}"
+    return {"dims": (img_w, img_h), "rows": rows, "cols": cols, "grid": grade, "parcelas": parcelas, "total": int(total), "detector_status": status, "detector_mode": mode}
+
+
 def _decode_rgb_for_pendao(file_bytes: bytes, filename: str):
     try:
         arr = np.frombuffer(file_bytes, dtype=np.uint8)
@@ -2272,12 +2532,7 @@ def _decode_rgb_for_pendao(file_bytes: bytes, filename: str):
         return None
 
 
-@st.cache_data(show_spinner=False, max_entries=16)
-def preparar_deteccoes_pendoamento_avancado(file_bytes: bytes, filename: str, preview_dims: tuple):
-    rgb = _decode_rgb_for_pendao(file_bytes, filename)
-    if rgb is None:
-        return []
-    result = detectar_pendoes_opencv_puro(rgb, grade=None, params=PENDAO_AVANCADO_PARAMS)
+def _serializar_deteccoes_pendao_preview(result, rgb, preview_dims):
     dets = []
     if not result.get("parcelas"):
         return dets
@@ -2305,8 +2560,33 @@ def preparar_deteccoes_pendoamento_avancado(file_bytes: bytes, filename: str, pr
             "texture_ratio": round(float(det.get("texture_ratio", 0)), 4),
             "clear_ratio": round(float(det.get("clear_ratio", 0)), 4),
             "green_ratio": round(float(det.get("green_ratio", 0)), 4),
+            "source": det.get("source", "OpenCV"),
+            "yolo_conf": round(float(det.get("yolo_conf", 0)), 4),
+            "class_name": det.get("class_name", ""),
         })
     return dets
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def preparar_deteccoes_pendoamento_hibrido(file_bytes: bytes, filename: str, preview_dims: tuple):
+    rgb = _decode_rgb_for_pendao(file_bytes, filename)
+    if rgb is None:
+        return {
+            "detections": [],
+            "status": "Imagem inválida para análise de pendoamento.",
+            "mode": "erro",
+        }
+    result = detectar_pendoes_hibrido_yolo_opencv(rgb, grade=None, params=PENDAO_AVANCADO_PARAMS)
+    return {
+        "detections": _serializar_deteccoes_pendao_preview(result, rgb, preview_dims),
+        "status": result.get("detector_status", ""),
+        "mode": result.get("detector_mode", "OpenCV fallback"),
+    }
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def preparar_deteccoes_pendoamento_avancado(file_bytes: bytes, filename: str, preview_dims: tuple):
+    return preparar_deteccoes_pendoamento_hibrido(file_bytes, filename, preview_dims).get("detections", [])
 
 
 # ==========================================
@@ -11359,10 +11639,17 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                                 cron_errors.append(f"{cron_name}: {err}")
                                 continue
                             try:
-                                pendao_detections = preparar_deteccoes_pendoamento_avancado(raw, cron_name, tuple(dims))
+                                pendao_result = preparar_deteccoes_pendoamento_hibrido(raw, cron_name, tuple(dims))
+                                pendao_detections = pendao_result.get("detections", [])
+                                pendao_status = pendao_result.get("status", "")
+                                pendao_mode = pendao_result.get("mode", "OpenCV fallback")
+                                if pendao_status and any(token in pendao_status.lower() for token in ("não instalado", "nao instalado", "falhou")):
+                                    cron_errors.append(f"{cron_name}: {pendao_status}")
                             except Exception as det_exc:
                                 pendao_detections = []
-                                cron_errors.append(f"{cron_name}: detector avançado indisponível ({det_exc})")
+                                pendao_status = f"YOLO/OpenCV indisponível ({det_exc}). Verifique: pip install -U ultralytics"
+                                pendao_mode = "OpenCV fallback"
+                                cron_errors.append(f"{cron_name}: {pendao_status}")
                             cron_orthos.append({
                                 "order": int(item["idx"]),
                                 "name": cron_name,
@@ -11371,6 +11658,8 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                                 "width": int(dims[0]),
                                 "height": int(dims[1]),
                                 "advanced_detections": pendao_detections,
+                                "detector_status": pendao_status,
+                                "detector_mode": pendao_mode,
                                 "orig_width": int(spatial.get("orig_width", dims[0]) or dims[0]) if spatial else int(dims[0]),
                                 "orig_height": int(spatial.get("orig_height", dims[1]) or dims[1]) if spatial else int(dims[1]),
                             })
@@ -11741,6 +12030,7 @@ function renderOrthoSummary(){
   activeOrthoSummary.innerHTML =
     'Visualizando: <b style="color:#ffb347">' + (activeIdx + 1) + ' · ' + safeHtml(active.name || '') + '</b><br>' +
     'Data: ' + safeHtml(active.date || '--') + ' · Pendões: ' + activeStats.total + ' · Atingidas: ' + activeStats.hit +
+    '<br>Detector: ' + safeHtml(active.detector_mode || 'OpenCV fallback') +
     '<br><span style="color:#777">Ortofotos carregadas: ' + ORTHOS.length + '/10</span>';
   for(let idx=0; idx<10; idx++){
     const o = ORTHOS[idx];
@@ -11750,7 +12040,7 @@ function renderOrthoSummary(){
       item.className = 'date-item' + (idx === activeIdx ? ' active' : '');
       item.innerHTML =
         '<div class="date-head"><span>#' + String(idx + 1).padStart(2,'0') + ' · ' + safeHtml(o.date) + '</span><span class="date-name">' + safeHtml(o.name) + '</span></div>' +
-        '<div class="date-meta">Clique aqui para visualizar esta ortofoto no painel único.</div>' +
+        '<div class="date-meta">Clique aqui para visualizar esta ortofoto no painel único.<br>Detector: ' + safeHtml(o.detector_mode || 'OpenCV fallback') + '</div>' +
         '<div class="date-mini">' +
           '<span><b>' + stats.total + '</b>pendões</span>' +
           '<span><b>' + stats.hit + '</b>atingiu</span>' +
@@ -11999,6 +12289,9 @@ function analyzeCellFromAdvancedDetections(idx,r,c){
       area: Math.max(1, size * size),
       tipo: det.tipo || 'misto',
       confianca: det.confianca || 'media',
+      source: det.source || 'OpenCV',
+      yolo_conf: Number(det.yolo_conf || 0),
+      class_name: det.class_name || '',
       yellow_ratio: Number(det.yellow_ratio || 0),
       texture_ratio: Number(det.texture_ratio || 0),
       clear_ratio: Number(det.clear_ratio || 0),
@@ -12275,7 +12568,8 @@ function runChronologicalAnalysis(){
   const C = Math.max(1, parseInt(CONFIG.cols || 1));
   resultsByParcel = {};
   const preCount = ORTHOS.reduce((sum,o) => sum + (Array.isArray(o.advanced_detections) ? o.advanced_detections.length : 0), 0);
-  statusEl.textContent = 'Analisando pendoamento com detector OpenCV avançado em ' + ORTHOS.length + ' ortofotos' + (preCount ? ' (' + preCount + ' centros pré-detectados).' : ' e fallback local.') ;
+  const modes = [...new Set(ORTHOS.map(o => o.detector_mode || 'OpenCV fallback'))].join(' + ');
+  statusEl.textContent = 'Analisando pendoamento com pipeline híbrido YOLO/OpenCV em ' + ORTHOS.length + ' ortofotos' + (preCount ? ' (' + preCount + ' centros pré-detectados · ' + modes + ').' : ' e fallback local.') ;
   progressBar.style.width = '0%';
   setTimeout(() => {
     let done = 0;
