@@ -9847,6 +9847,10 @@ new ResizeObserver(() => drawAll()).observe(vc);
     background:#1a1a1a; border:1px solid #333; color:#fff; border-radius:4px;
     padding:2px 3px; height:21px; width:54px; text-align:center; font-size:10px;
   }
+  .grid-panel input[type=text], .grid-panel input[type=date] {
+    background:#1a1a1a; border:1px solid #333; color:#fff; border-radius:4px;
+    padding:2px 4px; height:23px; width:112px; font-size:10px;
+  }
   .grid-panel select {
     background:#1a1a1a; border:1px solid #333; color:#fff; border-radius:4px;
     padding:2px 4px; height:23px; width:92px; font-size:10px;
@@ -9907,9 +9911,11 @@ new ResizeObserver(() => drawAll()).observe(vc);
 
   <div class="grid-panel">
     <label>🌾 PENDOAMENTO</label>
+    <div class="row-col"><span>Quadra:</span><input type="text" id="inpQuadra" placeholder="Quadra"></div>
+    <div class="row-col"><span>Data:</span><input type="date" id="inpData"></div>
     <div class="row-col"><span>Disp:</span><input type="number" id="inpRows" value="5" min="1" max="200"></div>
     <div class="row-col"><span>Tiros:</span><input type="number" id="inpCols" value="5" min="1" max="200"></div>
-    <div class="row-col"><span>Teto/parcela:</span><input type="number" id="inpTeto" value="20" min="1" max="10000"></div>
+    <div class="row-col"><span>Teto pendões:</span><input type="number" id="inpTeto" value="20" min="1" max="10000"></div>
     <div class="row-col"><span>Trava:</span><span style="color:#ffb347;font-weight:800;">50%</span></div>
     <button class="grid-btn" id="btnGrid2">Marcar Grid</button>
     <button class="cnt-btn blue" id="btnSelect2">Selecionar Parcelas</button>
@@ -9940,6 +9946,8 @@ const coordEl = document.getElementById('coord');
 const inpRows = document.getElementById('inpRows');
 const inpCols = document.getElementById('inpCols');
 const inpTeto = document.getElementById('inpTeto');
+const inpQuadra = document.getElementById('inpQuadra');
+const inpData = document.getElementById('inpData');
 const btnGridTool = document.getElementById('btnGridTool');
 const btnGrid2 = document.getElementById('btnGrid2');
 const btnSelectParcel = document.getElementById('btnSelectParcel');
@@ -9968,9 +9976,9 @@ let draggingPoint=-1, drag=false, lx=0, ly=0;
 let sc=1, ox=0, oy=0, imgW=0, imgH=0;
 const MIN_SC=0.05, MAX_SC=40;
 const PEND_STEP=1;
-const PEND_MIN_AREA=18;
+const PEND_MIN_AREA=8;
 const PEND_CRITICO=20;
-const PEND_SCORE_THRESHOLD=4.35;
+const PEND_SCORE_THRESHOLD=3.95;
 const PEND_PERCENT_LIMIT=50;
 const TRAIN_KEY='tmg_pendao_ia_' + IMAGE_NAME;
 let trainingSamples={pos:[],neg:[]};
@@ -10144,35 +10152,41 @@ function tasselScore(r,g,b) {
   const exg=2*g-r-b;
   const yellowness=((r+g)*0.5)-b;
   const redYellowBalance=Math.abs(r-g);
-  const leafGreen=(exg>8 && g>=r*0.92 && g>=b*1.03 && hsv.h>=56 && hsv.h<=168);
-  const darkShadow = hsv.v<0.22;
-  const whiteGlare = hsv.s<0.12 && hsv.v>0.74;
+  const leafGreen=(exg>20 && g>=r*0.98 && g>=b*1.07 && hsv.h>=68 && hsv.h<=165 && yellowness<32 && hsv.v<0.78);
+  const hardGreen=(exg>38 && hsv.h>=72 && hsv.h<=158 && hsv.s>0.24 && yellowness<26);
+  const darkShadow = hsv.v<0.20;
+  const whiteGlare = hsv.s<0.08 && hsv.v>0.82;
   const soilRed = r>g*1.28 && r>b*1.36 && hsv.h<18;
-  const greenWhiteEdge = hsv.s<0.24 && g>=r*0.94 && b>=r*0.72 && hsv.h>=55 && hsv.h<=150;
-  const nonGreen = !leafGreen && !greenWhiteEdge && exg < 42;
+  const greenWhiteEdge = hsv.s<0.22 && g>=r*1.01 && b>=r*0.74 && hsv.h>=65 && hsv.h<=150 && yellowness<20;
+  const nonGreen = !leafGreen && !greenWhiteEdge && !hardGreen && exg < 70;
 
-  const strawHue = hsv.h>=20 && hsv.h<=58 && hsv.s>=0.15 && hsv.v>=0.34 && yellowness>=16;
-  const tanDry = r>=88 && g>=60 && b<=142 && r>=b+18 && g>=b+8 && redYellowBalance<=92 && hsv.h>=14 && hsv.h<=58;
-  const paleTassel = r>=112 && g>=88 && b<=162 && yellowness>=18 && redYellowBalance<=72 && hsv.s>=0.11 && hsv.h>=16 && hsv.h<=62;
-  const oldPinkTan = r>=102 && g>=70 && b<=155 && r>=g*0.88 && g>=b*0.82 && r>=b+10 && hsv.h>=8 && hsv.h<=42 && hsv.s>=0.12;
-  const youngTassel = hsv.h>=42 && hsv.h<=74 && hsv.s>=0.12 && hsv.s<=0.58 && hsv.v>=0.34 && yellowness>=12 && exg<30;
-  const branchTexture = chroma>=22 && yellowness>=16 && hsv.s>=0.14;
+  const strawHue = hsv.h>=18 && hsv.h<=64 && hsv.s>=0.10 && hsv.v>=0.30 && yellowness>=10 && exg<62;
+  const tanDry = r>=82 && g>=58 && b<=158 && r>=b+14 && g>=b+5 && redYellowBalance<=96 && hsv.h>=12 && hsv.h<=62;
+  const paleTassel = r>=96 && g>=72 && b<=185 && yellowness>=10 && redYellowBalance<=88 && hsv.s>=0.07 && hsv.h>=12 && hsv.h<=76 && exg<64;
+  const creamTip = maxc>=132 && yellowness>=14 && b<=g*0.92 && b<=r*0.92 && hsv.s>=0.06 && hsv.s<=0.58 && hsv.h>=14 && hsv.h<=78 && exg<68;
+  const oldPinkTan = r>=96 && g>=64 && b<=168 && r>=g*0.84 && g>=b*0.78 && r>=b+8 && hsv.h>=8 && hsv.h<=46 && hsv.s>=0.10;
+  const youngTassel = hsv.h>=38 && hsv.h<=82 && hsv.s>=0.09 && hsv.s<=0.68 && hsv.v>=0.30 && yellowness>=6 && exg<62;
+  const branchTexture = chroma>=18 && yellowness>=8 && hsv.s>=0.09;
 
   let score=0;
-  if(strawHue) score+=2.2;
-  if(tanDry) score+=2.4;
-  if(paleTassel) score+=2.1;
-  if(oldPinkTan) score+=1.8;
-  if(youngTassel) score+=1.15;
-  if(branchTexture) score+=0.9;
-  if(yellowness>=30) score+=0.6;
-  if(!nonGreen) score-=5.0;
-  if(leafGreen) score-=4.8;
-  if(greenWhiteEdge) score-=3.4;
+  if(strawHue) score+=2.45;
+  if(tanDry) score+=2.15;
+  if(paleTassel) score+=2.35;
+  if(creamTip) score+=2.20;
+  if(oldPinkTan) score+=1.70;
+  if(youngTassel) score+=1.35;
+  if(branchTexture) score+=0.85;
+  if(yellowness>=24) score+=0.65;
+  if(yellowness>=38 && exg<58) score+=0.45;
+  if(!nonGreen) score-=4.2;
+  if(leafGreen) score-=4.2;
+  if(hardGreen) score-=3.6;
+  if(greenWhiteEdge) score-=3.0;
   if(darkShadow) score-=2.2;
   if(whiteGlare) score-=2.2;
   if(soilRed) score-=1.6;
   if(chroma<12 && yellowness<18) score-=1.2;
+  if(hsv.h>=92 && hsv.h<=155 && exg>18) score-=1.8;
   return score;
 }
 
@@ -10440,9 +10454,16 @@ function exportCSV() {
   const entries=Object.values(results).sort((a,b)=> a.row===b.row ? a.col-b.col : a.row-b.row);
   if(!entries.length) { alert('Execute a análise de pendoamento antes de exportar.'); return; }
   const crit=getPendaoLimit();
-  let csv='\\uFEFFParcela;Linha;Coluna;Pendoes;Status;Imagem\\n';
+  const quadra=(inpQuadra && inpQuadra.value.trim()) ? inpQuadra.value.trim() : 'Pendoamento';
+  const dataOrto=(inpData && inpData.value) ? inpData.value : new Date().toISOString().slice(0,10);
+  const csvValue = value => {
+    const s=String(value ?? '');
+    return /[;"\\n\\r]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+  };
+  let csv='\\uFEFFQuadra;Disparo;Tiro;Total_Pendões;Nome_Ortofoto;Data_Ortofoto;Observação\\n';
   for(const r of entries) {
-    csv += r.label+';'+r.row+';'+r.col+';'+r.count+';'+(r.count>=crit?'ATINGIU_50':'ABAIXO_50')+';'+IMAGE_NAME+'\\n';
+    const obs=r.count>=crit ? 'ATINGIU_50_DO_TETO' : 'ABAIXO_50_DO_TETO';
+    csv += [quadra,r.row,r.col,r.count,IMAGE_NAME,dataOrto,obs].map(csvValue).join(';')+'\\n';
   }
   const blob=new Blob([csv], {type:'text/csv;charset=utf-8;'});
   const a=document.createElement('a');
@@ -10563,6 +10584,7 @@ function drawAll() {
 }
 
 img.onload=()=>{ imgW=img.width; imgH=img.height; fitView(); };
+img.onerror=()=>{ countPanel.style.display='block'; countInfoEl.innerHTML='Falha ao carregar a ortofoto no visualizador. Recarregue a imagem ou reduza o tamanho do arquivo.'; };
 img.src='data:image/jpeg;base64,'+IMG_B64;
 
 vc.addEventListener('wheel', e=>{
@@ -10657,6 +10679,7 @@ btnFit.onclick=fitView;
 inpRows.onchange=()=>{ selectedParcels.clear(); clearResults(); drawAll(); };
 inpCols.onchange=()=>{ selectedParcels.clear(); clearResults(); drawAll(); };
 inpTeto.onchange=()=>{ updateResultBox(); drawAll(); };
+if(inpData && !inpData.value) inpData.value = new Date().toISOString().slice(0,10);
 loadTrainingSamples();
 new ResizeObserver(()=>drawAll()).observe(vc);
 </script>
@@ -10709,7 +10732,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
             with p3:
                 cron_cols = st.number_input("Tiros", min_value=1, max_value=200, value=5, step=1, key="pend_cron_cols")
             with p4:
-                cron_teto = st.number_input("Teto plantas/parcela", min_value=1, max_value=10000, value=20, step=1, key="pend_cron_teto")
+                cron_teto = st.number_input("Teto de pendões", min_value=1, max_value=10000, value=20, step=1, key="pend_cron_teto")
 
             cron_percentual = 50.0
             cron_min_pendoes = 1
@@ -10759,12 +10782,23 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                 for idx, cron_item in enumerate(selected_cron_items):
                     key_hash = hashlib.md5(f"{idx}-{cron_item['name']}".encode("utf-8")).hexdigest()[:8]
                     with date_cols[idx % len(date_cols)]:
+                        cron_label = st.text_input(
+                            f"Nome {idx + 1}",
+                            value=Path(cron_item["name"]).stem,
+                            key=f"pend_cron_name_{key_hash}"
+                        )
                         cron_date = st.date_input(
                             f"Data {idx + 1}",
                             value=date.today(),
                             key=f"pend_cron_date_{key_hash}"
                         )
-                    cron_entries.append({"idx": idx, "name": cron_item["name"], "raw": cron_item["raw"], "date": cron_date.isoformat()})
+                    cron_entries.append({
+                        "idx": idx,
+                        "name": (cron_label.strip() or Path(cron_item["name"]).stem),
+                        "original_name": cron_item["name"],
+                        "raw": cron_item["raw"],
+                        "date": cron_date.isoformat()
+                    })
 
                 ordem_preview = [
                     {"Ordem": pos + 1, "Ortofoto": item["name"], "Data": item["date"]}
@@ -10839,7 +10873,6 @@ new ResizeObserver(()=>drawAll()).observe(vc);
 <html>
 <head>
 <meta charset="utf-8">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   * { box-sizing:border-box; margin:0; padding:0; }
   body { background:#0d0d0d; overflow:hidden; font-family:'Segoe UI',sans-serif; color:#ddd; }
@@ -11024,6 +11057,44 @@ function quoteCSV(v){
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
+function loadScriptOnce(src){
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-tmg-src="' + src + '"]');
+    if(existing){
+      if(existing.dataset.loaded === 'true'){ resolve(true); return; }
+      existing.addEventListener('load', () => resolve(true), {once:true});
+      existing.addEventListener('error', () => reject(new Error('Falha ao carregar ' + src)), {once:true});
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.dataset.tmgSrc = src;
+    script.onload = () => { script.dataset.loaded = 'true'; resolve(true); };
+    script.onerror = () => reject(new Error('Falha ao carregar ' + src));
+    document.head.appendChild(script);
+  });
+}
+
+async function ensureChronoExcel(){
+  if(window.__tmgChronoXlsxReady && typeof XLSX !== 'undefined') return true;
+  const urls = [
+    'https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js',
+    'https://unpkg.com/xlsx-js-style@1.2.0/dist/xlsx.bundle.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'
+  ];
+  for(const url of urls){
+    try{
+      await loadScriptOnce(url);
+      if(typeof XLSX !== 'undefined'){
+        window.__tmgChronoXlsxReady = true;
+        return true;
+      }
+    } catch(e){ console.warn(e); }
+  }
+  return false;
+}
+
 function setupDates(){
   dateSelect.innerHTML = '';
   dateList.innerHTML = '';
@@ -11144,20 +11215,22 @@ function tasselScore(r,g,b){
   const exg = 2*g-r-b;
   const yellowness = ((r+g)*0.5)-b;
   const redYellowBalance = Math.abs(r-g);
-  const leafGreen = (exg>8 && g>=r*0.92 && g>=b*1.03 && hsv.h>=56 && hsv.h<=168);
-  const darkShadow = hsv.v<0.22;
-  const whiteGlare = hsv.s<0.12 && hsv.v>0.74;
+  const leafGreen = (exg>20 && g>=r*0.98 && g>=b*1.07 && hsv.h>=68 && hsv.h<=165 && yellowness<32 && hsv.v<0.78);
+  const hardGreen = (exg>38 && hsv.h>=72 && hsv.h<=158 && hsv.s>0.24 && yellowness<26);
+  const darkShadow = hsv.v<0.20;
+  const whiteGlare = hsv.s<0.08 && hsv.v>0.82;
   const soilRed = r>g*1.28 && r>b*1.36 && hsv.h<18;
-  const greenWhiteEdge = hsv.s<0.24 && g>=r*0.94 && b>=r*0.72 && hsv.h>=55 && hsv.h<=150;
-  const nonGreen = !leafGreen && !greenWhiteEdge && exg < 42;
+  const greenWhiteEdge = hsv.s<0.22 && g>=r*1.01 && b>=r*0.74 && hsv.h>=65 && hsv.h<=150 && yellowness<20;
+  const nonGreen = !leafGreen && !greenWhiteEdge && !hardGreen && exg < 70;
   const filter = CONFIG.filtroCor || 'Misto';
 
   let score = 0;
-  const young = hsv.h>=42 && hsv.h<=74 && hsv.s>=0.12 && hsv.s<=0.58 && hsv.v>=0.34 && yellowness>=12 && exg<30;
-  const dry = hsv.h>=20 && hsv.h<=58 && hsv.s>=0.15 && hsv.v>=0.34 && yellowness>=16 && r>=88 && g>=60 && b<=142 && r>=b+18 && g>=b+8 && redYellowBalance<=92;
-  const bright = r>=112 && g>=88 && b<=162 && yellowness>=18 && redYellowBalance<=72 && hsv.s>=0.11 && hsv.h>=16 && hsv.h<=62;
-  const oldPinkTan = r>=102 && g>=70 && b<=155 && r>=g*0.88 && g>=b*0.82 && r>=b+10 && hsv.h>=8 && hsv.h<=42 && hsv.s>=0.12;
-  const textureColor = chroma>=22 && yellowness>=16 && hsv.s>=0.14;
+  const young = hsv.h>=38 && hsv.h<=82 && hsv.s>=0.09 && hsv.s<=0.68 && hsv.v>=0.30 && yellowness>=6 && exg<62;
+  const dry = hsv.h>=18 && hsv.h<=64 && hsv.s>=0.10 && hsv.v>=0.30 && yellowness>=10 && r>=82 && g>=58 && b<=158 && r>=b+14 && g>=b+5 && redYellowBalance<=96;
+  const bright = r>=96 && g>=72 && b<=185 && yellowness>=10 && redYellowBalance<=88 && hsv.s>=0.07 && hsv.h>=12 && hsv.h<=76 && exg<64;
+  const creamTip = Math.max(r,g,b)>=132 && yellowness>=14 && b<=g*0.92 && b<=r*0.92 && hsv.s>=0.06 && hsv.s<=0.58 && hsv.h>=14 && hsv.h<=78 && exg<68;
+  const oldPinkTan = r>=96 && g>=64 && b<=168 && r>=g*0.84 && g>=b*0.78 && r>=b+8 && hsv.h>=8 && hsv.h<=46 && hsv.s>=0.10;
+  const textureColor = chroma>=18 && yellowness>=8 && hsv.s>=0.09;
 
   if(filter === 'Pendão novo'){
     if(young) score += 3.2;
@@ -11168,20 +11241,24 @@ function tasselScore(r,g,b){
     if(bright) score += 1.6;
     if(young) score += 0.7;
   } else {
-    if(young) score += 2.1;
-    if(dry) score += 2.4;
-    if(bright) score += 1.7;
-    if(oldPinkTan) score += 1.8;
+    if(young) score += 1.35;
+    if(dry) score += 2.45;
+    if(bright) score += 2.35;
+    if(creamTip) score += 2.20;
+    if(oldPinkTan) score += 1.70;
   }
   if(textureColor) score += 0.8;
-  if(yellowness>=28) score += 0.65;
-  if(!nonGreen) score -= 5.0;
-  if(leafGreen) score -= 4.8;
-  if(greenWhiteEdge) score -= 3.4;
+  if(yellowness>=24) score += 0.65;
+  if(yellowness>=38 && exg<58) score += 0.45;
+  if(!nonGreen) score -= 4.2;
+  if(leafGreen) score -= 4.2;
+  if(hardGreen) score -= 3.6;
+  if(greenWhiteEdge) score -= 3.0;
   if(darkShadow) score -= 2.2;
   if(whiteGlare) score -= 2.2;
   if(soilRed) score -= 1.6;
   if(chroma<12 && yellowness<18) score -= 1.2;
+  if(hsv.h>=92 && hsv.h<=155 && exg>18) score -= 1.8;
 
   const sensitivity = clamp(Number(CONFIG.sensibilidade || 60), 1, 100);
   const tolerance = clamp(Number(CONFIG.tolerancia || 55), 0, 100);
@@ -11193,7 +11270,7 @@ function tasselScore(r,g,b){
 function scoreThreshold(){
   const sensitivity = clamp(Number(CONFIG.sensibilidade || 60), 1, 100);
   const tolerance = clamp(Number(CONFIG.tolerancia || 55), 0, 100);
-  return clamp(4.35 - (sensitivity - 50) / 100 - (tolerance - 50) / 150, 3.75, 4.80);
+  return clamp(3.95 - (sensitivity - 50) / 110 - (tolerance - 50) / 170, 3.45, 4.55);
 }
 
 function mergeNearbyTassels(marks,w,h){
@@ -11418,18 +11495,20 @@ function rebuildRows(){
       finalRows.push(row);
 
       for(let i=0; i<ORTHOS.length; i++){
+        const perHit = counts[i] >= Number(CONFIG.minPendoes || 0) && percents[i] >= Number(CONFIG.percentualLimite || 50);
+        const perStatus = perHit ? 'ATINGIU' : (counts[i] > 0 ? 'EVOLUÇÃO PARCIAL' : 'NÃO ATINGIU');
         fullRows.push({
-          Nome_Analise: CONFIG.nomeAnalise || '',
-          Parcela: label,
-          TIRO: 'T' + (c + 1),
-          Linha: 'D' + (r + 1),
-          Data: ORTHOS[i].date,
-          Ortofoto: ORTHOS[i].name,
-          Pendoes: counts[i],
-          Percentual: fmtPct(percents[i]),
-          Teto_Plantas: teto,
-          Status: status,
-          Confianca: fmtPct((rec.confidence || 0) * 100)
+          Quadra: meta.QUADRA || CONFIG.nomeAnalise || 'Pendoamento',
+          Disparo: r + 1,
+          Tiro: c + 1,
+          Data_Ortofoto: ORTHOS[i].date,
+          Nome_Ortofoto: ORTHOS[i].name,
+          Total_Pendões: counts[i],
+          Teto_Configurado: teto,
+          Status: perStatus,
+          Data_Atingimento: status === 'ATINGIU' ? firstDate : '',
+          Ortofoto_Atingimento: status === 'ATINGIU' ? firstOrtho : '',
+          Percentual_Pendoamento: fmtPct(percents[i])
         });
       }
 
@@ -11646,12 +11725,75 @@ function exportRows(rows, filename){
   a.click();
 }
 
-function exportExcel(){
+function applyTemporalSheetStyle(ws){
+  if(!ws || !ws['!ref'] || !XLSX || !XLSX.utils) return;
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  const headers = [];
+  for(let c=range.s.c; c<=range.e.c; c++){
+    const cell = ws[XLSX.utils.encode_cell({r:0,c})];
+    headers.push(cell ? String(cell.v) : '');
+  }
+  const statusCol = headers.indexOf('Status');
+  const centerCols = ['Disparo','Tiro','Total_Pendões','Teto_Configurado','Percentual_Pendoamento']
+    .map(name => headers.indexOf(name))
+    .filter(idx => idx >= 0);
+  const border = {
+    top:{style:'thin',color:{rgb:'808080'}},
+    bottom:{style:'thin',color:{rgb:'808080'}},
+    left:{style:'thin',color:{rgb:'808080'}},
+    right:{style:'thin',color:{rgb:'808080'}}
+  };
+  for(let r=range.s.r; r<=range.e.r; r++){
+    for(let c=range.s.c; c<=range.e.c; c++){
+      const addr = XLSX.utils.encode_cell({r,c});
+      if(!ws[addr]) continue;
+      if(r === 0){
+        ws[addr].s = {
+          font:{bold:true,color:{rgb:'00B0F0'}},
+          fill:{patternType:'solid',fgColor:{rgb:'1F1F1F'}},
+          alignment:{horizontal:'center',vertical:'center',wrapText:true},
+          border
+        };
+        continue;
+      }
+      const style = {
+        font:{color:{rgb:'000000'}},
+        alignment:{horizontal:centerCols.includes(c) ? 'center' : 'left', vertical:'center', wrapText:true},
+        border
+      };
+      if(c === statusCol){
+        const status = String(ws[addr].v || '').toUpperCase();
+        if(status.includes('ATINGIU') && !status.includes('NÃO')) {
+          style.fill = {patternType:'solid',fgColor:{rgb:'00B050'}};
+          style.font = {bold:true,color:{rgb:'FFFFFF'}};
+        } else if(status.includes('PARCIAL')) {
+          style.fill = {patternType:'solid',fgColor:{rgb:'FFF2CC'}};
+          style.font = {bold:true,color:{rgb:'000000'}};
+        } else {
+          style.fill = {patternType:'solid',fgColor:{rgb:'C00000'}};
+          style.font = {bold:true,color:{rgb:'FFFFFF'}};
+        }
+        style.alignment = {horizontal:'center',vertical:'center',wrapText:true};
+      }
+      ws[addr].s = style;
+    }
+  }
+  ws['!autofilter'] = {ref: ws['!ref']};
+  ws['!freeze'] = {xSplit:0,ySplit:1};
+  ws['!cols'] = headers.map(h => ({wch: Math.max(12, Math.min(28, String(h).length + 4))}));
+}
+
+async function exportExcel(){
   if(!finalRows.length){ alert('Execute a análise antes de exportar.'); return; }
-  if(typeof XLSX === 'undefined'){ alert('Biblioteca Excel não carregou. Use Exportar CSV.'); return; }
+  if(typeof XLSX === 'undefined' && !(await ensureChronoExcel())){ alert('Biblioteca Excel não carregou. Use Exportar CSV.'); return; }
+  if(!(await ensureChronoExcel())){ alert('Biblioteca de estilos do Excel não carregou. Tente novamente.'); return; }
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(finalRows), 'Resumo');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(fullRows), 'Por_Ortofoto');
+  const wsTemporal = XLSX.utils.json_to_sheet(fullRows);
+  const wsResumo = XLSX.utils.json_to_sheet(finalRows);
+  applyTemporalSheetStyle(wsTemporal);
+  applyTemporalSheetStyle(wsResumo);
+  XLSX.utils.book_append_sheet(wb, wsTemporal, 'Temporal');
+  XLSX.utils.book_append_sheet(wb, wsResumo, 'Resumo');
   XLSX.writeFile(wb, 'analise_cronologica_pendoamento.xlsx');
 }
 
