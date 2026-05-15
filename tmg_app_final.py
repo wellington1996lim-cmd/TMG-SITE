@@ -10742,7 +10742,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
             with p4:
                 cron_teto = st.number_input("Teto de pendões", min_value=1, max_value=10000, value=20, step=1, key="pend_cron_teto")
 
-            cron_percentual = 50.0
+            cron_percentual = 100.0
             cron_min_pendoes = 1
             cron_referencia = ""
             cron_tolerancia = 58
@@ -10765,7 +10765,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
             meta_parental2 = ""
             meta_pop_parental2 = ""
             meta_dtp = ""
-            st.caption("Depois de anexar, use o resumo lateral do visualizador para clicar e trocar entre as ortofotos carregadas.")
+            st.caption("Depois de anexar, use o resumo lateral do visualizador para clicar e trocar entre as ortofotos carregadas. O teto de pendões trava a primeira data em que a parcela atingiu o valor configurado.")
 
             cron_files = _resettable_ortho_uploader(
                 "📷 Anexar ortofotos para o seletor do visualizador (até 10)",
@@ -10987,6 +10987,8 @@ new ResizeObserver(()=>drawAll()).observe(vc);
   .legend { display:flex; flex-wrap:wrap; gap:5px; color:#888; font-size:9px; margin-top:5px; }
   .leg { display:flex; align-items:center; gap:3px; }
   .sw { width:10px; height:10px; border-radius:2px; border:1px solid rgba(255,255,255,.25); }
+  #btnReviewMode, #btnExportCSV, #btnExportResumo, #btnExportCompleto, #btnExportImagem,
+  .stats, #statFirstDate, .legend, #reviewPanel { display:none !important; }
 </style>
 </head>
 <body>
@@ -11017,7 +11019,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
     <button class="btn" id="btnFitChrono">⤢ Ajustar à tela</button>
     <button class="btn red" id="btnClearChrono">Limpar seletor</button>
     <div class="progress"><div id="cronProgress"></div></div>
-    <div class="subtle" id="cronStatus">Selecione a ortofoto no resumo, marque o grid e execute a análise.</div>
+    <div class="subtle" id="cronStatus">Selecione a ortofoto no resumo, marque o grid e execute a análise. O teto configurado define o travamento.</div>
 
     <div class="sep"></div>
     <div class="stats">
@@ -11037,11 +11039,11 @@ new ResizeObserver(()=>drawAll()).observe(vc);
     <div class="review" id="reviewPanel"></div>
 
     <div class="sep"></div>
-    <button class="btn orange" id="btnExportCSV">Exportar CSV</button>
     <button class="btn orange" id="btnExportXLSX">Exportar Excel</button>
-    <button class="btn" id="btnExportResumo">Exportar resumo final</button>
-    <button class="btn" id="btnExportCompleto">Exportar dados completos por ortofoto</button>
-    <button class="btn" id="btnExportImagem">Exportar imagem com grid e marcações</button>
+    <button class="btn orange" id="btnExportCSV" style="display:none;">Exportar CSV</button>
+    <button class="btn" id="btnExportResumo" style="display:none;">Exportar resumo final</button>
+    <button class="btn" id="btnExportCompleto" style="display:none;">Exportar dados completos por ortofoto</button>
+    <button class="btn" id="btnExportImagem" style="display:none;">Exportar imagem com grid e marcações</button>
   </div>
 </div>
 
@@ -11322,22 +11324,22 @@ function tasselScore(r,g,b){
   const exg = 2*g-r-b;
   const yellowness = ((r+g)*0.5)-b;
   const redYellowBalance = Math.abs(r-g);
-  const leafGreen = (exg>20 && g>=r*0.98 && g>=b*1.07 && hsv.h>=68 && hsv.h<=165 && yellowness<32 && hsv.v<0.78);
-  const hardGreen = (exg>38 && hsv.h>=72 && hsv.h<=158 && hsv.s>0.24 && yellowness<26);
+  const leafGreen = (exg>18 && g>=r*0.98 && g>=b*1.07 && hsv.h>=68 && hsv.h<=165 && yellowness<34 && hsv.v<0.82);
+  const hardGreen = (exg>32 && hsv.h>=70 && hsv.h<=158 && hsv.s>0.20 && yellowness<30);
   const darkShadow = hsv.v<0.20;
   const whiteGlare = hsv.s<0.08 && hsv.v>0.82;
   const soilRed = r>g*1.28 && r>b*1.36 && hsv.h<18;
-  const greenWhiteEdge = hsv.s<0.22 && g>=r*1.01 && b>=r*0.74 && hsv.h>=65 && hsv.h<=150 && yellowness<20;
-  const nonGreen = !leafGreen && !greenWhiteEdge && !hardGreen && exg < 70;
+  const greenWhiteEdge = hsv.s<0.22 && g>=r*1.01 && b>=r*0.74 && hsv.h>=65 && hsv.h<=150 && yellowness<22;
+  const nonGreen = !leafGreen && !greenWhiteEdge && !hardGreen && exg < 62;
   const filter = CONFIG.filtroCor || 'Misto';
 
   let score = 0;
-  const young = hsv.h>=38 && hsv.h<=82 && hsv.s>=0.09 && hsv.s<=0.68 && hsv.v>=0.30 && yellowness>=6 && exg<62;
-  const dry = hsv.h>=18 && hsv.h<=64 && hsv.s>=0.10 && hsv.v>=0.30 && yellowness>=10 && r>=82 && g>=58 && b<=158 && r>=b+14 && g>=b+5 && redYellowBalance<=96;
-  const bright = r>=96 && g>=72 && b<=185 && yellowness>=10 && redYellowBalance<=88 && hsv.s>=0.07 && hsv.h>=12 && hsv.h<=76 && exg<64;
-  const creamTip = Math.max(r,g,b)>=132 && yellowness>=14 && b<=g*0.92 && b<=r*0.92 && hsv.s>=0.06 && hsv.s<=0.58 && hsv.h>=14 && hsv.h<=78 && exg<68;
-  const oldPinkTan = r>=96 && g>=64 && b<=168 && r>=g*0.84 && g>=b*0.78 && r>=b+8 && hsv.h>=8 && hsv.h<=46 && hsv.s>=0.10;
-  const textureColor = chroma>=18 && yellowness>=8 && hsv.s>=0.09;
+  const young = hsv.h>=38 && hsv.h<=76 && hsv.s>=0.10 && hsv.s<=0.56 && hsv.v>=0.34 && yellowness>=12 && exg<42 && b<=Math.min(r,g)*0.88;
+  const dry = hsv.h>=18 && hsv.h<=64 && hsv.s>=0.10 && hsv.v>=0.30 && yellowness>=12 && r>=82 && g>=58 && b<=158 && r>=b+14 && g>=b+6 && redYellowBalance<=92 && exg<52;
+  const bright = r>=96 && g>=72 && b<=185 && yellowness>=12 && redYellowBalance<=88 && hsv.s>=0.07 && hsv.h>=12 && hsv.h<=76 && exg<55;
+  const creamTip = Math.max(r,g,b)>=132 && yellowness>=16 && b<=g*0.91 && b<=r*0.91 && hsv.s>=0.06 && hsv.s<=0.58 && hsv.h>=14 && hsv.h<=78 && exg<56;
+  const oldPinkTan = r>=96 && g>=64 && b<=168 && r>=g*0.84 && g>=b*0.78 && r>=b+8 && hsv.h>=8 && hsv.h<=46 && hsv.s>=0.10 && exg<52;
+  const textureColor = chroma>=18 && yellowness>=10 && hsv.s>=0.09 && exg<55;
 
   if(filter === 'Pendão novo'){
     if(young) score += 3.2;
@@ -11348,24 +11350,24 @@ function tasselScore(r,g,b){
     if(bright) score += 1.6;
     if(young) score += 0.7;
   } else {
-    if(young) score += 1.35;
-    if(dry) score += 2.45;
-    if(bright) score += 2.35;
-    if(creamTip) score += 2.20;
-    if(oldPinkTan) score += 1.70;
+    if(young) score += 1.75;
+    if(dry) score += 2.25;
+    if(bright) score += 2.45;
+    if(creamTip) score += 2.35;
+    if(oldPinkTan) score += 1.85;
   }
-  if(textureColor) score += 0.8;
+  if(textureColor) score += 0.75;
   if(yellowness>=24) score += 0.65;
-  if(yellowness>=38 && exg<58) score += 0.45;
-  if(!nonGreen) score -= 4.2;
-  if(leafGreen) score -= 4.2;
-  if(hardGreen) score -= 3.6;
-  if(greenWhiteEdge) score -= 3.0;
+  if(yellowness>=38 && exg<52) score += 0.45;
+  if(!nonGreen) score -= 4.5;
+  if(leafGreen) score -= 4.5;
+  if(hardGreen) score -= 4.0;
+  if(greenWhiteEdge) score -= 3.2;
   if(darkShadow) score -= 2.2;
-  if(whiteGlare) score -= 2.2;
-  if(soilRed) score -= 1.6;
+  if(whiteGlare) score -= 2.3;
+  if(soilRed) score -= 1.8;
   if(chroma<12 && yellowness<18) score -= 1.2;
-  if(hsv.h>=92 && hsv.h<=155 && exg>18) score -= 1.8;
+  if(hsv.h>=92 && hsv.h<=155 && exg>16) score -= 2.0;
 
   const sensitivity = clamp(Number(CONFIG.sensibilidade || 60), 1, 100);
   const tolerance = clamp(Number(CONFIG.tolerancia || 55), 0, 100);
@@ -11377,7 +11379,7 @@ function tasselScore(r,g,b){
 function scoreThreshold(){
   const sensitivity = clamp(Number(CONFIG.sensibilidade || 60), 1, 100);
   const tolerance = clamp(Number(CONFIG.tolerancia || 55), 0, 100);
-  return clamp(4.15 - (sensitivity - 50) / 120 - (tolerance - 50) / 190, 3.70, 4.70);
+  return clamp(4.28 - (sensitivity - 50) / 150 - (tolerance - 50) / 240, 4.05, 4.75);
 }
 
 function mergeNearbyTassels(marks,w,h){
@@ -11432,11 +11434,13 @@ function analyzeCellInImage(idx,r,c){
   const mask = new Uint8Array(gw*gh);
   const clean = new Uint8Array(gw*gh);
   const close = new Uint8Array(gw*gh);
+  const inside = new Uint8Array(gw*gh);
   const scores = new Float32Array(gw*gh);
   const yellows = new Float32Array(gw*gh);
   const exgs = new Float32Array(gw*gh);
   const chromas = new Float32Array(gw*gh);
   const th = scoreThreshold();
+  let scoreSumAll=0, scoreSqAll=0, scoreCount=0;
 
   for(let gy=0; gy<gh; gy++){
     for(let gx=0; gx<gw; gx++){
@@ -11447,11 +11451,23 @@ function analyzeCellInImage(idx,r,c){
       const pr=data[di], pg=data[di+1], pb=data[di+2];
       const score = tasselScore(pr,pg,pb);
       const mi=gy*gw+gx;
+      inside[mi]=1;
       scores[mi]=score;
       yellows[mi]=((pr+pg)*0.5)-pb;
       exgs[mi]=2*pg-pr-pb;
       chromas[mi]=Math.max(pr,pg,pb)-Math.min(pr,pg,pb);
-      if(score>=th) mask[mi]=1;
+      scoreSumAll += score;
+      scoreSqAll += score*score;
+      scoreCount++;
+    }
+  }
+
+  const scoreMean = scoreCount ? scoreSumAll / scoreCount : 0;
+  const scoreVar = scoreCount ? Math.max(0, scoreSqAll / scoreCount - scoreMean*scoreMean) : 0;
+  const localTh = clamp(Math.max(th, scoreMean + Math.sqrt(scoreVar) * 0.95), th, th + 1.15);
+  for(let mi=0; mi<mask.length; mi++){
+    if(inside[mi] && scores[mi]>=localTh){
+      mask[mi]=1;
     }
   }
 
@@ -11467,7 +11483,7 @@ function analyzeCellInImage(idx,r,c){
           if(nx>=0 && nx<gw && ny>=0 && ny<gh && mask[ny*gw+nx]) n++;
         }
       }
-      if(n>=2 || scores[mi]>=th+0.85) clean[mi]=1;
+      if(n>=2 || scores[mi]>=localTh+0.85) clean[mi]=1;
     }
   }
 
@@ -11486,7 +11502,7 @@ function analyzeCellInImage(idx,r,c){
           }
         }
       }
-      if(n>=5 && s/Math.max(1,total)>=th-0.35) close[mi]=1;
+      if(n>=5 && s/Math.max(1,total)>=localTh-0.35) close[mi]=1;
     }
   }
 
@@ -11502,7 +11518,7 @@ function analyzeCellInImage(idx,r,c){
     for(let gx=0; gx<gw; gx++){
       const start=gy*gw+gx;
       if(!close[start] || visited[start]) continue;
-      let cells=0, sx=0, sy=0, scoreSum=0, yellowSum=0, exgSum=0, chromaSum=0, coreCells=0;
+      let cells=0, sx=0, sy=0, scoreSum=0, yellowSum=0, exgSum=0, chromaSum=0, coreCells=0, paleCells=0;
       let minGX=gx, maxGX=gx, minGY=gy, maxGY=gy;
       const stack=[[gx,gy]];
       visited[start]=1;
@@ -11510,7 +11526,8 @@ function analyzeCellInImage(idx,r,c){
         const p=stack.pop(), x=p[0], y=p[1], pos=y*gw+x;
         cells++; sx+=x; sy+=y; scoreSum+=scores[pos];
         yellowSum+=yellows[pos]; exgSum+=exgs[pos]; chromaSum+=chromas[pos];
-        if(scores[pos]>=th+0.55) coreCells++;
+        if(scores[pos]>=localTh+0.55) coreCells++;
+        if(yellows[pos]>=12 && exgs[pos]<54) paleCells++;
         if(x<minGX) minGX=x; if(x>maxGX) maxGX=x; if(y<minGY) minGY=y; if(y>maxGY) maxGY=y;
         for(const d of dirs){
           const nx=x+d[0], ny=y+d[1];
@@ -11530,6 +11547,7 @@ function analyzeCellInImage(idx,r,c){
       const meanExg = exgSum / Math.max(1,cells);
       const meanChroma = chromaSum / Math.max(1,cells);
       const coreRatio = coreCells / Math.max(1,cells);
+      const paleRatio = paleCells / Math.max(1,cells);
       const cx=minX + (sx/cells)*step, cy=minY + (sy/cells)*step;
       const valid =
         area>=minArea &&
@@ -11538,15 +11556,16 @@ function analyzeCellInImage(idx,r,c){
         elongation<=8.5 &&
         widthPx<=Math.max(16, w*0.18) &&
         heightPx<=Math.max(16, h*0.22) &&
-        meanScore>=th+0.05 &&
-        meanYellow>=9 &&
-        meanExg<58 &&
+        meanScore>=localTh+0.03 &&
+        meanYellow>=10 &&
+        meanExg<54 &&
         meanChroma>=14 &&
         coreRatio>=0.12 &&
+        paleRatio>=0.20 &&
         pointInPolygon(cx,cy,poly);
       if(valid){
         marks.push({x:cx,y:cy,area:area,score:meanScore});
-        confidenceSum += clamp((meanScore - (th-0.2)) / 2.2, 0.15, 1);
+        confidenceSum += clamp((meanScore - (localTh-0.2)) / 2.2, 0.15, 1);
       }
     }
   }
@@ -11821,7 +11840,13 @@ function drawAll(){
   ctx.save();
   ctx.translate(offsetX,offsetY);
   ctx.scale(scale,scale);
-  if(images[activeIdx] && images[activeIdx].complete) ctx.drawImage(images[activeIdx],0,0,imgW(activeIdx),imgH(activeIdx));
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  if(images[activeIdx] && images[activeIdx].complete) {
+    ctx.filter = 'contrast(1.07) saturate(1.06) brightness(1.02)';
+    ctx.drawImage(images[activeIdx],0,0,imgW(activeIdx),imgH(activeIdx));
+    ctx.filter = 'none';
+  }
   drawGrid(activeIdx);
   drawMarks(activeIdx);
   if(gridRatios.length > 0){
@@ -11913,17 +11938,23 @@ function applyTemporalSheetStyle(ws){
 }
 
 async function exportExcel(){
-  if(!finalRows.length){ alert('Execute a análise antes de exportar.'); return; }
-  if(typeof XLSX === 'undefined' && !(await ensureChronoExcel())){ alert('Biblioteca Excel não carregou. Use Exportar CSV.'); return; }
+  if(!fullRows.length){ alert('Execute a análise antes de exportar.'); return; }
+  if(typeof XLSX === 'undefined' && !(await ensureChronoExcel())){ alert('Biblioteca Excel não carregou. Tente novamente.'); return; }
   if(!(await ensureChronoExcel())){ alert('Biblioteca de estilos do Excel não carregou. Tente novamente.'); return; }
   const wb = XLSX.utils.book_new();
-  const wsTemporal = XLSX.utils.json_to_sheet(fullRows);
-  const wsResumo = XLSX.utils.json_to_sheet(finalRows);
-  applyTemporalSheetStyle(wsTemporal);
-  applyTemporalSheetStyle(wsResumo);
-  XLSX.utils.book_append_sheet(wb, wsTemporal, 'Temporal');
-  XLSX.utils.book_append_sheet(wb, wsResumo, 'Resumo');
-  XLSX.writeFile(wb, 'analise_cronologica_pendoamento.xlsx');
+  const headers = [
+    'Quadra','Disparo','Tiro','Data_Ortofoto','Nome_Ortofoto','Total_Pendões',
+    'Teto_Configurado','Status','Data_Atingimento','Ortofoto_Atingimento','Percentual_Pendoamento'
+  ];
+  const rows = fullRows.map(row => {
+    const ordered = {};
+    headers.forEach(h => ordered[h] = row[h] ?? '');
+    return ordered;
+  });
+  const ws = XLSX.utils.json_to_sheet(rows, {header: headers});
+  applyTemporalSheetStyle(ws);
+  XLSX.utils.book_append_sheet(wb, ws, 'Pendoamento');
+  XLSX.writeFile(wb, 'pendoamento_por_parcela.xlsx');
 }
 
 function exportResumo(){
