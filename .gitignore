@@ -223,6 +223,9 @@ __marimo__/
 *.pt
 *.onnx
 *.engine
+dados_treinamento_yolo/
+modelos_yolo/
+runs/
 
 # TMG runtime uploads generated inside the deployed app
 tmg_data/mosaicos_importados/

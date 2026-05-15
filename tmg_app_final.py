@@ -1848,6 +1848,117 @@ PENDAO_YOLO_CLASSES = (
     "pendão",
 )
 
+YOLO_TRAIN_ROOT = APP_ROOT / "dados_treinamento_yolo" / "pendao_milho"
+YOLO_MODELS_DIR = APP_ROOT / "modelos_yolo"
+YOLO_BEST_MODEL_PATH = YOLO_MODELS_DIR / "pendao_milho_best.pt"
+YOLO_TRAIN_LOG_PATH = YOLO_TRAIN_ROOT / "treino_yolo.log"
+
+
+def garantir_estrutura_treinamento_yolo(base_dir: Path | None = None):
+    base = Path(base_dir or YOLO_TRAIN_ROOT)
+    folders = [
+        base / "images" / "train",
+        base / "images" / "val",
+        base / "labels" / "train",
+        base / "labels" / "val",
+        base / "crops" / "pendao_confirmado",
+        base / "crops" / "falso_positivo",
+        base / "crops" / "pendao_faltante",
+    ]
+    for folder in folders:
+        folder.mkdir(parents=True, exist_ok=True)
+    data_yaml = base / "data.yaml"
+    data_yaml.write_text(
+        "path: dados_treinamento_yolo/pendao_milho\n"
+        "train: images/train\n"
+        "val: images/val\n"
+        "names:\n"
+        "  0: pendao\n",
+        encoding="utf-8",
+    )
+    return base
+
+
+def contar_amostras_treinamento_yolo(base_dir: Path | None = None):
+    base = garantir_estrutura_treinamento_yolo(base_dir)
+    counts = {}
+    for split in ("train", "val"):
+        counts[f"images_{split}"] = len(list((base / "images" / split).glob("*.*")))
+        counts[f"labels_{split}"] = len(list((base / "labels" / split).glob("*.txt")))
+    for kind in ("pendao_confirmado", "falso_positivo", "pendao_faltante"):
+        counts[f"crops_{kind}"] = len(list((base / "crops" / kind).glob("*.*")))
+    counts["total_images"] = counts["images_train"] + counts["images_val"]
+    counts["total_labels"] = counts["labels_train"] + counts["labels_val"]
+    return counts
+
+
+def treinar_yolo_pendoamento(epochs: int = 100, imgsz: int = 960, batch: int = 4):
+    base = garantir_estrutura_treinamento_yolo()
+    counts = contar_amostras_treinamento_yolo(base)
+    if counts["images_train"] < 5:
+        return False, "Treino não iniciado: salve pelo menos 5 imagens em images/train."
+    try:
+        import ultralytics  # noqa: F401
+    except ImportError:
+        return False, "Ultralytics não instalado. Instale com: pip install -U ultralytics"
+
+    YOLO_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = YOLO_TRAIN_LOG_PATH
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    code = f"""
+from pathlib import Path
+import shutil
+
+base = Path(r'{str(base)}')
+log_path = Path(r'{str(log_path)}')
+models_dir = Path(r'{str(YOLO_MODELS_DIR)}')
+models_dir.mkdir(parents=True, exist_ok=True)
+
+def log(msg):
+    with log_path.open('a', encoding='utf-8') as f:
+        f.write(str(msg) + '\\n')
+
+try:
+    import torch
+    from ultralytics import YOLO
+    device = 0 if torch.cuda.is_available() else 'cpu'
+    batch = {int(batch)} if device != 'cpu' else min({int(batch)}, 2)
+    log('Iniciando treino YOLO de pendoamento')
+    log(f'Device: {{device}} | batch={{batch}} | epochs={int(epochs)} | imgsz={int(imgsz)}')
+    model = YOLO('yolov8n.pt')
+    result = model.train(
+        data=str(base / 'data.yaml'),
+        epochs={int(epochs)},
+        imgsz={int(imgsz)},
+        batch=batch,
+        device=device,
+        project='runs/detect',
+        name='pendao_milho',
+        exist_ok=True,
+    )
+    candidate = Path('runs/detect/pendao_milho/weights/best.pt')
+    if not candidate.exists():
+        candidate = Path('runs/detect/train/weights/best.pt')
+    if candidate.exists():
+        target = models_dir / 'pendao_milho_best.pt'
+        shutil.copy2(candidate, target)
+        log(f'Modelo salvo em: {{target}}')
+    else:
+        log('best.pt não encontrado após o treino.')
+except Exception as exc:
+    log(f'ERRO NO TREINO: {{exc}}')
+"""
+    log_path.write_text("Treino YOLO solicitado.\n", encoding="utf-8")
+    popen_kwargs = {
+        "cwd": str(APP_ROOT),
+        "stderr": subprocess.STDOUT,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    with log_path.open("a", encoding="utf-8") as log_handle:
+        subprocess.Popen([sys.executable, "-c", code], stdout=log_handle, **popen_kwargs)
+    return True, f"Treino iniciado em segundo plano. Log: {log_path}"
+
 
 def _pendao_params(params=None) -> dict:
     merged = dict(PENDAO_AVANCADO_PARAMS)
@@ -2289,6 +2400,7 @@ def _pendao_model_candidates():
         os.getenv("TMG_PENDAO_YOLO_MODEL", "").strip(),
     ]
     local_candidates = [
+        YOLO_BEST_MODEL_PATH,
         APP_ROOT / "models" / "pendoes.pt",
         APP_ROOT / "models" / "pendao.pt",
         APP_ROOT / "models" / "tassel.pt",
@@ -11557,6 +11669,47 @@ new ResizeObserver(()=>drawAll()).observe(vc);
             meta_dtp = ""
             st.caption("Depois de anexar, use o resumo lateral do visualizador para clicar e trocar entre as ortofotos carregadas. O teto de pendões trava a primeira data em que a parcela atingiu o valor configurado.")
 
+            with st.expander("🌾 Treino YOLO de pendoamento", expanded=False):
+                yolo_counts = contar_amostras_treinamento_yolo()
+                st.caption(
+                    "Use o botão Treinar YOLO dentro do visualizador para clicar nos pendões e salvar amostras. "
+                    "Quando a pasta local estiver com as imagens/labels, inicie o treino aqui."
+                )
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Imagens treino", yolo_counts["images_train"])
+                m2.metric("Imagens validação", yolo_counts["images_val"])
+                m3.metric("Labels", yolo_counts["total_labels"])
+                yolo_col1, yolo_col2, yolo_col3 = st.columns(3)
+                with yolo_col1:
+                    if st.button("Gerar data.yaml", key="pend_yolo_yaml"):
+                        garantir_estrutura_treinamento_yolo()
+                        st.success(f"data.yaml pronto em {YOLO_TRAIN_ROOT / 'data.yaml'}")
+                with yolo_col2:
+                    if st.button("Treinar modelo YOLO", key="pend_yolo_train"):
+                        ok, msg = treinar_yolo_pendoamento()
+                        (st.success if ok else st.warning)(msg)
+                with yolo_col3:
+                    if st.button("Abrir pasta de treinamento", key="pend_yolo_open_folder"):
+                        garantir_estrutura_treinamento_yolo()
+                        try:
+                            if os.name == "nt":
+                                os.startfile(str(YOLO_TRAIN_ROOT))
+                            else:
+                                subprocess.Popen(["xdg-open", str(YOLO_TRAIN_ROOT)])
+                            st.success("Pasta de treinamento aberta.")
+                        except Exception as exc:
+                            st.info(f"Pasta: {YOLO_TRAIN_ROOT} ({exc})")
+                if YOLO_BEST_MODEL_PATH.exists():
+                    st.success(f"Modelo treinado ativo: {YOLO_BEST_MODEL_PATH}")
+                else:
+                    st.info("Quando o treino terminar, o best.pt será copiado para modelos_yolo/pendao_milho_best.pt e usado automaticamente na análise.")
+                if YOLO_TRAIN_LOG_PATH.exists():
+                    try:
+                        log_text = YOLO_TRAIN_LOG_PATH.read_text(encoding="utf-8", errors="ignore")[-5000:]
+                        st.text_area("Log do treino YOLO", value=log_text, height=130, key="pend_yolo_log", disabled=True)
+                    except Exception:
+                        pass
+
             cron_files = _resettable_ortho_uploader(
                 "📷 Anexar ortofotos para o seletor do visualizador (até 10)",
                 accept_multiple_files=True,
@@ -11792,6 +11945,9 @@ new ResizeObserver(()=>drawAll()).observe(vc);
   .legend { display:flex; flex-wrap:wrap; gap:5px; color:#888; font-size:9px; margin-top:5px; }
   .leg { display:flex; align-items:center; gap:3px; }
   .sw { width:10px; height:10px; border-radius:2px; border:1px solid rgba(255,255,255,.25); }
+  .train-box { border:1px solid #24384c; background:rgba(20,34,48,.45); border-radius:8px; padding:8px; margin:6px 0; }
+  .train-box .row span:first-child { max-width:125px; }
+  .train-status { border:1px solid #26384a; background:#0b1118; border-radius:6px; color:#8fbde8; font-size:9px; padding:6px; min-height:34px; line-height:1.35; margin-top:5px; }
   #btnReviewMode, #btnExportCSV, #btnExportResumo, #btnExportCompleto, #btnExportImagem,
   .stats, #statFirstDate, .legend, #reviewPanel { display:none !important; }
 </style>
@@ -11832,6 +11988,22 @@ new ResizeObserver(()=>drawAll()).observe(vc);
     <button class="btn blue" id="btnReviewMode">✎ Revisar Parcela</button>
     <button class="btn" id="btnFitChrono">⤢ Ajustar à tela</button>
     <button class="btn red" id="btnClearChrono">Limpar seletor</button>
+    <div class="train-box">
+      <button class="btn blue" id="btnTrainYolo">🎯 Treinar YOLO</button>
+      <div class="row"><span>Tipo de amostra</span><select id="trainSampleType">
+        <option value="pendao_confirmado">Pendão confirmado</option>
+        <option value="pendao_faltante">Pendão faltante</option>
+        <option value="falso_positivo">Falso positivo</option>
+      </select></div>
+      <div class="row"><span>Tamanho recorte</span><input id="trainCropSize" type="number" min="48" max="256" step="16" value="128" style="width:78px;text-align:center;"></div>
+      <div class="row"><span>Amostras salvas</span><b id="trainSampleCount" style="color:#75b7ff;">0</b></div>
+      <button class="btn" id="btnPickTrainDir">Abrir pasta de treinamento</button>
+      <button class="btn" id="btnGenerateYaml">Gerar data.yaml</button>
+      <button class="btn" id="btnDownloadDataset">Baixar dataset YOLO</button>
+      <button class="btn green" id="btnTrainModelYolo">Treinar modelo YOLO</button>
+      <button class="btn red" id="btnStopTrainMode">Parar modo treino</button>
+      <div class="train-status" id="trainStatus">Modo treino parado. Clique em Treinar YOLO e depois clique sobre os pendões.</div>
+    </div>
     <div class="progress"><div id="cronProgress"></div></div>
     <div class="subtle" id="cronStatus">Selecione a ortofoto no resumo, marque o grid e execute a análise. O teto configurado define o travamento.</div>
 
@@ -11891,6 +12063,16 @@ const btnExportXLSX = document.getElementById('btnExportXLSX');
 const btnExportResumo = document.getElementById('btnExportResumo');
 const btnExportCompleto = document.getElementById('btnExportCompleto');
 const btnExportImagem = document.getElementById('btnExportImagem');
+const btnTrainYolo = document.getElementById('btnTrainYolo');
+const trainSampleType = document.getElementById('trainSampleType');
+const trainCropSize = document.getElementById('trainCropSize');
+const trainSampleCount = document.getElementById('trainSampleCount');
+const btnPickTrainDir = document.getElementById('btnPickTrainDir');
+const btnGenerateYaml = document.getElementById('btnGenerateYaml');
+const btnDownloadDataset = document.getElementById('btnDownloadDataset');
+const btnTrainModelYolo = document.getElementById('btnTrainModelYolo');
+const btnStopTrainMode = document.getElementById('btnStopTrainMode');
+const trainStatus = document.getElementById('trainStatus');
 
 let images = [];
 let loaded = 0;
@@ -11904,6 +12086,10 @@ let resultsByParcel = {};
 let finalRows = [];
 let fullRows = [];
 let manualReviews = {};
+let trainYoloMode = false;
+let trainingDirHandle = null;
+let yoloSamples = [];
+let yoloTrainMarks = [];
 const tempCanvas = document.createElement('canvas');
 const tempCtx = tempCanvas.getContext('2d', { willReadFrequently:true });
 let tempPrepared = -1;
@@ -11916,6 +12102,198 @@ function fmtPct(v){ return Number.isFinite(v) ? v.toFixed(2) : ''; }
 function quoteCSV(v){
   const s = (v === null || v === undefined) ? '' : String(v);
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function trainDataYaml(){
+  return 'path: dados_treinamento_yolo/pendao_milho\ntrain: images/train\nval: images/val\nnames:\n  0: pendao\n';
+}
+
+function sanitizeName(value){
+  return String(value || 'amostra').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9_-]+/g,'_').replace(/^_+|_+$/g,'').slice(0,80) || 'amostra';
+}
+
+function canvasToBlob(cv, type='image/jpeg', quality=0.94){
+  return new Promise(resolve => cv.toBlob(resolve, type, quality));
+}
+
+async function getDirHandle(root, parts){
+  let dir = root;
+  for(const part of parts){
+    dir = await dir.getDirectoryHandle(part, {create:true});
+  }
+  return dir;
+}
+
+async function writeTrainingFile(parts, filename, content){
+  if(!trainingDirHandle) return false;
+  const dir = await getDirHandle(trainingDirHandle, ['dados_treinamento_yolo','pendao_milho', ...parts]);
+  const file = await dir.getFileHandle(filename, {create:true});
+  const writable = await file.createWritable();
+  await writable.write(content);
+  await writable.close();
+  return true;
+}
+
+async function generateYamlToTrainingDir(){
+  if(!trainingDirHandle) return false;
+  const dir = await getDirHandle(trainingDirHandle, ['dados_treinamento_yolo','pendao_milho']);
+  const file = await dir.getFileHandle('data.yaml', {create:true});
+  const writable = await file.createWritable();
+  await writable.write(trainDataYaml());
+  await writable.close();
+  return true;
+}
+
+function autoYoloBboxFromCrop(cropCtx, size){
+  const data = cropCtx.getImageData(0,0,size,size).data;
+  let minX=size, minY=size, maxX=-1, maxY=-1, count=0;
+  const center=size/2;
+  for(let y=0; y<size; y++){
+    for(let x=0; x<size; x++){
+      const i=(y*size+x)*4;
+      const r=data[i], g=data[i+1], b=data[i+2];
+      const score=tasselScore(r,g,b);
+      const exg=2*g-r-b;
+      const yell=((r+g)*0.5)-b;
+      const dist=Math.hypot(x-center,y-center);
+      const candidate=(score>=3.45 || (yell>=16 && exg<62 && Math.max(r,g,b)>88)) && dist<=size*0.43;
+      if(candidate){
+        if(x<minX) minX=x; if(x>maxX) maxX=x;
+        if(y<minY) minY=y; if(y>maxY) maxY=y;
+        count++;
+      }
+    }
+  }
+  if(count < 8 || maxX < minX || maxY < minY){
+    return {xc:0.5,yc:0.5,w:0.45,h:0.45,auto:false};
+  }
+  const pad=Math.max(3, Math.round(size*0.04));
+  minX=clamp(minX-pad,0,size-1); minY=clamp(minY-pad,0,size-1);
+  maxX=clamp(maxX+pad,0,size-1); maxY=clamp(maxY+pad,0,size-1);
+  const w=Math.max(4,maxX-minX+1), h=Math.max(4,maxY-minY+1);
+  return {
+    xc:clamp((minX+w/2)/size,0.02,0.98),
+    yc:clamp((minY+h/2)/size,0.02,0.98),
+    w:clamp(w/size,0.08,0.92),
+    h:clamp(h/size,0.08,0.92),
+    auto:true
+  };
+}
+
+async function pickTrainingDirectory(){
+  if(!window.showDirectoryPicker){
+    trainStatus.textContent = 'Seu navegador não permite salvar direto em pasta. Use Baixar dataset YOLO.';
+    return false;
+  }
+  try{
+    trainingDirHandle = await window.showDirectoryPicker({mode:'readwrite'});
+    await generateYamlToTrainingDir();
+    trainStatus.textContent = 'Pasta conectada. Os cliques serão salvos em dados_treinamento_yolo/pendao_milho.';
+    return true;
+  }catch(e){
+    trainStatus.textContent = 'Seleção de pasta cancelada.';
+    return false;
+  }
+}
+
+async function saveYoloTrainingSample(pt){
+  if(!images[activeIdx] || !images[activeIdx].complete){
+    trainStatus.textContent = 'Imagem ainda não carregada.';
+    return;
+  }
+  const size = clamp(parseInt(trainCropSize.value || 128), 48, 256);
+  const type = trainSampleType.value || 'pendao_confirmado';
+  const split = ((yoloSamples.length + 1) % 5 === 0) ? 'val' : 'train';
+  const positive = type !== 'falso_positivo';
+  const crop = document.createElement('canvas');
+  crop.width = size; crop.height = size;
+  const cctx = crop.getContext('2d', {willReadFrequently:true});
+  cctx.fillStyle = '#111';
+  cctx.fillRect(0,0,size,size);
+  const sx = Math.round(pt.x - size/2);
+  const sy = Math.round(pt.y - size/2);
+  const srcX = clamp(sx, 0, imgW(activeIdx));
+  const srcY = clamp(sy, 0, imgH(activeIdx));
+  const srcX2 = clamp(sx + size, 0, imgW(activeIdx));
+  const srcY2 = clamp(sy + size, 0, imgH(activeIdx));
+  const sw = Math.max(1, srcX2-srcX);
+  const sh = Math.max(1, srcY2-srcY);
+  const dx = srcX - sx;
+  const dy = srcY - sy;
+  cctx.drawImage(images[activeIdx], srcX, srcY, sw, sh, dx, dy, sw, sh);
+  const bbox = positive ? autoYoloBboxFromCrop(cctx, size) : {xc:0.5,yc:0.5,w:0,h:0,auto:false};
+  const now = new Date();
+  const stamp = now.toISOString().replace(/[-:.TZ]/g,'').slice(0,14);
+  const baseName = sanitizeName('pendao_' + stamp + '_o' + (activeIdx+1) + '_x' + Math.round(pt.x) + '_y' + Math.round(pt.y) + '_' + type);
+  const imgName = baseName + '.jpg';
+  const labelName = baseName + '.txt';
+  const blob = await canvasToBlob(crop, 'image/jpeg', 0.95);
+  const labelText = positive
+    ? `0 ${bbox.xc.toFixed(6)} ${bbox.yc.toFixed(6)} ${bbox.w.toFixed(6)} ${bbox.h.toFixed(6)}\n`
+    : '';
+  const origW = Number(ORTHOS[activeIdx]?.orig_width || imgW(activeIdx));
+  const origH = Number(ORTHOS[activeIdx]?.orig_height || imgH(activeIdx));
+  const meta = {
+    file: imgName,
+    type,
+    split,
+    preview_x: Number(pt.x.toFixed(2)),
+    preview_y: Number(pt.y.toFixed(2)),
+    original_x: Number((pt.x * origW / imgW(activeIdx)).toFixed(2)),
+    original_y: Number((pt.y * origH / imgH(activeIdx)).toFixed(2)),
+    crop_size: size,
+    bbox_auto: bbox.auto,
+    ortho: ORTHOS[activeIdx]?.name || '',
+    date: ORTHOS[activeIdx]?.date || ''
+  };
+  yoloSamples.push({imgName,labelName,blob,labelText,type,split,meta});
+  yoloTrainMarks.push({x:pt.x,y:pt.y,size,type,idx:activeIdx});
+  trainSampleCount.textContent = String(yoloSamples.length);
+  try{
+    if(trainingDirHandle){
+      await writeTrainingFile(['images', split], imgName, blob);
+      await writeTrainingFile(['labels', split], labelName, labelText);
+      await writeTrainingFile(['crops', type], imgName, blob);
+      await writeTrainingFile(['crops', type], baseName + '.json', JSON.stringify(meta, null, 2));
+      await generateYamlToTrainingDir();
+      trainStatus.textContent = 'Amostra de pendão salva para treinamento YOLO.';
+    } else {
+      trainStatus.textContent = 'Amostra guardada no navegador. Use Baixar dataset YOLO ou Abrir pasta de treinamento.';
+    }
+  }catch(e){
+    trainStatus.textContent = 'Amostra criada, mas falhou ao salvar na pasta: ' + e.message;
+  }
+  drawAll();
+}
+
+async function downloadYoloDataset(){
+  if(!yoloSamples.length){
+    alert('Nenhuma amostra salva nesta sessão.');
+    return;
+  }
+  if(typeof JSZip === 'undefined'){
+    await loadScriptOnce('https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js');
+  }
+  if(typeof JSZip === 'undefined'){
+    alert('Não foi possível carregar o gerador ZIP. Use Abrir pasta de treinamento.');
+    return;
+  }
+  const zip = new JSZip();
+  const root = zip.folder('dados_treinamento_yolo').folder('pendao_milho');
+  root.file('data.yaml', trainDataYaml());
+  for(const s of yoloSamples){
+    const arrayBuffer = await s.blob.arrayBuffer();
+    root.folder('images').folder(s.split).file(s.imgName, arrayBuffer);
+    root.folder('labels').folder(s.split).file(s.labelName, s.labelText);
+    root.folder('crops').folder(s.type).file(s.imgName, arrayBuffer);
+    root.folder('crops').folder(s.type).file(s.imgName.replace(/\.jpg$/i,'.json'), JSON.stringify(s.meta, null, 2));
+  }
+  const content = await zip.generateAsync({type:'blob'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(content);
+  a.download = 'dados_treinamento_yolo_pendao_milho.zip';
+  a.click();
+  trainStatus.textContent = 'Dataset YOLO baixado em ZIP.';
 }
 
 function applyViewerConfig(clearResults=false){
@@ -12725,6 +13103,23 @@ function drawMarks(idx=activeIdx){
   }
 }
 
+function drawTrainingMarks(){
+  for(const mark of yoloTrainMarks){
+    if(mark.idx !== activeIdx) continue;
+    ctx.save();
+    const s = clamp(Number(mark.size || 128), 48, 256) / 2;
+    ctx.strokeStyle = mark.type === 'falso_positivo' ? '#ff55ff' : '#208cff';
+    ctx.lineWidth = 2.2 / scale;
+    ctx.shadowColor = 'rgba(32,140,255,.75)';
+    ctx.shadowBlur = 7 / scale;
+    ctx.strokeRect(mark.x - s, mark.y - s, s * 2, s * 2);
+    const xSize = clamp(s * 0.16, 6, 18) / scale;
+    ctx.beginPath(); ctx.moveTo(mark.x - xSize, mark.y - xSize); ctx.lineTo(mark.x + xSize, mark.y + xSize); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(mark.x - xSize, mark.y + xSize); ctx.lineTo(mark.x + xSize, mark.y - xSize); ctx.stroke();
+    ctx.restore();
+  }
+}
+
 function drawAll(){
   const W = viewer.clientWidth, H = viewer.clientHeight;
   canvas.width = W; canvas.height = H;
@@ -12741,6 +13136,7 @@ function drawAll(){
   }
   drawGrid(activeIdx);
   drawMarks(activeIdx);
+  drawTrainingMarks();
   if(gridRatios.length > 0){
     const pts = currentGridPoints(activeIdx);
     pts.forEach((p,i)=>{
@@ -12916,6 +13312,14 @@ viewer.addEventListener('wheel', e => {
 
 viewer.addEventListener('mousedown', e => {
   const pt = screenToImg(e.clientX,e.clientY);
+  if(trainYoloMode){
+    if(pt.x < 0 || pt.y < 0 || pt.x > imgW(activeIdx) || pt.y > imgH(activeIdx)){
+      trainStatus.textContent = 'Clique dentro da ortofoto para salvar a amostra.';
+      return;
+    }
+    saveYoloTrainingSample(pt);
+    return;
+  }
   const hitGridPoint = gridPointIndexAt(pt);
   if(hitGridPoint >= 0){
     gridDragPoint = hitGridPoint;
@@ -13016,6 +13420,38 @@ btnExportXLSX.onclick = exportExcel;
 btnExportResumo.onclick = exportResumo;
 btnExportCompleto.onclick = () => exportRows(fullRows, 'dados_completos_por_ortofoto.csv');
 btnExportImagem.onclick = exportImage;
+btnTrainYolo.onclick = () => {
+  trainYoloMode = !trainYoloMode;
+  markGridMode = false;
+  reviewMode = false;
+  btnTrainYolo.classList.toggle('active', trainYoloMode);
+  btnMarkGrid.classList.remove('active');
+  btnReviewMode.classList.remove('active');
+  trainStatus.textContent = trainYoloMode
+    ? 'Modo treino ativo: clique no pendão para salvar crop e label YOLO.'
+    : 'Modo treino parado.';
+  drawAll();
+};
+btnStopTrainMode.onclick = () => {
+  trainYoloMode = false;
+  btnTrainYolo.classList.remove('active');
+  trainStatus.textContent = 'Modo treino parado.';
+  drawAll();
+};
+btnPickTrainDir.onclick = pickTrainingDirectory;
+btnGenerateYaml.onclick = async () => {
+  if(!trainingDirHandle && !(await pickTrainingDirectory())) return;
+  try{
+    await generateYamlToTrainingDir();
+    trainStatus.textContent = 'data.yaml gerado na pasta de treinamento.';
+  }catch(e){
+    trainStatus.textContent = 'Falha ao gerar data.yaml: ' + e.message;
+  }
+};
+btnDownloadDataset.onclick = downloadYoloDataset;
+btnTrainModelYolo.onclick = () => {
+  trainStatus.textContent = 'Para treinar de verdade, salve as amostras na pasta e clique no botão Streamlit "Treinar modelo YOLO" abaixo/acima do visualizador.';
+};
 
 setupViewerConfigInputs();
 setupDates();
