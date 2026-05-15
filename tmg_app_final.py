@@ -2,7 +2,7 @@ import sys
 import streamlit as st
 import streamlit.components.v1 as components
 from pathlib import Path
-from PIL import Image, ImageFile
+from PIL import Image, ImageFile, ImageDraw
 import os
 import shutil
 import base64
@@ -22,6 +22,13 @@ import subprocess
 import sqlite3
 from datetime import datetime, date
 import pandas as pd
+
+try:
+    from streamlit_image_coordinates import streamlit_image_coordinates
+    HAS_STREAMLIT_IMAGE_COORDINATES = True
+except ImportError:
+    streamlit_image_coordinates = None
+    HAS_STREAMLIT_IMAGE_COORDINATES = False
 
 APP_ROOT = Path(__file__).resolve().parent
 
@@ -1892,6 +1899,170 @@ def contar_amostras_treinamento_yolo(base_dir: Path | None = None):
     return counts
 
 
+def assinatura_modelo_yolo_pendao() -> str:
+    if YOLO_BEST_MODEL_PATH.exists():
+        stat = YOLO_BEST_MODEL_PATH.stat()
+        return f"{YOLO_BEST_MODEL_PATH.name}:{stat.st_size}:{stat.st_mtime_ns}"
+    return "sem-modelo-treinado"
+
+
+def _nome_seguro_treino_yolo(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value or "ortofoto")).strip("_")
+    return safe[:70] or "ortofoto"
+
+
+def _bbox_yolo_automatica_do_crop(crop_rgb, sample_type: str, params=None):
+    crop = _as_rgb_uint8(crop_rgb)
+    if crop is None or sample_type == "falso_positivo":
+        return None
+    h, w = crop.shape[:2]
+    fallback = (0.5, 0.5, 0.45, 0.45)
+    try:
+        local_params = _pendao_params(params)
+        local_params.update({
+            "analysis_max_dim": max(w, h),
+            "area_min": 4,
+            "area_max": max(64, int(w * h * 0.55)),
+            "area_min_fraction": 0.0002,
+            "area_max_fraction": 0.55,
+            "nms_distance": max(8, min(w, h) * 0.18),
+            "merge_distance": max(8, min(w, h) * 0.18),
+        })
+        result = detectar_pendoes_opencv_puro(crop, grade=None, params=local_params)
+        detections = result.get("parcelas", [{}])[0].get("detections", [])
+        if detections:
+            center_x, center_y = w / 2.0, h / 2.0
+            best = min(
+                detections,
+                key=lambda det: (
+                    (float(det.get("center", (center_x, center_y))[0]) - center_x) ** 2
+                    + (float(det.get("center", (center_x, center_y))[1]) - center_y) ** 2
+                    - float(det.get("score", 0)) * 20.0
+                ),
+            )
+            bx, by, bw, bh = [float(v) for v in best.get("bbox", (w * 0.275, h * 0.275, w * 0.45, h * 0.45))]
+            pad = max(3.0, min(w, h) * 0.04)
+            x1 = max(0.0, bx - pad)
+            y1 = max(0.0, by - pad)
+            x2 = min(float(w), bx + bw + pad)
+            y2 = min(float(h), by + bh + pad)
+            if x2 > x1 and y2 > y1:
+                return (
+                    ((x1 + x2) / 2.0) / w,
+                    ((y1 + y2) / 2.0) / h,
+                    max(0.06, min(0.92, (x2 - x1) / w)),
+                    max(0.06, min(0.92, (y2 - y1) / h)),
+                )
+    except Exception:
+        pass
+    return fallback
+
+
+def salvar_amostra_treinamento_yolo(
+    file_bytes: bytes,
+    x: float,
+    y: float,
+    sample_type: str = "pendao_confirmado",
+    crop_size: int = 128,
+    source_name: str = "",
+    source_date: str = "",
+):
+    base = garantir_estrutura_treinamento_yolo()
+    sample_type = sample_type if sample_type in {"pendao_confirmado", "pendao_faltante", "falso_positivo"} else "pendao_confirmado"
+    crop_size = int(np.clip(int(crop_size or 128), 48, 256))
+    img = Image.open(BytesIO(file_bytes)).convert("RGB")
+    img_w, img_h = img.size
+    if img_w <= 0 or img_h <= 0:
+        raise ValueError("Imagem inválida para salvar amostra YOLO.")
+    cx = int(np.clip(round(float(x)), 0, img_w - 1))
+    cy = int(np.clip(round(float(y)), 0, img_h - 1))
+    half = crop_size // 2
+    left, top = cx - half, cy - half
+    right, bottom = left + crop_size, top + crop_size
+    crop_canvas = Image.new("RGB", (crop_size, crop_size), (0, 0, 0))
+    src_left = max(0, left)
+    src_top = max(0, top)
+    src_right = min(img_w, right)
+    src_bottom = min(img_h, bottom)
+    if src_right <= src_left or src_bottom <= src_top:
+        raise ValueError("Clique fora da área válida da imagem.")
+    crop_piece = img.crop((src_left, src_top, src_right, src_bottom))
+    crop_canvas.paste(crop_piece, (src_left - left, src_top - top))
+
+    counts = contar_amostras_treinamento_yolo(base)
+    split = "val" if (counts["total_images"] + 1) % 5 == 0 else "train"
+    safe_source = _nome_seguro_treino_yolo(Path(source_name or "ortofoto").stem)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"{stamp}_{safe_source}_{sample_type}.jpg"
+    image_path = base / "images" / split / filename
+    label_path = base / "labels" / split / f"{Path(filename).stem}.txt"
+    crop_path = base / "crops" / sample_type / filename
+    meta_path = base / "crops" / sample_type / f"{Path(filename).stem}.json"
+
+    crop_canvas.save(image_path, format="JPEG", quality=95)
+    crop_canvas.save(crop_path, format="JPEG", quality=95)
+    bbox = _bbox_yolo_automatica_do_crop(np.array(crop_canvas), sample_type)
+    if sample_type == "falso_positivo":
+        label_text = ""
+    else:
+        if not bbox:
+            bbox = (0.5, 0.5, 0.45, 0.45)
+        label_text = "0 {:.6f} {:.6f} {:.6f} {:.6f}\n".format(*bbox)
+    label_path.write_text(label_text, encoding="utf-8")
+    metadata = {
+        "id": Path(filename).stem,
+        "source_name": source_name,
+        "source_date": source_date,
+        "sample_type": sample_type,
+        "split": split,
+        "original_x": cx,
+        "original_y": cy,
+        "crop_size": crop_size,
+        "image": str(image_path),
+        "label": str(label_path),
+        "crop": str(crop_path),
+        "bbox_yolo": bbox,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    return metadata
+
+
+def listar_marcas_treinamento_yolo(source_name: str = "", source_date: str = ""):
+    base = garantir_estrutura_treinamento_yolo()
+    marks = []
+    for meta_path in (base / "crops").glob("*/*.json"):
+        try:
+            item = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if source_name and item.get("source_name") != source_name:
+            continue
+        if source_date and item.get("source_date") != source_date:
+            continue
+        marks.append(item)
+    return sorted(marks, key=lambda it: it.get("created_at", ""))
+
+
+def preparar_preview_treino_yolo(file_bytes: bytes, source_name: str = "", source_date: str = "", max_size=(1180, 680)):
+    img = Image.open(BytesIO(file_bytes)).convert("RGB")
+    orig_w, orig_h = img.size
+    preview = img.copy()
+    preview.thumbnail(max_size, Image.LANCZOS)
+    scale_x = preview.size[0] / max(1, orig_w)
+    scale_y = preview.size[1] / max(1, orig_h)
+    draw = ImageDraw.Draw(preview)
+    for mark in listar_marcas_treinamento_yolo(source_name, source_date)[-500:]:
+        mx = int(float(mark.get("original_x", 0)) * scale_x)
+        my = int(float(mark.get("original_y", 0)) * scale_y)
+        color = "#32a9ff" if mark.get("sample_type") != "falso_positivo" else "#ff4fd8"
+        size = 8
+        draw.line((mx - size, my - size, mx + size, my + size), fill=color, width=2)
+        draw.line((mx - size, my + size, mx + size, my - size), fill=color, width=2)
+        draw.rectangle((mx - size - 2, my - size - 2, mx + size + 2, my + size + 2), outline=color, width=1)
+    return preview, (orig_w, orig_h), (scale_x, scale_y)
+
+
 def treinar_yolo_pendoamento(epochs: int = 100, imgsz: int = 960, batch: int = 4):
     base = garantir_estrutura_treinamento_yolo()
     counts = contar_amostras_treinamento_yolo(base)
@@ -2680,7 +2851,7 @@ def _serializar_deteccoes_pendao_preview(result, rgb, preview_dims):
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
-def preparar_deteccoes_pendoamento_hibrido(file_bytes: bytes, filename: str, preview_dims: tuple):
+def preparar_deteccoes_pendoamento_hibrido(file_bytes: bytes, filename: str, preview_dims: tuple, model_signature: str = ""):
     rgb = _decode_rgb_for_pendao(file_bytes, filename)
     if rgb is None:
         return {
@@ -11672,8 +11843,8 @@ new ResizeObserver(()=>drawAll()).observe(vc);
             with st.expander("🌾 Treino YOLO de pendoamento", expanded=False):
                 yolo_counts = contar_amostras_treinamento_yolo()
                 st.caption(
-                    "Use o botão Treinar YOLO dentro do visualizador para clicar nos pendões e salvar amostras. "
-                    "Quando a pasta local estiver com as imagens/labels, inicie o treino aqui."
+                    f"A estrutura do YOLO é criada automaticamente em {YOLO_TRAIN_ROOT}. "
+                    "Depois de anexar as ortofotos, abra o treino por clique para selecionar os pendões e salvar as amostras."
                 )
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Imagens treino", yolo_counts["images_train"])
@@ -11681,7 +11852,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                 m3.metric("Labels", yolo_counts["total_labels"])
                 yolo_col1, yolo_col2, yolo_col3 = st.columns(3)
                 with yolo_col1:
-                    if st.button("Gerar data.yaml", key="pend_yolo_yaml"):
+                    if st.button("Salvar treino / gerar data.yaml", key="pend_yolo_yaml"):
                         garantir_estrutura_treinamento_yolo()
                         st.success(f"data.yaml pronto em {YOLO_TRAIN_ROOT / 'data.yaml'}")
                 with yolo_col2:
@@ -11792,7 +11963,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                                 cron_errors.append(f"{cron_name}: {err}")
                                 continue
                             try:
-                                pendao_result = preparar_deteccoes_pendoamento_hibrido(raw, cron_name, tuple(dims))
+                                pendao_result = preparar_deteccoes_pendoamento_hibrido(raw, cron_name, tuple(dims), assinatura_modelo_yolo_pendao())
                                 pendao_detections = pendao_result.get("detections", [])
                                 pendao_status = pendao_result.get("status", "")
                                 pendao_mode = pendao_result.get("mode", "OpenCV fallback")
@@ -11825,6 +11996,128 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                 cron_orthos = sorted(cron_orthos, key=lambda it: (it["date"], it["order"]))
 
                 if cron_orthos:
+                    with st.expander("🎯 Treinar YOLO por clique na ortofoto", expanded=False):
+                        garantir_estrutura_treinamento_yolo()
+                        st.caption(
+                            f"Pasta automática do treino: {YOLO_TRAIN_ROOT}. "
+                            "Clique nos pendões na imagem abaixo; cada clique salva o recorte e o label YOLO automaticamente."
+                        )
+                        train_entries = sorted(cron_entries, key=lambda it: (it["date"], it["idx"]))
+                        train_labels = [
+                            f"{idx + 1} - {entry['name']} ({entry['date']})"
+                            for idx, entry in enumerate(train_entries)
+                        ]
+                        train_col_a, train_col_b, train_col_c = st.columns([2, 1, 1])
+                        with train_col_a:
+                            train_idx = st.selectbox(
+                                "Ortofoto para treinar",
+                                options=list(range(len(train_entries))),
+                                format_func=lambda i: train_labels[i],
+                                key="pend_yolo_auto_ortho",
+                            )
+                        with train_col_b:
+                            train_sample_type = st.selectbox(
+                                "Tipo",
+                                options=["pendao_confirmado", "pendao_faltante", "falso_positivo"],
+                                format_func=lambda value: {
+                                    "pendao_confirmado": "Pendão confirmado",
+                                    "pendao_faltante": "Pendão faltante",
+                                    "falso_positivo": "Falso positivo",
+                                }.get(value, value),
+                                key="pend_yolo_auto_tipo",
+                            )
+                        with train_col_c:
+                            train_crop_size = st.number_input(
+                                "Recorte",
+                                min_value=48,
+                                max_value=256,
+                                value=128,
+                                step=16,
+                                key="pend_yolo_auto_crop",
+                            )
+
+                        selected_train_entry = train_entries[int(train_idx)]
+                        if not HAS_STREAMLIT_IMAGE_COORDINATES:
+                            st.warning("Instale a dependência para clique na imagem: pip install streamlit-image-coordinates")
+                        else:
+                            try:
+                                preview_img, original_dims, scale = preparar_preview_treino_yolo(
+                                    selected_train_entry["raw"],
+                                    selected_train_entry["name"],
+                                    selected_train_entry["date"],
+                                )
+                                st.caption(
+                                    "Modo treino ativo: clique exatamente no centro do pendão. "
+                                    "X azul = amostra positiva/faltante salva; X rosa = falso positivo."
+                                )
+                                click = streamlit_image_coordinates(
+                                    preview_img,
+                                    key=f"pend_yolo_auto_click_{selected_train_entry['idx']}_{selected_train_entry['date']}_{train_sample_type}",
+                                    width=preview_img.size[0],
+                                )
+                                if click and "x" in click and "y" in click:
+                                    orig_x = float(click["x"]) / max(scale[0], 1e-9)
+                                    orig_y = float(click["y"]) / max(scale[1], 1e-9)
+                                    token = (
+                                        f"{selected_train_entry['idx']}|{train_sample_type}|{int(train_crop_size)}|"
+                                        f"{int(round(orig_x))}|{int(round(orig_y))}"
+                                    )
+                                    if st.session_state.get("pend_yolo_last_click_token") != token:
+                                        meta = salvar_amostra_treinamento_yolo(
+                                            selected_train_entry["raw"],
+                                            orig_x,
+                                            orig_y,
+                                            train_sample_type,
+                                            int(train_crop_size),
+                                            selected_train_entry["name"],
+                                            selected_train_entry["date"],
+                                        )
+                                        st.session_state["pend_yolo_last_click_token"] = token
+                                        try:
+                                            preparar_deteccoes_pendoamento_hibrido.clear()
+                                        except Exception:
+                                            pass
+                                        st.success(
+                                            "Amostra salva para treino YOLO: "
+                                            f"{Path(meta['image']).name} ({meta['split']})."
+                                        )
+                                        st.rerun()
+                            except Exception as exc:
+                                st.warning(f"Não foi possível preparar o treino por clique: {exc}")
+
+                        yolo_counts_auto = contar_amostras_treinamento_yolo()
+                        ma, mb, mc, md = st.columns(4)
+                        ma.metric("Treino", yolo_counts_auto["images_train"])
+                        mb.metric("Validação", yolo_counts_auto["images_val"])
+                        mc.metric("Labels", yolo_counts_auto["total_labels"])
+                        md.metric("Amostras", yolo_counts_auto["total_images"])
+                        act_a, act_b, act_c = st.columns(3)
+                        with act_a:
+                            if st.button("Salvar treino / atualizar data.yaml", key="pend_yolo_auto_save"):
+                                garantir_estrutura_treinamento_yolo()
+                                st.success(f"Treino salvo e data.yaml atualizado em {YOLO_TRAIN_ROOT / 'data.yaml'}")
+                        with act_b:
+                            if st.button("Treinar modelo YOLO agora", key="pend_yolo_auto_train"):
+                                ok, msg = treinar_yolo_pendoamento()
+                                (st.success if ok else st.warning)(msg)
+                        with act_c:
+                            if st.button("Abrir pasta do treino", key="pend_yolo_auto_open"):
+                                try:
+                                    if os.name == "nt":
+                                        os.startfile(str(YOLO_TRAIN_ROOT))
+                                    else:
+                                        subprocess.Popen(["xdg-open", str(YOLO_TRAIN_ROOT)])
+                                    st.success("Pasta de treinamento aberta.")
+                                except Exception as exc:
+                                    st.info(f"Pasta: {YOLO_TRAIN_ROOT} ({exc})")
+                        if YOLO_BEST_MODEL_PATH.exists():
+                            st.success(
+                                "Modelo treinado ativo. O botão Análise de Pendoamento usará este best.pt automaticamente: "
+                                f"{YOLO_BEST_MODEL_PATH}"
+                            )
+                        else:
+                            st.info("Ainda não existe best.pt treinado. A análise continua usando YOLO-World/OpenCV até o treino gerar o modelo.")
+
                     cron_config = {
                         "nomeAnalise": cron_nome_analise,
                         "rows": int(cron_rows),
