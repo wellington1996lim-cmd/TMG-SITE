@@ -10730,19 +10730,18 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                         border-radius:10px;background:linear-gradient(145deg,#151515,#0b0b0b);'>
                 <div style='color:#ff8c00;font-weight:800;font-size:0.95rem;letter-spacing:1.6px;
                             text-transform:uppercase;'>
-                    🌾 Análise Cronológica de Pendoamento
+                    🖼️ Resumo / Seletor de Ortofotos
                 </div>
                 <div style='color:#777;font-size:0.78rem;margin-top:4px;'>
-                    Compare até 10 ortofotos da mesma área, mantendo o grid fixo para identificar a primeira data de atingimento por parcela.
+                    Anexe até 10 ortofotos da mesma área. A lista de resumo aparece no próprio visualizador único; ao clicar em uma ortofoto, a imagem troca no mesmo painel.
                 </div>
             </div>""", unsafe_allow_html=True)
 
-            st.markdown("##### Fluxo simples")
             p1, p2, p3, p4 = st.columns([2, 1, 1, 1])
             with p1:
                 cron_nome_analise = st.text_input(
-                    "Nome da análise",
-                    value="Pendoamento cronológico",
+                    "Nome",
+                    value="Pendoamento",
                     key="pend_cron_nome_analise"
                 )
             with p2:
@@ -10775,13 +10774,13 @@ new ResizeObserver(()=>drawAll()).observe(vc);
             meta_parental2 = ""
             meta_pop_parental2 = ""
             meta_dtp = ""
-            st.caption("O limite fica travado em 50% do teto informado. Depois de anexar, use Próxima/Anterior no visualizador para conferir cada data.")
+            st.caption("Depois de anexar, use o resumo lateral do visualizador para clicar e trocar entre as ortofotos carregadas.")
 
             cron_files = _resettable_ortho_uploader(
-                "📷 Anexar ortofotos cronológicas de pendoamento (até 10)",
+                "📷 Anexar ortofotos para o seletor do visualizador (até 10)",
                 accept_multiple_files=True,
                 key="pend_cron_ortos",
-                help="Use ortofotos da mesma área, em datas diferentes. O grid marcado será mantido fixo em todas."
+                help="Use até 10 ortofotos da mesma área. O grid marcado será mantido no visualizador único."
             )
 
             cron_items = []
@@ -10792,9 +10791,9 @@ new ResizeObserver(()=>drawAll()).observe(vc);
             if cron_items:
                 selected_cron_items = cron_items[:10]
                 if len(cron_items) > 10:
-                    st.warning("Foram anexadas mais de 10 ortofotos. A análise cronológica usará somente as 10 primeiras.")
+                    st.warning("Foram anexadas mais de 10 ortofotos. O seletor usará somente as 10 primeiras.")
 
-                st.caption("Revise a data de cada ortofoto. A ordem cronológica será organizada automaticamente pela data informada.")
+                st.caption("Revise o nome e a data de cada ortofoto. A lista será organizada automaticamente pela data informada.")
                 date_cols = st.columns(min(5, len(selected_cron_items)))
                 cron_entries = []
                 for idx, cron_item in enumerate(selected_cron_items):
@@ -10818,11 +10817,34 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                         "date": cron_date.isoformat()
                     })
 
-                ordem_preview = [
-                    {"Ordem": pos + 1, "Ortofoto": item["name"], "Data": item["date"]}
-                    for pos, item in enumerate(sorted(cron_entries, key=lambda it: (it["date"], it["idx"])))
-                ]
-                st.dataframe(ordem_preview, use_container_width=True, hide_index=True)
+                ordem_preview = sorted(cron_entries, key=lambda it: (it["date"], it["idx"]))
+                resumo_cards = []
+                for slot_idx in range(10):
+                    if slot_idx < len(ordem_preview):
+                        item = ordem_preview[slot_idx]
+                        resumo_cards.append(
+                            "<div style='border:1px solid #ff8c00;background:#201303;border-radius:8px;padding:8px;'>"
+                            f"<div style='color:#ffb347;font-weight:800;font-size:0.72rem;'>#{slot_idx + 1:02d} · SELECIONÁVEL</div>"
+                            f"<div style='color:#fff;font-size:0.78rem;font-weight:700;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>{html.escape(item['name'])}</div>"
+                            f"<div style='color:#888;font-size:0.68rem;margin-top:3px;'>Data: {html.escape(item['date'])}</div>"
+                            "</div>"
+                        )
+                    else:
+                        resumo_cards.append(
+                            "<div style='border:1px dashed #2e2e2e;background:#0c0c0c;border-radius:8px;padding:8px;'>"
+                            f"<div style='color:#555;font-weight:800;font-size:0.72rem;'>#{slot_idx + 1:02d} · VAZIO</div>"
+                            "<div style='color:#444;font-size:0.72rem;margin-top:6px;'>Aguardando ortofoto</div>"
+                            "</div>"
+                        )
+                st.markdown(
+                    "<div style='margin:8px 0 10px 0;'>"
+                    "<div style='color:#ff8c00;font-weight:800;font-size:0.78rem;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;'>"
+                    "Resumo das 10 posições do seletor</div>"
+                    "<div style='display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;'>"
+                    + "".join(resumo_cards) +
+                    "</div></div>",
+                    unsafe_allow_html=True
+                )
 
                 cron_orthos = []
                 cron_errors = []
@@ -10949,10 +10971,12 @@ new ResizeObserver(()=>drawAll()).observe(vc);
   }
   .stat b { display:block; color:#fff; font-size:15px; }
   .stat span { color:#888; font-size:9px; text-transform:uppercase; letter-spacing:.6px; }
-  .date-list { max-height:235px; overflow:auto; border:1px solid #242424; border-radius:7px; padding:5px; background:#101010; }
+  .date-list { max-height:330px; overflow:auto; border:1px solid #242424; border-radius:7px; padding:5px; background:#101010; }
   .date-item { color:#aaa; font-size:10px; padding:7px; border:1px solid transparent; border-radius:6px; cursor:pointer; margin-bottom:5px; background:rgba(255,255,255,.018); }
   .date-item.active { color:#ffb347; background:#221400; border-color:#ff8c00; box-shadow:0 0 8px rgba(255,140,0,.18); }
   .date-item:hover { background:#1a1a1a; border-color:#3a3a3a; }
+  .date-item.empty { cursor:default; border-style:dashed; color:#555; background:#0d0d0d; }
+  .date-item.empty:hover { background:#0d0d0d; border-color:#333; }
   .date-head { display:flex; justify-content:space-between; gap:6px; align-items:center; font-weight:800; }
   .date-name { color:#f0f0f0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:178px; }
   .date-meta { color:#888; font-size:9px; margin-top:3px; line-height:1.35; }
@@ -10983,8 +11007,8 @@ new ResizeObserver(()=>drawAll()).observe(vc);
     <div class="badge" id="cronHint">Scroll=Zoom · Drag=Pan<br>Grid fixo: marque 4 pontos</div>
   </div>
   <div class="cron-side">
-    <div class="title">Análise Cronológica de Pendoamento</div>
-    <div class="subtle">O grid marcado fica fixo e é reaplicado nas ortofotos por data.</div>
+    <div class="title">Resumo / Seletor de Ortofotos</div>
+    <div class="subtle">Clique em uma das até 10 ortofotos abaixo para trocar a imagem no mesmo visualizador.</div>
 
     <div class="sep"></div>
     <div class="row"><span>Data ativa</span><select id="dateSelect"></select></div>
@@ -10997,12 +11021,12 @@ new ResizeObserver(()=>drawAll()).observe(vc);
 
     <div class="sep"></div>
     <button class="btn orange" id="btnMarkGrid">⊞ Marcar Grid Fixo</button>
-    <button class="btn green" id="btnAnalyzeChrono">🌾 Análise Cronológica</button>
+    <button class="btn green" id="btnAnalyzeChrono">🌾 Análise de Pendoamento</button>
     <button class="btn blue" id="btnReviewMode">✎ Revisar Parcela</button>
     <button class="btn" id="btnFitChrono">⤢ Ajustar à tela</button>
-    <button class="btn red" id="btnClearChrono">Limpar módulo cronológico</button>
+    <button class="btn red" id="btnClearChrono">Limpar seletor</button>
     <div class="progress"><div id="cronProgress"></div></div>
-    <div class="subtle" id="cronStatus">Marque o grid fixo na primeira ortofoto e execute a análise.</div>
+    <div class="subtle" id="cronStatus">Selecione a ortofoto no resumo, marque o grid e execute a análise.</div>
 
     <div class="sep"></div>
     <div class="stats">
@@ -11161,22 +11185,31 @@ function renderOrthoSummary(){
   const activeStats = orthoStats(activeIdx);
   activeOrthoSummary.innerHTML =
     'Visualizando: <b style="color:#ffb347">' + (activeIdx + 1) + ' · ' + safeHtml(active.name || '') + '</b><br>' +
-    'Data: ' + safeHtml(active.date || '--') + ' · Pendões: ' + activeStats.total + ' · Atingidas: ' + activeStats.hit;
-  ORTHOS.forEach((o, idx) => {
+    'Data: ' + safeHtml(active.date || '--') + ' · Pendões: ' + activeStats.total + ' · Atingidas: ' + activeStats.hit +
+    '<br><span style="color:#777">Ortofotos carregadas: ' + ORTHOS.length + '/10</span>';
+  for(let idx=0; idx<10; idx++){
+    const o = ORTHOS[idx];
     const stats = orthoStats(idx);
     const item = document.createElement('div');
-    item.className = 'date-item' + (idx === activeIdx ? ' active' : '');
-    item.innerHTML =
-      '<div class="date-head"><span>' + (idx + 1) + ' · ' + safeHtml(o.date) + '</span><span class="date-name">' + safeHtml(o.name) + '</span></div>' +
-      '<div class="date-meta">Clique para trocar a ortofoto no visualizador único.</div>' +
-      '<div class="date-mini">' +
-        '<span><b>' + stats.total + '</b>pendões</span>' +
-        '<span><b>' + stats.hit + '</b>atingiu</span>' +
-        '<span><b>' + stats.partial + '</b>parcial</span>' +
-      '</div>';
-    item.onclick = () => setActiveDate(idx);
+    if(o){
+      item.className = 'date-item' + (idx === activeIdx ? ' active' : '');
+      item.innerHTML =
+        '<div class="date-head"><span>#' + String(idx + 1).padStart(2,'0') + ' · ' + safeHtml(o.date) + '</span><span class="date-name">' + safeHtml(o.name) + '</span></div>' +
+        '<div class="date-meta">Clique aqui para visualizar esta ortofoto no painel único.</div>' +
+        '<div class="date-mini">' +
+          '<span><b>' + stats.total + '</b>pendões</span>' +
+          '<span><b>' + stats.hit + '</b>atingiu</span>' +
+          '<span><b>' + stats.partial + '</b>parcial</span>' +
+        '</div>';
+      item.onclick = () => setActiveDate(idx);
+    } else {
+      item.className = 'date-item empty';
+      item.innerHTML =
+        '<div class="date-head"><span>#' + String(idx + 1).padStart(2,'0') + ' · vazio</span><span class="date-name">Aguardando</span></div>' +
+        '<div class="date-meta">Anexe uma ortofoto para liberar esta posição.</div>';
+    }
     dateList.appendChild(item);
-  });
+  }
 }
 
 function setActiveDate(idx){
@@ -11961,7 +11994,7 @@ viewer.addEventListener('mousedown', e => {
       gridRatios = gridRatios.slice(0,4);
       markGridMode = false;
       btnMarkGrid.classList.remove('active');
-      statusEl.textContent = 'Grid fixo marcado. Execute a análise cronológica.';
+      statusEl.textContent = 'Grid fixo marcado. Execute a análise de pendoamento.';
     } else {
       statusEl.textContent = 'Marque o ponto ' + (gridRatios.length + 1) + ' do grid fixo.';
     }
@@ -12019,9 +12052,9 @@ btnReviewMode.onclick = () => {
 btnAnalyzeChrono.onclick = runChronologicalAnalysis;
 btnFitChrono.onclick = fitView;
 btnClearChrono.onclick = () => {
-  if(!confirm('Limpar grid, resultados e revisões deste módulo cronológico?')) return;
+  if(!confirm('Limpar grid, resultados e revisões deste seletor?')) return;
   gridRatios=[]; selectedParcel=null; resultsByParcel={}; finalRows=[]; fullRows=[]; manualReviews={};
-  progressBar.style.width='0%'; statusEl.textContent='Módulo cronológico limpo.';
+  progressBar.style.width='0%'; statusEl.textContent='Seletor limpo.';
   rebuildRows(); renderReviewPanel(); drawAll();
 };
 btnPrevDate.onclick = () => setActiveDate(activeIdx - 1);
@@ -12048,13 +12081,25 @@ new ResizeObserver(() => drawAll()).observe(viewer);
                     )
                     components.html(cron_html, height=870, scrolling=False)
             else:
+                empty_cards = []
+                for slot_idx in range(10):
+                    empty_cards.append(
+                        "<div style='border:1px dashed #2e2e2e;background:#0c0c0c;border-radius:8px;padding:10px;min-height:68px;'>"
+                        f"<div style='color:#555;font-weight:800;font-size:0.74rem;'>#{slot_idx + 1:02d} · VAZIO</div>"
+                        "<div style='color:#444;font-size:0.72rem;margin-top:8px;'>Aguardando ortofoto</div>"
+                        "</div>"
+                    )
                 st.markdown("""
-                <div style='height:120px;border:1px dashed #2e2e2e;border-radius:12px;background:#0d0d0d;
-                            display:flex;flex-direction:column;align-items:center;justify-content:center;
-                            gap:8px;color:#444;margin-top:8px;'>
-                    <div style='font-size:1.8rem;'>🗓️</div>
-                    <div style='font-size:0.78rem;letter-spacing:1.5px;text-transform:uppercase;color:#666;'>
-                        Anexe até 10 ortofotos para análise cronológica de pendoamento
+                <div style='border:1px solid #2a2a2a;border-radius:12px;background:#0d0d0d;
+                            padding:12px;margin-top:8px;'>
+                    <div style='color:#ff8c00;font-weight:800;font-size:0.82rem;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;'>
+                        Resumo das 10 posições do seletor de ortofotos
+                    </div>
+                    <div style='display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;'>
+                """ + "".join(empty_cards) + """
+                    </div>
+                    <div style='color:#666;font-size:0.72rem;margin-top:10px;'>
+                        Anexe as ortofotos acima para abrir o visualizador único. Depois clique em qualquer item do resumo lateral para trocar a imagem no mesmo painel.
                     </div>
                 </div>""", unsafe_allow_html=True)
 
