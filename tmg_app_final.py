@@ -9776,17 +9776,8 @@ new ResizeObserver(() => drawAll()).observe(vc);
             </div>""", unsafe_allow_html=True)
 
         elif st.session_state.visualizador_sub == "Pendoamento":
-            st.markdown("""
-            <div style='color:#ff8c00;font-weight:700;font-size:1rem;letter-spacing:2px;
-                        text-transform:uppercase;margin-bottom:10px;'>
-                🌾 Pendoamento · Visualizador de Ortofoto por Parcela
-            </div>""", unsafe_allow_html=True)
-
-            pend_file = _resettable_ortho_uploader(
-                "📷 Carregar Ortofoto para Pendoamento",
-                key="pend_orto_uploader",
-                help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW"
-            )
+            # O pendoamento usa somente o seletor/visualizador único de até 10 ortofotos abaixo.
+            pend_file = None
             pend_bytes, pend_name = _uploaded_ortho_bytes(pend_file)
 
             if pend_bytes:
@@ -10711,7 +10702,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                     )
                     components.html(pend_viewer, height=740, scrolling=False)
 
-            else:
+            if False:
                 st.markdown("""
                 <div style='height:706px;border:1px dashed #2e2e2e;border-radius:12px;background:#0d0d0d;
                             display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -11004,7 +10995,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
     <canvas id="cronCanvas"></canvas>
     <div class="badge" id="cronZoom">1.00×</div>
     <div class="badge" id="cronCoord">X:0 Y:0</div>
-    <div class="badge" id="cronHint">Scroll=Zoom · Drag=Pan<br>Grid fixo: marque 4 pontos</div>
+    <div class="badge" id="cronHint">Scroll=Zoom · Drag=Pan<br>Grid: marque 4 extremidades e arraste para ajustar</div>
   </div>
   <div class="cron-side">
     <div class="title">Resumo / Seletor de Ortofotos</div>
@@ -11020,7 +11011,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
     <div class="date-list" id="dateList"></div>
 
     <div class="sep"></div>
-    <button class="btn orange" id="btnMarkGrid">⊞ Marcar Grid Fixo</button>
+    <button class="btn orange" id="btnMarkGrid">⊞ Marcar Grid</button>
     <button class="btn green" id="btnAnalyzeChrono">🌾 Análise de Pendoamento</button>
     <button class="btn blue" id="btnReviewMode">✎ Revisar Parcela</button>
     <button class="btn" id="btnFitChrono">⤢ Ajustar à tela</button>
@@ -11085,7 +11076,7 @@ let images = [];
 let loaded = 0;
 let activeIdx = 0;
 let scale = 1, offsetX = 0, offsetY = 0;
-let dragging = false, lastX = 0, lastY = 0;
+let dragging = false, lastX = 0, lastY = 0, gridDragPoint = -1;
 let markGridMode = false, reviewMode = false;
 let gridRatios = [];
 let selectedParcel = null;
@@ -11100,7 +11091,7 @@ let tempPrepared = -1;
 function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
 function imgW(idx=activeIdx){ return ORTHOS[idx]?.width || images[idx]?.width || 1; }
 function imgH(idx=activeIdx){ return ORTHOS[idx]?.height || images[idx]?.height || 1; }
-function cellLabel(r,c){ return 'T' + (c + 1) + ' D' + (r + 1); }
+function cellLabel(r,c){ return 'D' + (r + 1) + ' T' + (c + 1); }
 function fmtPct(v){ return Number.isFinite(v) ? v.toFixed(2) : ''; }
 function quoteCSV(v){
   const s = (v === null || v === undefined) ? '' : String(v);
@@ -11259,6 +11250,16 @@ function ratioPoint(pt, idx=activeIdx){
 
 function currentGridPoints(idx=activeIdx){
   return gridRatios.map(p => ({ x:p.x * imgW(idx), y:p.y * imgH(idx) }));
+}
+
+function gridPointIndexAt(pt, idx=activeIdx){
+  const pts = currentGridPoints(idx);
+  for(let i=0; i<pts.length; i++){
+    const dx=(pt.x-pts[i].x)*scale;
+    const dy=(pt.y-pts[i].y)*scale;
+    if(Math.sqrt(dx*dx+dy*dy) < 22) return i;
+  }
+  return -1;
 }
 
 function bilerp(p0,p1,p2,p3,u,v){
@@ -11823,11 +11824,15 @@ function drawAll(){
   if(images[activeIdx] && images[activeIdx].complete) ctx.drawImage(images[activeIdx],0,0,imgW(activeIdx),imgH(activeIdx));
   drawGrid(activeIdx);
   drawMarks(activeIdx);
-  if(gridRatios.length > 0 && gridRatios.length < 4){
+  if(gridRatios.length > 0){
     const pts = currentGridPoints(activeIdx);
     pts.forEach((p,i)=>{
       ctx.save();
-      ctx.fillStyle='#1e90ff'; ctx.strokeStyle='#00cfff'; ctx.lineWidth=2/scale;
+      ctx.shadowColor=gridDragPoint===i ? 'rgba(255,255,255,.9)' : 'rgba(0,180,255,.8)';
+      ctx.shadowBlur=14/scale;
+      ctx.fillStyle=gridDragPoint===i ? '#fff' : '#1e90ff';
+      ctx.strokeStyle=gridDragPoint===i ? '#aaddff' : '#00cfff';
+      ctx.lineWidth=2.5/scale;
       ctx.beginPath(); ctx.arc(p.x,p.y,10/scale,0,Math.PI*2); ctx.fill(); ctx.stroke();
       ctx.fillStyle='#fff'; ctx.font='bold '+(12/scale)+'px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
       ctx.fillText(String(i+1),p.x,p.y);
@@ -11988,15 +11993,22 @@ viewer.addEventListener('wheel', e => {
 
 viewer.addEventListener('mousedown', e => {
   const pt = screenToImg(e.clientX,e.clientY);
+  const hitGridPoint = gridPointIndexAt(pt);
+  if(hitGridPoint >= 0){
+    gridDragPoint = hitGridPoint;
+    dragging = false;
+    viewer.style.cursor = 'grabbing';
+    return;
+  }
   if(markGridMode){
     gridRatios.push(ratioPoint(pt, activeIdx));
     if(gridRatios.length >= 4){
       gridRatios = gridRatios.slice(0,4);
       markGridMode = false;
       btnMarkGrid.classList.remove('active');
-      statusEl.textContent = 'Grid fixo marcado. Execute a análise de pendoamento.';
+      statusEl.textContent = 'Grid marcado. Arraste os pontos das extremidades para ajustar Disparo/Tiro.';
     } else {
-      statusEl.textContent = 'Marque o ponto ' + (gridRatios.length + 1) + ' do grid fixo.';
+      statusEl.textContent = 'Marque a extremidade ' + (gridRatios.length + 1) + ' do grid.';
     }
     resultsByParcel = {}; finalRows = []; fullRows = [];
     rebuildRows();
@@ -12018,6 +12030,22 @@ viewer.addEventListener('mousedown', e => {
 viewer.addEventListener('mousemove', e => {
   const pt = screenToImg(e.clientX,e.clientY);
   coordBadge.textContent = 'X:' + Math.round(pt.x) + ' Y:' + Math.round(pt.y);
+  if(gridDragPoint >= 0){
+    gridRatios[gridDragPoint] = ratioPoint(pt, activeIdx);
+    selectedParcel = null;
+    resultsByParcel = {};
+    finalRows = [];
+    fullRows = [];
+    progressBar.style.width = '0%';
+    document.getElementById('statTotal').textContent = '0';
+    document.getElementById('statHit').textContent = '0';
+    document.getElementById('statNoHit').textContent = '0';
+    document.getElementById('statReview').textContent = '0';
+    document.getElementById('statFirstDate').textContent = 'Primeira data geral: --';
+    renderOrthoSummary();
+    drawAll();
+    return;
+  }
   if(dragging){
     offsetX += e.clientX-lastX;
     offsetY += e.clientY-lastY;
@@ -12025,8 +12053,8 @@ viewer.addEventListener('mousemove', e => {
     drawAll();
   }
 });
-viewer.addEventListener('mouseup', () => { dragging=false; viewer.style.cursor='grab'; });
-viewer.addEventListener('mouseleave', () => { dragging=false; viewer.style.cursor='grab'; });
+viewer.addEventListener('mouseup', () => { dragging=false; gridDragPoint=-1; viewer.style.cursor='grab'; });
+viewer.addEventListener('mouseleave', () => { dragging=false; gridDragPoint=-1; viewer.style.cursor='grab'; });
 
 btnMarkGrid.onclick = () => {
   markGridMode = !markGridMode;
@@ -12037,7 +12065,7 @@ btnMarkGrid.onclick = () => {
     gridRatios = [];
     resultsByParcel = {}; finalRows = []; fullRows = [];
     rebuildRows();
-    statusEl.textContent = 'Marque 4 pontos do grid fixo na ortofoto.';
+    statusEl.textContent = 'Marque as 4 extremidades do grid na ortofoto.';
   }
   drawAll();
 };
