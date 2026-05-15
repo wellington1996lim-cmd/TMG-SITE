@@ -322,7 +322,7 @@ def _preview_jpeg_quality() -> int:
 
 def _preview_max_payload_mb() -> int:
     # Evita que o HTML do visualizador fique pesado demais para carregar no navegador.
-    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 16, 4, 80)
+    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 10, 4, 80)
 
 def _preview_min_dim() -> int:
     return _int_setting("TMG_PREVIEW_MIN_DIM", 2048, 900, 4096)
