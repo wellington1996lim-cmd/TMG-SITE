@@ -1777,6 +1777,538 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
     return b64, img.size, None, spatial_meta
 
 
+PENDAO_AVANCADO_PARAMS = {
+    "clahe_clip_limit": 2.5,
+    "illumination_kernel": 31,
+    "sharpen_strength": 0.25,
+    "green_hsv_low": (35, 35, 35),
+    "green_hsv_high": (90, 255, 255),
+    "exg_threshold": 105,
+    "new_tassel_hsv_low": (15, 25, 130),
+    "new_tassel_hsv_high": (45, 255, 255),
+    "dry_tassel_hsv_low": (8, 20, 90),
+    "dry_tassel_hsv_high": (35, 180, 240),
+    "old_tassel_hsv_low": (5, 25, 70),
+    "old_tassel_hsv_high": (28, 200, 210),
+    "cream_l_min": 145,
+    "cream_s_max": 90,
+    "cream_v_min": 120,
+    "lab_l_threshold": 128,
+    "texture_threshold": 18,
+    "texture_ratio_min": 0.055,
+    "yellow_ratio_min": 0.07,
+    "clear_ratio_min": 0.12,
+    "area_min": 6,
+    "area_max": 2500,
+    "area_min_fraction": 0.00001,
+    "area_max_fraction": 0.035,
+    "max_circularity": 0.90,
+    "min_solidity": 0.08,
+    "max_green_ratio": 0.50,
+    "merge_distance": 16,
+    "nms_distance": 18,
+    "morph_open_kernel": 3,
+    "morph_close_kernel": 5,
+    "dilate_kernel": 3,
+    "x_min_size": 6,
+    "x_max_size": 20,
+    "x_size_factor": 0.40,
+    "x_thickness": 2,
+    "analysis_max_dim": 2200,
+    "max_detections": 30000,
+    "yellow_index_threshold": 136,
+    "exr_threshold": 128,
+    "lab_b_min": 124,
+    "lab_ba_diff_min": -6,
+    "difficult_texture_ratio_min": 0.035,
+}
+
+
+def _pendao_params(params=None) -> dict:
+    merged = dict(PENDAO_AVANCADO_PARAMS)
+    if params:
+        merged.update(params)
+    return merged
+
+
+def _odd_kernel(value: int, minimum: int = 3) -> int:
+    value = max(minimum, int(value or minimum))
+    return value if value % 2 else value + 1
+
+
+def _as_rgb_uint8(rgb_img):
+    if rgb_img is None:
+        return None
+    arr = np.asarray(rgb_img)
+    if arr.ndim == 2:
+        arr = np.dstack([arr, arr, arr])
+    if arr.ndim != 3 or arr.shape[2] < 3 or arr.size == 0:
+        return None
+    arr = arr[:, :, :3]
+    if arr.dtype != np.uint8:
+        arr = np.nan_to_num(arr.astype(np.float32))
+        mx = float(np.max(arr)) if arr.size else 0.0
+        if mx <= 1.5:
+            arr = arr * 255.0
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(arr)
+
+
+def _preprocessar_pendao_opencv(rgb_img, params):
+    rgb = _as_rgb_uint8(rgb_img)
+    if rgb is None:
+        return None, None, None, None, None
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(
+        clipLimit=float(params.get("clahe_clip_limit", 2.5)),
+        tileGridSize=(8, 8),
+    )
+    l_eq = clahe.apply(l_channel)
+    blur_size = _odd_kernel(params.get("illumination_kernel", 31), 9)
+    illumination = cv2.GaussianBlur(l_eq, (blur_size, blur_size), 0)
+    l_corr = cv2.addWeighted(l_eq, 1.35, illumination, -0.35, 0)
+    lab_corr = cv2.merge([np.clip(l_corr, 0, 255).astype(np.uint8), a_channel, b_channel])
+    rgb_corr = cv2.cvtColor(lab_corr, cv2.COLOR_LAB2RGB)
+    blur = cv2.GaussianBlur(rgb_corr, (3, 3), 0)
+    strength = float(params.get("sharpen_strength", 0.25))
+    sharp = cv2.addWeighted(rgb_corr, 1.0 + strength, blur, -strength, 0)
+    sharp = cv2.GaussianBlur(sharp, (3, 3), 0)
+    hsv = cv2.cvtColor(sharp, cv2.COLOR_RGB2HSV)
+    lab = cv2.cvtColor(sharp, cv2.COLOR_RGB2LAB)
+    gray = cv2.cvtColor(sharp, cv2.COLOR_RGB2GRAY)
+    return sharp, hsv, lab, gray, lab[:, :, 0]
+
+
+def remover_verde_agressivo(rgb_img, params=None):
+    params = _pendao_params(params)
+    rgb = _as_rgb_uint8(rgb_img)
+    if rgb is None:
+        return None, None
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    r = rgb[:, :, 0].astype(np.int16)
+    g = rgb[:, :, 1].astype(np.int16)
+    b = rgb[:, :, 2].astype(np.int16)
+    exg = np.clip(2 * g - r - b, -255, 255).astype(np.int16)
+    exg_norm = cv2.normalize(exg, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    _, exg_green = cv2.threshold(
+        exg_norm,
+        int(params.get("exg_threshold", 105)),
+        255,
+        cv2.THRESH_BINARY,
+    )
+    green_hsv = cv2.inRange(
+        hsv,
+        np.array(params.get("green_hsv_low", (35, 35, 35)), dtype=np.uint8),
+        np.array(params.get("green_hsv_high", (90, 255, 255)), dtype=np.uint8),
+    )
+    green_mask = cv2.bitwise_or(exg_green, green_hsv)
+    green_mask = cv2.morphologyEx(
+        green_mask,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1,
+    )
+    sem_verde = cv2.bitwise_not(green_mask)
+    return sem_verde, green_mask
+
+
+def criar_mascara_pendoes_multicor(rgb_img, lab_l=None, params=None):
+    params = _pendao_params(params)
+    rgb = _as_rgb_uint8(rgb_img)
+    if rgb is None:
+        return None, {}
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+    lab_l = lab_l if lab_l is not None else lab[:, :, 0]
+    novo = cv2.inRange(
+        hsv,
+        np.array(params.get("new_tassel_hsv_low", (15, 25, 130)), dtype=np.uint8),
+        np.array(params.get("new_tassel_hsv_high", (45, 255, 255)), dtype=np.uint8),
+    )
+    seco = cv2.inRange(
+        hsv,
+        np.array(params.get("dry_tassel_hsv_low", (8, 20, 90)), dtype=np.uint8),
+        np.array(params.get("dry_tassel_hsv_high", (35, 180, 240)), dtype=np.uint8),
+    )
+    velho = cv2.inRange(
+        hsv,
+        np.array(params.get("old_tassel_hsv_low", (5, 25, 70)), dtype=np.uint8),
+        np.array(params.get("old_tassel_hsv_high", (28, 200, 210)), dtype=np.uint8),
+    )
+    s = hsv[:, :, 1]
+    v = hsv[:, :, 2]
+    creme = (
+        (lab_l > int(params.get("cream_l_min", 145)))
+        & (s < int(params.get("cream_s_max", 90)))
+        & (v > int(params.get("cream_v_min", 120)))
+    ).astype(np.uint8) * 255
+    r = rgb[:, :, 0].astype(np.float32)
+    g = rgb[:, :, 1].astype(np.float32)
+    b = rgb[:, :, 2].astype(np.float32)
+    yellow_idx = cv2.normalize(r + g - b, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    exr = cv2.normalize((1.4 * r) - g, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    lab_a = lab[:, :, 1].astype(np.int16)
+    lab_b = lab[:, :, 2].astype(np.int16)
+    indice_amarelo = (
+        (yellow_idx > int(params.get("yellow_index_threshold", 136)))
+        & (lab_b > int(params.get("lab_b_min", 124)))
+        & ((lab_b - lab_a) > int(params.get("lab_ba_diff_min", -6)))
+        & (lab_l > 105)
+        & (v > 85)
+    ).astype(np.uint8) * 255
+    exr_mask = (
+        (exr > int(params.get("exr_threshold", 128)))
+        & (lab_l > 95)
+        & (v > 75)
+        & (s > 18)
+    ).astype(np.uint8) * 255
+    mascara = cv2.bitwise_or(cv2.bitwise_or(novo, seco), cv2.bitwise_or(velho, creme))
+    mascara = cv2.bitwise_or(mascara, cv2.bitwise_or(indice_amarelo, exr_mask))
+    return mascara, {
+        "novo": novo,
+        "seco": seco,
+        "velho": velho,
+        "creme": creme,
+        "indice": indice_amarelo,
+        "exr": exr_mask,
+    }
+
+
+def calcular_mascara_textura(gray_img, params=None):
+    params = _pendao_params(params)
+    gray = np.asarray(gray_img, dtype=np.uint8)
+    lap = cv2.convertScaleAbs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))
+    sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    sobel = cv2.convertScaleAbs(cv2.magnitude(sobel_x, sobel_y))
+    canny = cv2.Canny(gray, 45, 120)
+    thr = int(params.get("texture_threshold", 18))
+    _, lap_mask = cv2.threshold(lap, thr, 255, cv2.THRESH_BINARY)
+    _, sobel_mask = cv2.threshold(sobel, max(20, thr + 8), 255, cv2.THRESH_BINARY)
+    textura = cv2.bitwise_or(cv2.bitwise_or(lap_mask, sobel_mask), canny)
+    return textura
+
+
+def classificar_tipo_pendao(hsv_pixel, lab_pixel, params=None) -> str:
+    params = _pendao_params(params)
+    h, s, v = [int(x) for x in hsv_pixel[:3]]
+    l = int(lab_pixel[0])
+    if l >= params.get("cream_l_min", 145) and s <= params.get("cream_s_max", 90) and v >= params.get("cream_v_min", 120):
+        return "creme"
+    if 15 <= h <= 45 and v >= 130:
+        return "novo"
+    if 8 <= h <= 35 and v >= 90:
+        return "seco"
+    if 5 <= h <= 28:
+        return "velho"
+    return "misto"
+
+
+def _detection_center_from_component(component_mask, x, y, w, h):
+    dist = cv2.distanceTransform(component_mask, cv2.DIST_L2, 3)
+    _, max_val, _, max_loc = cv2.minMaxLoc(dist)
+    if max_val > 0:
+        return float(x + max_loc[0]), float(y + max_loc[1])
+    moments = cv2.moments(component_mask, binaryImage=True)
+    if moments.get("m00", 0):
+        return float(x + moments["m10"] / moments["m00"]), float(y + moments["m01"] / moments["m00"])
+    return float(x + w / 2), float(y + h / 2)
+
+
+def _merge_close_detections(detections, distance):
+    if not detections:
+        return []
+    ordered = sorted(detections, key=lambda d: float(d.get("score", 0)), reverse=True)
+    groups = []
+    for det in ordered:
+        cx, cy = det["center"]
+        target = None
+        for group in groups:
+            gx, gy = group["center"]
+            if ((cx - gx) ** 2 + (cy - gy) ** 2) ** 0.5 <= distance:
+                target = group
+                break
+        if target is None:
+            item = dict(det)
+            item["_weight"] = max(1.0, float(det.get("score", 1.0)) * max(1.0, float(det.get("area", 1.0))))
+            groups.append(item)
+        else:
+            old_weight = target.get("_weight", 1.0)
+            new_weight = max(1.0, float(det.get("score", 1.0)) * max(1.0, float(det.get("area", 1.0))))
+            tw = old_weight + new_weight
+            target["center"] = (
+                (target["center"][0] * old_weight + cx * new_weight) / tw,
+                (target["center"][1] * old_weight + cy * new_weight) / tw,
+            )
+            target["score"] = max(float(target.get("score", 0)), float(det.get("score", 0)))
+            target["area"] = float(target.get("area", 0)) + float(det.get("area", 0))
+            target["_weight"] = tw
+    for group in groups:
+        group.pop("_weight", None)
+    return groups
+
+
+def remover_deteccoes_duplicadas(detections, params=None):
+    params = _pendao_params(params)
+    if not detections:
+        return []
+    distance = float(params.get("nms_distance", 20))
+    ordered = sorted(detections, key=lambda d: float(d.get("score", 0)), reverse=True)
+    kept = []
+    for det in ordered:
+        cx, cy = det["center"]
+        if all(((cx - k["center"][0]) ** 2 + (cy - k["center"][1]) ** 2) ** 0.5 > distance for k in kept):
+            kept.append(det)
+    return kept
+
+
+def agrupar_componentes_estrelados(regions, params=None):
+    params = _pendao_params(params)
+    return _merge_close_detections(regions, float(params.get("merge_distance", 18)))
+
+
+def _grid_cells_from_grade(grade, img_w, img_h):
+    if not grade:
+        return [(1, 1, 1, np.array([[0, 0], [img_w - 1, 0], [img_w - 1, img_h - 1], [0, img_h - 1]], dtype=np.float32))]
+    points = grade.get("points") or grade.get("pontos") or grade.get("grid") or []
+    rows = int(grade.get("rows") or grade.get("linhas") or 1)
+    cols = int(grade.get("cols") or grade.get("colunas") or 1)
+    if len(points) < 4:
+        return [(1, 1, 1, np.array([[0, 0], [img_w - 1, 0], [img_w - 1, img_h - 1], [0, img_h - 1]], dtype=np.float32))]
+    norm_points = []
+    for p in points[:4]:
+        if isinstance(p, dict):
+            norm_points.append([float(p.get("x", 0)), float(p.get("y", 0))])
+        else:
+            norm_points.append([float(p[0]), float(p[1])])
+    pts = np.array(norm_points, dtype=np.float32)
+
+    def bilerp_np(p0, p1, p2, p3, u, v):
+        top = (1 - u) * p0 + u * p1
+        bottom = (1 - u) * p3 + u * p2
+        return (1 - v) * top + v * bottom
+
+    cells = []
+    index = 1
+    for r in range(rows):
+        for c in range(cols):
+            u0, u1 = c / cols, (c + 1) / cols
+            v0, v1 = r / rows, (r + 1) / rows
+            poly = np.array([
+                bilerp_np(pts[0], pts[1], pts[2], pts[3], u0, v0),
+                bilerp_np(pts[0], pts[1], pts[2], pts[3], u1, v0),
+                bilerp_np(pts[0], pts[1], pts[2], pts[3], u1, v1),
+                bilerp_np(pts[0], pts[1], pts[2], pts[3], u0, v1),
+            ], dtype=np.float32)
+            cells.append((index, r + 1, c + 1, poly))
+            index += 1
+    return cells
+
+
+def detectar_pendoes_opencv_puro(rgb_img, grade=None, params=None):
+    params = _pendao_params(params)
+    rgb = _as_rgb_uint8(rgb_img)
+    if rgb is None:
+        return {"dims": (0, 0), "rows": 0, "cols": 0, "grid": grade, "parcelas": [], "total": 0}
+
+    scale_back = 1.0
+    max_dim = int(params.get("analysis_max_dim", 2200))
+    orig_h, orig_w = rgb.shape[:2]
+    if max(orig_h, orig_w) > max_dim:
+        scale = max_dim / max(orig_h, orig_w)
+        rgb_small = cv2.resize(rgb, (max(1, int(orig_w * scale)), max(1, int(orig_h * scale))), interpolation=cv2.INTER_AREA)
+        scale_back = 1.0 / scale
+    else:
+        rgb_small = rgb
+
+    img, hsv, lab, gray, lab_l = _preprocessar_pendao_opencv(rgb_small, params)
+    if img is None:
+        return {"dims": (orig_w, orig_h), "rows": 0, "cols": 0, "grid": grade, "parcelas": [], "total": 0}
+    sem_verde, green_mask = remover_verde_agressivo(img, params)
+    cor_mask, tipo_masks = criar_mascara_pendoes_multicor(img, lab_l, params)
+    brilho_mask = cv2.threshold(lab_l, int(params.get("lab_l_threshold", 135)), 255, cv2.THRESH_BINARY)[1]
+    textura_mask = calcular_mascara_textura(gray, params)
+
+    textura_expandida = cv2.dilate(
+        textura_mask,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1,
+    )
+    claros_mask = cv2.bitwise_or(tipo_masks.get("novo", cor_mask), tipo_masks.get("creme", cor_mask))
+    secos_mask = cv2.bitwise_or(tipo_masks.get("seco", cor_mask), tipo_masks.get("velho", cor_mask))
+    dificeis_mask = cv2.bitwise_or(tipo_masks.get("indice", cor_mask), tipo_masks.get("exr", cor_mask))
+
+    pass_claros = cv2.bitwise_and(cv2.bitwise_and(claros_mask, sem_verde), textura_expandida)
+    pass_secos = cv2.bitwise_and(cv2.bitwise_and(secos_mask, sem_verde), textura_expandida)
+    pass_dificeis = cv2.bitwise_and(
+        cv2.bitwise_and(dificeis_mask, sem_verde),
+        cv2.bitwise_or(textura_expandida, brilho_mask),
+    )
+    candidatos = cv2.bitwise_or(cv2.bitwise_or(pass_claros, pass_secos), pass_dificeis)
+    candidatos = cv2.bitwise_and(candidatos, cv2.bitwise_or(brilho_mask, cor_mask))
+
+    open_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_odd_kernel(params.get("morph_open_kernel", 3)),) * 2)
+    close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_odd_kernel(params.get("morph_close_kernel", 5)),) * 2)
+    dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_odd_kernel(params.get("dilate_kernel", 3)),) * 2)
+    candidatos = cv2.morphologyEx(candidatos, cv2.MORPH_OPEN, open_k, iterations=1)
+    candidatos = cv2.morphologyEx(candidatos, cv2.MORPH_CLOSE, close_k, iterations=1)
+    candidatos = cv2.dilate(candidatos, dilate_k, iterations=1)
+    bordas_pendao = cv2.morphologyEx(candidatos, cv2.MORPH_GRADIENT, open_k, iterations=1)
+    candidatos = cv2.bitwise_or(candidatos, cv2.bitwise_and(bordas_pendao, cor_mask))
+
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(candidatos, 8)
+    img_area = float(candidatos.shape[0] * candidatos.shape[1])
+    area_min = max(float(params.get("area_min", 8)), img_area * float(params.get("area_min_fraction", 0.00001)))
+    area_max = min(float(params.get("area_max", 2500)), max(area_min + 1, img_area * float(params.get("area_max_fraction", 0.035))))
+    detections = []
+    for label in range(1, n_labels):
+        x, y, w, h, area = stats[label]
+        area = float(area)
+        if area < area_min or area > area_max or w <= 0 or h <= 0:
+            continue
+        component = (labels[y:y + h, x:x + w] == label).astype(np.uint8)
+        comp_full = (labels == label)
+        contours, _ = cv2.findContours((component * 255).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        contour = max(contours, key=cv2.contourArea)
+        perimeter = max(1.0, cv2.arcLength(contour, True))
+        circularity = 4.0 * np.pi * area / (perimeter * perimeter)
+        hull = cv2.convexHull(contour)
+        hull_area = max(1.0, cv2.contourArea(hull))
+        solidity = area / hull_area
+        density = area / max(1.0, float(w * h))
+        aspect = max(w, h) / max(1.0, min(w, h))
+        green_ratio = float(np.mean(green_mask[comp_full] > 0)) if np.any(comp_full) else 1.0
+        yellow_ratio = float(np.mean(cor_mask[comp_full] > 0)) if np.any(comp_full) else 0.0
+        texture_ratio = float(np.mean(textura_mask[comp_full] > 0)) if np.any(comp_full) else 0.0
+        clear_ratio = float(np.mean(lab_l[comp_full] > int(params.get("lab_l_threshold", 135)))) if np.any(comp_full) else 0.0
+        if green_ratio > float(params.get("max_green_ratio", 0.35)):
+            continue
+        if yellow_ratio < float(params.get("yellow_ratio_min", 0.10)):
+            continue
+        if texture_ratio < float(params.get("texture_ratio_min", 0.08)):
+            continue
+        if clear_ratio < float(params.get("clear_ratio_min", 0.20)):
+            continue
+        if circularity > float(params.get("max_circularity", 0.90)) and aspect < 1.8:
+            continue
+        if solidity < float(params.get("min_solidity", 0.08)) or density < 0.05:
+            continue
+        if aspect > 12 and texture_ratio < 0.22:
+            continue
+        cx, cy = _detection_center_from_component(component, x, y, w, h)
+        sx = int(np.clip(cx, 0, hsv.shape[1] - 1))
+        sy = int(np.clip(cy, 0, hsv.shape[0] - 1))
+        tipo = classificar_tipo_pendao(hsv[sy, sx], lab[sy, sx], params)
+        area_score = min(1.0, area / max(1.0, area_min * 6.0))
+        score = (
+            texture_ratio * 2.0
+            + yellow_ratio * 2.0
+            + clear_ratio * 1.4
+            + (1.0 - green_ratio) * 1.8
+            + area_score
+            + min(1.0, aspect / 4.0) * 0.35
+        )
+        confianca = "alta" if score >= 5.2 else ("media" if score >= 4.0 else "baixa")
+        detections.append({
+            "center": (float(cx * scale_back), float(cy * scale_back)),
+            "size": float(np.clip(max(w, h) * params.get("x_size_factor", 0.40) * scale_back, params.get("x_min_size", 6), params.get("x_max_size", 20))),
+            "bbox": (float(x * scale_back), float(y * scale_back), float(w * scale_back), float(h * scale_back)),
+            "score": float(score),
+            "confianca": confianca,
+            "tipo": tipo,
+            "yellow_ratio": yellow_ratio,
+            "texture_ratio": texture_ratio,
+            "clear_ratio": clear_ratio,
+            "green_ratio": green_ratio,
+            "area": float(area * scale_back * scale_back),
+        })
+
+    detections = agrupar_componentes_estrelados(detections, params)
+    detections = remover_deteccoes_duplicadas(detections, params)
+    max_detections = int(params.get("max_detections", 30000))
+    if len(detections) > max_detections:
+        detections = sorted(detections, key=lambda d: d.get("score", 0), reverse=True)[:max_detections]
+
+    rows = int((grade or {}).get("rows") or (grade or {}).get("linhas") or 1)
+    cols = int((grade or {}).get("cols") or (grade or {}).get("colunas") or 1)
+    cells = _grid_cells_from_grade(grade, orig_w, orig_h)
+    parcelas = []
+    total = 0
+    for index, row, col, poly in cells:
+        dets = []
+        for det in detections:
+            cx, cy = det["center"]
+            if cv2.pointPolygonTest(poly.astype(np.float32), (float(cx), float(cy)), False) >= 0:
+                dets.append({k: v for k, v in det.items() if k != "area"})
+        total += len(dets)
+        parcelas.append({"index": int(index), "row": int(row), "col": int(col), "count": len(dets), "detections": dets})
+    return {"dims": (orig_w, orig_h), "rows": rows, "cols": cols, "grid": grade, "parcelas": parcelas, "total": int(total)}
+
+
+def detectar_pendoes_milho_avancado(rgb_img, grade=None, params=None):
+    return detectar_pendoes_opencv_puro(rgb_img, grade=grade, params=params)
+
+
+def processar_grid_pendao_avancado(rgb_img, grade, params=None):
+    return detectar_pendoes_opencv_puro(rgb_img, grade=grade, params=params)
+
+
+def _decode_rgb_for_pendao(file_bytes: bytes, filename: str):
+    try:
+        arr = np.frombuffer(file_bytes, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is not None:
+            return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    except Exception:
+        pass
+    try:
+        return np.array(Image.open(BytesIO(file_bytes)).convert("RGB"))
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def preparar_deteccoes_pendoamento_avancado(file_bytes: bytes, filename: str, preview_dims: tuple):
+    rgb = _decode_rgb_for_pendao(file_bytes, filename)
+    if rgb is None:
+        return []
+    result = detectar_pendoes_opencv_puro(rgb, grade=None, params=PENDAO_AVANCADO_PARAMS)
+    dets = []
+    if not result.get("parcelas"):
+        return dets
+    src_w, src_h = result.get("dims", (rgb.shape[1], rgb.shape[0]))
+    dst_w, dst_h = preview_dims or (src_w, src_h)
+    sx = float(dst_w) / max(1.0, float(src_w))
+    sy = float(dst_h) / max(1.0, float(src_h))
+    for det in result["parcelas"][0].get("detections", []):
+        cx, cy = det.get("center", (0, 0))
+        bbox = det.get("bbox", (0, 0, 0, 0))
+        dets.append({
+            "x": round(float(cx) * sx, 2),
+            "y": round(float(cy) * sy, 2),
+            "size": round(float(det.get("size", 8)) * max(sx, sy), 2),
+            "score": round(float(det.get("score", 0)), 4),
+            "confianca": det.get("confianca", "media"),
+            "tipo": det.get("tipo", "misto"),
+            "bbox": [
+                round(float(bbox[0]) * sx, 2),
+                round(float(bbox[1]) * sy, 2),
+                round(float(bbox[2]) * sx, 2),
+                round(float(bbox[3]) * sy, 2),
+            ],
+            "yellow_ratio": round(float(det.get("yellow_ratio", 0)), 4),
+            "texture_ratio": round(float(det.get("texture_ratio", 0)), 4),
+            "clear_ratio": round(float(det.get("clear_ratio", 0)), 4),
+            "green_ratio": round(float(det.get("green_ratio", 0)), 4),
+        })
+    return dets
+
+
 # ==========================================
 # TELA DE LOGIN[cite: 1]
 # ==========================================
@@ -10716,32 +11248,10 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                     </div>
                 </div>""", unsafe_allow_html=True)
 
-            st.markdown("""
-            <div style='margin:18px 0 10px 0;padding:12px 14px;border:1px solid #2a2a2a;
-                        border-radius:10px;background:linear-gradient(145deg,#151515,#0b0b0b);'>
-                <div style='color:#ff8c00;font-weight:800;font-size:0.95rem;letter-spacing:1.6px;
-                            text-transform:uppercase;'>
-                    🖼️ Resumo / Seletor de Ortofotos
-                </div>
-                <div style='color:#777;font-size:0.78rem;margin-top:4px;'>
-                    Anexe até 10 ortofotos da mesma área. A lista de resumo aparece no próprio visualizador único; ao clicar em uma ortofoto, a imagem troca no mesmo painel.
-                </div>
-            </div>""", unsafe_allow_html=True)
-
-            p1, p2, p3, p4 = st.columns([2, 1, 1, 1])
-            with p1:
-                cron_nome_analise = st.text_input(
-                    "Nome",
-                    value="Pendoamento",
-                    key="pend_cron_nome_analise"
-                )
-            with p2:
-                cron_rows = st.number_input("Disp", min_value=1, max_value=200, value=5, step=1, key="pend_cron_rows")
-            with p3:
-                cron_cols = st.number_input("Tiros", min_value=1, max_value=200, value=5, step=1, key="pend_cron_cols")
-            with p4:
-                cron_teto = st.number_input("Teto de pendões", min_value=1, max_value=10000, value=20, step=1, key="pend_cron_teto")
-
+            cron_nome_analise = "Pendoamento"
+            cron_rows = 5
+            cron_cols = 5
+            cron_teto = 20
             cron_percentual = 100.0
             cron_min_pendoes = 1
             cron_referencia = ""
@@ -10848,6 +11358,11 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                             if err:
                                 cron_errors.append(f"{cron_name}: {err}")
                                 continue
+                            try:
+                                pendao_detections = preparar_deteccoes_pendoamento_avancado(raw, cron_name, tuple(dims))
+                            except Exception as det_exc:
+                                pendao_detections = []
+                                cron_errors.append(f"{cron_name}: detector avançado indisponível ({det_exc})")
                             cron_orthos.append({
                                 "order": int(item["idx"]),
                                 "name": cron_name,
@@ -10855,6 +11370,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                                 "b64": b64,
                                 "width": int(dims[0]),
                                 "height": int(dims[1]),
+                                "advanced_detections": pendao_detections,
                                 "orig_width": int(spatial.get("orig_width", dims[0]) or dims[0]) if spatial else int(dims[0]),
                                 "orig_height": int(spatial.get("orig_height", dims[1]) or dims[1]) if spatial else int(dims[1]),
                             })
@@ -11004,6 +11520,15 @@ new ResizeObserver(()=>drawAll()).observe(vc);
     <div class="subtle">Clique em uma das até 10 ortofotos abaixo para trocar a imagem no mesmo visualizador.</div>
 
     <div class="sep"></div>
+    <div class="row"><span>Nome</span><input id="cfgNome" type="text" value="Pendoamento"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+      <div class="row" style="display:block;"><span>Disp</span><input id="cfgRows" type="number" min="1" max="200" value="5" style="width:100%;margin-top:3px;"></div>
+      <div class="row" style="display:block;"><span>Tiros</span><input id="cfgCols" type="number" min="1" max="200" value="5" style="width:100%;margin-top:3px;"></div>
+    </div>
+    <div class="row"><span>Teto de pendões</span><input id="cfgTeto" type="number" min="1" max="10000" value="20" style="width:92px;text-align:center;"></div>
+    <div class="subtle">O teto trava a primeira data em que cada parcela atingiu o valor configurado.</div>
+
+    <div class="sep"></div>
     <div class="row"><span>Data ativa</span><select id="dateSelect"></select></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
       <button class="btn blue" id="btnPrevDate">◀ Data</button>
@@ -11058,6 +11583,10 @@ const coordBadge = document.getElementById('cronCoord');
 const dateSelect = document.getElementById('dateSelect');
 const dateList = document.getElementById('dateList');
 const activeOrthoSummary = document.getElementById('activeOrthoSummary');
+const cfgNome = document.getElementById('cfgNome');
+const cfgRows = document.getElementById('cfgRows');
+const cfgCols = document.getElementById('cfgCols');
+const cfgTeto = document.getElementById('cfgTeto');
 const progressBar = document.getElementById('cronProgress');
 const statusEl = document.getElementById('cronStatus');
 const reviewPanel = document.getElementById('reviewPanel');
@@ -11098,6 +11627,39 @@ function fmtPct(v){ return Number.isFinite(v) ? v.toFixed(2) : ''; }
 function quoteCSV(v){
   const s = (v === null || v === undefined) ? '' : String(v);
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function applyViewerConfig(clearResults=false){
+  const oldRows = Number(CONFIG.rows || 1);
+  const oldCols = Number(CONFIG.cols || 1);
+  CONFIG.nomeAnalise = (cfgNome.value || 'Pendoamento').trim() || 'Pendoamento';
+  CONFIG.rows = clamp(parseInt(cfgRows.value || CONFIG.rows || 1), 1, 200);
+  CONFIG.cols = clamp(parseInt(cfgCols.value || CONFIG.cols || 1), 1, 200);
+  CONFIG.tetoPlantas = clamp(parseInt(cfgTeto.value || CONFIG.tetoPlantas || 1), 1, 10000);
+  cfgRows.value = CONFIG.rows;
+  cfgCols.value = CONFIG.cols;
+  cfgTeto.value = CONFIG.tetoPlantas;
+  if(clearResults || oldRows !== CONFIG.rows || oldCols !== CONFIG.cols){
+    selectedParcel = null;
+    resultsByParcel = {};
+    finalRows = [];
+    fullRows = [];
+    progressBar.style.width = '0%';
+  }
+  rebuildRows();
+  renderReviewPanel();
+  drawAll();
+}
+
+function setupViewerConfigInputs(){
+  cfgNome.value = CONFIG.nomeAnalise || 'Pendoamento';
+  cfgRows.value = CONFIG.rows || 5;
+  cfgCols.value = CONFIG.cols || 5;
+  cfgTeto.value = CONFIG.tetoPlantas || 20;
+  cfgNome.onchange = () => applyViewerConfig(false);
+  cfgRows.onchange = () => applyViewerConfig(true);
+  cfgCols.onchange = () => applyViewerConfig(true);
+  cfgTeto.onchange = () => applyViewerConfig(false);
 }
 
 function loadScriptOnce(src){
@@ -11415,7 +11977,42 @@ function prepareTemp(idx){
   tempPrepared = idx;
 }
 
+function analyzeCellFromAdvancedDetections(idx,r,c){
+  const source = ORTHOS[idx] && Array.isArray(ORTHOS[idx].advanced_detections) ? ORTHOS[idx].advanced_detections : null;
+  if(!source || !source.length) return null;
+  const poly = cellPoly(r,c,idx);
+  if(!poly) return {count:0, marks:[], confidence:0};
+  const marks = [];
+  let confidenceSum = 0;
+  for(const det of source){
+    const x = Number(det.x);
+    const y = Number(det.y);
+    if(!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if(!pointInPolygon(x,y,poly)) continue;
+    const score = Number(det.score || 0);
+    const size = clamp(Number(det.size || 8), 5, 22);
+    marks.push({
+      x,
+      y,
+      score,
+      size,
+      area: Math.max(1, size * size),
+      tipo: det.tipo || 'misto',
+      confianca: det.confianca || 'media',
+      yellow_ratio: Number(det.yellow_ratio || 0),
+      texture_ratio: Number(det.texture_ratio || 0),
+      clear_ratio: Number(det.clear_ratio || 0),
+      green_ratio: Number(det.green_ratio || 0)
+    });
+    confidenceSum += clamp(score / 7, 0.25, 1);
+  }
+  const confidence = marks.length ? confidenceSum / marks.length : 0.82;
+  return {count:marks.length, marks, confidence};
+}
+
 function analyzeCellInImage(idx,r,c){
+  const advanced = analyzeCellFromAdvancedDetections(idx,r,c);
+  if(advanced) return advanced;
   prepareTemp(idx);
   const poly = cellPoly(r,c,idx);
   if(!poly) return {count:0, marks:[], confidence:0};
@@ -11677,7 +12274,8 @@ function runChronologicalAnalysis(){
   const R = Math.max(1, parseInt(CONFIG.rows || 1));
   const C = Math.max(1, parseInt(CONFIG.cols || 1));
   resultsByParcel = {};
-  statusEl.textContent = 'Analisando pendoamento em ' + ORTHOS.length + ' ortofotos...';
+  const preCount = ORTHOS.reduce((sum,o) => sum + (Array.isArray(o.advanced_detections) ? o.advanced_detections.length : 0), 0);
+  statusEl.textContent = 'Analisando pendoamento com detector OpenCV avançado em ' + ORTHOS.length + ' ortofotos' + (preCount ? ' (' + preCount + ' centros pré-detectados).' : ' e fallback local.') ;
   progressBar.style.width = '0%';
   setTimeout(() => {
     let done = 0;
@@ -11821,7 +12419,7 @@ function drawMarks(idx=activeIdx){
     const marks = rec.marksByDate ? (rec.marksByDate[idx] || []) : [];
     for(const m of marks){
       ctx.save();
-      const s = 5 / scale;
+      const s = clamp(Number(m.size || 7), 6, 20) / scale;
       ctx.strokeStyle='#ff2020';
       ctx.lineWidth=2/scale;
       ctx.shadowColor='rgba(255,0,0,.65)';
@@ -12125,6 +12723,7 @@ btnExportResumo.onclick = exportResumo;
 btnExportCompleto.onclick = () => exportRows(fullRows, 'dados_completos_por_ortofoto.csv');
 btnExportImagem.onclick = exportImage;
 
+setupViewerConfigInputs();
 setupDates();
 loadImages();
 rebuildRows();
