@@ -9976,9 +9976,9 @@ let draggingPoint=-1, drag=false, lx=0, ly=0;
 let sc=1, ox=0, oy=0, imgW=0, imgH=0;
 const MIN_SC=0.05, MAX_SC=40;
 const PEND_STEP=1;
-const PEND_MIN_AREA=8;
+const PEND_MIN_AREA=12;
 const PEND_CRITICO=20;
-const PEND_SCORE_THRESHOLD=3.95;
+const PEND_SCORE_THRESHOLD=4.15;
 const PEND_PERCENT_LIMIT=50;
 const TRAIN_KEY='tmg_pendao_ia_' + IMAGE_NAME;
 let trainingSamples={pos:[],neg:[]};
@@ -10243,6 +10243,9 @@ function analyzeCell(r,c) {
   const cleanMask=new Uint8Array(gw*gh);
   const closedMask=new Uint8Array(gw*gh);
   const scores=new Float32Array(gw*gh);
+  const yellows=new Float32Array(gw*gh);
+  const exgs=new Float32Array(gw*gh);
+  const chromas=new Float32Array(gw*gh);
   const visited=new Uint8Array(gw*gh);
 
   for(let gy=0; gy<gh; gy++) {
@@ -10251,10 +10254,15 @@ function analyzeCell(r,c) {
       const ax=minX+px, ay=minY+py;
       if(!pointInPolygon(ax,ay,poly)) continue;
       const idx=(py*w+px)*4;
-      const score=tasselScore(imageData[idx], imageData[idx+1], imageData[idx+2]);
-      scores[gy*gw+gx]=score;
+      const r=imageData[idx], g=imageData[idx+1], b=imageData[idx+2];
+      const mi=gy*gw+gx;
+      const score=tasselScore(r,g,b);
+      scores[mi]=score;
+      yellows[mi]=((r+g)*0.5)-b;
+      exgs[mi]=2*g-r-b;
+      chromas[mi]=Math.max(r,g,b)-Math.min(r,g,b);
       if(score>=PEND_SCORE_THRESHOLD) {
-        mask[gy*gw+gx]=1;
+        mask[mi]=1;
       }
     }
   }
@@ -10271,7 +10279,7 @@ function analyzeCell(r,c) {
           if(nx>=0 && nx<gw && ny>=0 && ny<gh && mask[ny*gw+nx]) neighbors++;
         }
       }
-      if(neighbors>=2 || scores[idx]>=4.5) cleanMask[idx]=1;
+      if(neighbors>=2 || scores[idx]>=PEND_SCORE_THRESHOLD+0.85) cleanMask[idx]=1;
     }
   }
 
@@ -10290,7 +10298,7 @@ function analyzeCell(r,c) {
           }
         }
       }
-      if(neighbors>=5 && scoreAround/9>=2.15) closedMask[idx]=1;
+      if(neighbors>=5 && scoreAround/9>=PEND_SCORE_THRESHOLD-0.35) closedMask[idx]=1;
     }
   }
 
@@ -10300,7 +10308,7 @@ function analyzeCell(r,c) {
     for(let gx=0; gx<gw; gx++) {
       const start=gy*gw+gx;
       if(!closedMask[start] || visited[start]) continue;
-      let cells=0, sx=0, sy=0, scoreSum=0;
+      let cells=0, sx=0, sy=0, scoreSum=0, yellowSum=0, exgSum=0, chromaSum=0, coreCells=0;
       let minGX=gx, maxGX=gx, minGY=gy, maxGY=gy;
       const stack=[[gx,gy]];
       visited[start]=1;
@@ -10309,6 +10317,8 @@ function analyzeCell(r,c) {
         const x=p[0], y=p[1];
         const pos=y*gw+x;
         cells++; sx+=x; sy+=y; scoreSum+=scores[pos];
+        yellowSum+=yellows[pos]; exgSum+=exgs[pos]; chromaSum+=chromas[pos];
+        if(scores[pos]>=PEND_SCORE_THRESHOLD+0.55) coreCells++;
         if(x<minGX) minGX=x; if(x>maxGX) maxGX=x;
         if(y<minGY) minGY=y; if(y>maxGY) maxGY=y;
         for(const d of dirs) {
@@ -10328,6 +10338,10 @@ function analyzeCell(r,c) {
       const density=cells/bboxCells;
       const elongation=Math.max(widthPx,heightPx)/Math.max(1,Math.min(widthPx,heightPx));
       const meanScore=scoreSum/Math.max(1,cells);
+      const meanYellow=yellowSum/Math.max(1,cells);
+      const meanExg=exgSum/Math.max(1,cells);
+      const meanChroma=chromaSum/Math.max(1,cells);
+      const coreRatio=coreCells/Math.max(1,cells);
       const cx=minX + (sx/cells)*step;
       const cy=minY + (sy/cells)*step;
       const maxAreaPx=Math.max(minAreaPx*22, Math.min(w*h*0.022, 1400));
@@ -10338,7 +10352,11 @@ function analyzeCell(r,c) {
         elongation<=8.5 &&
         widthPx<=Math.max(18, w*0.18) &&
         heightPx<=Math.max(18, h*0.18) &&
-        meanScore>=PEND_SCORE_THRESHOLD-0.15 &&
+        meanScore>=PEND_SCORE_THRESHOLD+0.05 &&
+        meanYellow>=9 &&
+        meanExg<58 &&
+        meanChroma>=14 &&
+        coreRatio>=0.12 &&
         pointInPolygon(cx,cy,poly);
 
       if(validShape) {
@@ -10737,10 +10755,10 @@ new ResizeObserver(()=>drawAll()).observe(vc);
             cron_percentual = 50.0
             cron_min_pendoes = 1
             cron_referencia = ""
-            cron_tolerancia = 62
+            cron_tolerancia = 58
             cron_filtro_cor = "Misto"
-            cron_sensibilidade = 72
-            cron_area_min = 18
+            cron_sensibilidade = 64
+            cron_area_min = 12
             cron_area_max = 900
             cron_revisao_manual = True
             meta_codlocal = ""
@@ -10931,10 +10949,16 @@ new ResizeObserver(()=>drawAll()).observe(vc);
   }
   .stat b { display:block; color:#fff; font-size:15px; }
   .stat span { color:#888; font-size:9px; text-transform:uppercase; letter-spacing:.6px; }
-  .date-list { max-height:120px; overflow:auto; border:1px solid #242424; border-radius:7px; padding:5px; background:#101010; }
-  .date-item { display:flex; justify-content:space-between; gap:5px; color:#aaa; font-size:10px; padding:3px; border-radius:4px; cursor:pointer; }
-  .date-item.active { color:#ffb347; background:#221400; }
-  .date-item:hover { background:#1a1a1a; }
+  .date-list { max-height:235px; overflow:auto; border:1px solid #242424; border-radius:7px; padding:5px; background:#101010; }
+  .date-item { color:#aaa; font-size:10px; padding:7px; border:1px solid transparent; border-radius:6px; cursor:pointer; margin-bottom:5px; background:rgba(255,255,255,.018); }
+  .date-item.active { color:#ffb347; background:#221400; border-color:#ff8c00; box-shadow:0 0 8px rgba(255,140,0,.18); }
+  .date-item:hover { background:#1a1a1a; border-color:#3a3a3a; }
+  .date-head { display:flex; justify-content:space-between; gap:6px; align-items:center; font-weight:800; }
+  .date-name { color:#f0f0f0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:178px; }
+  .date-meta { color:#888; font-size:9px; margin-top:3px; line-height:1.35; }
+  .date-mini { display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:5px; }
+  .date-mini span { background:#171717; border:1px solid #2b2b2b; border-radius:4px; padding:3px; text-align:center; color:#aaa; }
+  .date-mini b { display:block; color:#fff; font-size:10px; }
   .review {
     border:1px solid #333; border-radius:8px; background:#101010; padding:8px; margin-top:6px; display:none;
   }
@@ -10968,6 +10992,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
       <button class="btn blue" id="btnPrevDate">◀ Data</button>
       <button class="btn blue" id="btnNextDate">Data ▶</button>
     </div>
+    <div class="subtle" id="activeOrthoSummary">Selecione uma ortofoto para trocar a visualização no mesmo painel.</div>
     <div class="date-list" id="dateList"></div>
 
     <div class="sep"></div>
@@ -11015,6 +11040,7 @@ const zoomBadge = document.getElementById('cronZoom');
 const coordBadge = document.getElementById('cronCoord');
 const dateSelect = document.getElementById('dateSelect');
 const dateList = document.getElementById('dateList');
+const activeOrthoSummary = document.getElementById('activeOrthoSummary');
 const progressBar = document.getElementById('cronProgress');
 const statusEl = document.getElementById('cronStatus');
 const reviewPanel = document.getElementById('reviewPanel');
@@ -11097,15 +11123,57 @@ async function ensureChronoExcel(){
 
 function setupDates(){
   dateSelect.innerHTML = '';
-  dateList.innerHTML = '';
   ORTHOS.forEach((o, idx) => {
     const opt = document.createElement('option');
     opt.value = idx;
     opt.textContent = (idx + 1) + ' · ' + o.date + ' · ' + o.name;
     dateSelect.appendChild(opt);
+  });
+  renderOrthoSummary();
+}
+
+function safeHtml(value){
+  const div = document.createElement('div');
+  div.textContent = String(value ?? '');
+  return div.innerHTML;
+}
+
+function orthoStats(idx){
+  let total=0, hit=0, partial=0, review=0;
+  const tetoDefault = Math.max(1, Number(CONFIG.tetoPlantas || 1));
+  for(const label of Object.keys(resultsByParcel)){
+    const rec = resultsByParcel[label] || {};
+    const manual = manualReviews[label] || {};
+    const count = manual.counts && manual.counts[idx] !== undefined ? Number(manual.counts[idx] || 0) : Number((rec.counts || [])[idx] || 0);
+    const teto = Math.max(1, Number(manual.teto || tetoDefault));
+    const pct = count / teto * 100;
+    total += count;
+    if(pct >= Number(CONFIG.percentualLimite || 50) && count >= Number(CONFIG.minPendoes || 0)) hit++;
+    else if(count > 0) partial++;
+    if((rec.confidence || 1) < 0.38) review++;
+  }
+  return {total, hit, partial, review};
+}
+
+function renderOrthoSummary(){
+  dateList.innerHTML = '';
+  const active = ORTHOS[activeIdx] || {};
+  const activeStats = orthoStats(activeIdx);
+  activeOrthoSummary.innerHTML =
+    'Visualizando: <b style="color:#ffb347">' + (activeIdx + 1) + ' · ' + safeHtml(active.name || '') + '</b><br>' +
+    'Data: ' + safeHtml(active.date || '--') + ' · Pendões: ' + activeStats.total + ' · Atingidas: ' + activeStats.hit;
+  ORTHOS.forEach((o, idx) => {
+    const stats = orthoStats(idx);
     const item = document.createElement('div');
     item.className = 'date-item' + (idx === activeIdx ? ' active' : '');
-    item.innerHTML = '<span>' + (idx + 1) + ' · ' + o.date + '</span><span>' + o.name + '</span>';
+    item.innerHTML =
+      '<div class="date-head"><span>' + (idx + 1) + ' · ' + safeHtml(o.date) + '</span><span class="date-name">' + safeHtml(o.name) + '</span></div>' +
+      '<div class="date-meta">Clique para trocar a ortofoto no visualizador único.</div>' +
+      '<div class="date-mini">' +
+        '<span><b>' + stats.total + '</b>pendões</span>' +
+        '<span><b>' + stats.hit + '</b>atingiu</span>' +
+        '<span><b>' + stats.partial + '</b>parcial</span>' +
+      '</div>';
     item.onclick = () => setActiveDate(idx);
     dateList.appendChild(item);
   });
@@ -11115,7 +11183,8 @@ function setActiveDate(idx){
   activeIdx = clamp(idx, 0, ORTHOS.length - 1);
   dateSelect.value = String(activeIdx);
   tempPrepared = -1;
-  [...dateList.children].forEach((el,i) => el.classList.toggle('active', i === activeIdx));
+  renderOrthoSummary();
+  statusEl.textContent = 'Visualizando ortofoto ' + (activeIdx + 1) + '/' + ORTHOS.length + ': ' + (ORTHOS[activeIdx]?.name || '');
   drawAll();
 }
 
@@ -11126,7 +11195,11 @@ function loadImages(){
       loaded += 1;
       if(idx === 0) fitView();
       statusEl.textContent = 'Ortofotos carregadas: ' + loaded + '/' + ORTHOS.length;
+      renderOrthoSummary();
       drawAll();
+    };
+    im.onerror = () => {
+      statusEl.textContent = 'Falha ao carregar ortofoto: ' + (o.name || ('#' + (idx + 1)));
     };
     im.src = 'data:image/jpeg;base64,' + o.b64;
     images[idx] = im;
@@ -11270,7 +11343,7 @@ function tasselScore(r,g,b){
 function scoreThreshold(){
   const sensitivity = clamp(Number(CONFIG.sensibilidade || 60), 1, 100);
   const tolerance = clamp(Number(CONFIG.tolerancia || 55), 0, 100);
-  return clamp(3.95 - (sensitivity - 50) / 110 - (tolerance - 50) / 170, 3.45, 4.55);
+  return clamp(4.15 - (sensitivity - 50) / 120 - (tolerance - 50) / 190, 3.70, 4.70);
 }
 
 function mergeNearbyTassels(marks,w,h){
@@ -11326,6 +11399,9 @@ function analyzeCellInImage(idx,r,c){
   const clean = new Uint8Array(gw*gh);
   const close = new Uint8Array(gw*gh);
   const scores = new Float32Array(gw*gh);
+  const yellows = new Float32Array(gw*gh);
+  const exgs = new Float32Array(gw*gh);
+  const chromas = new Float32Array(gw*gh);
   const th = scoreThreshold();
 
   for(let gy=0; gy<gh; gy++){
@@ -11334,9 +11410,13 @@ function analyzeCellInImage(idx,r,c){
       const ax=minX+px, ay=minY+py;
       if(!pointInPolygon(ax,ay,poly)) continue;
       const di=(py*w+px)*4;
-      const score = tasselScore(data[di],data[di+1],data[di+2]);
+      const pr=data[di], pg=data[di+1], pb=data[di+2];
+      const score = tasselScore(pr,pg,pb);
       const mi=gy*gw+gx;
       scores[mi]=score;
+      yellows[mi]=((pr+pg)*0.5)-pb;
+      exgs[mi]=2*pg-pr-pb;
+      chromas[mi]=Math.max(pr,pg,pb)-Math.min(pr,pg,pb);
       if(score>=th) mask[mi]=1;
     }
   }
@@ -11353,7 +11433,7 @@ function analyzeCellInImage(idx,r,c){
           if(nx>=0 && nx<gw && ny>=0 && ny<gh && mask[ny*gw+nx]) n++;
         }
       }
-      if(n>=2 || scores[mi]>=th+1.05) clean[mi]=1;
+      if(n>=2 || scores[mi]>=th+0.85) clean[mi]=1;
     }
   }
 
@@ -11372,7 +11452,7 @@ function analyzeCellInImage(idx,r,c){
           }
         }
       }
-      if(n>=5 && s/Math.max(1,total)>=th-0.65) close[mi]=1;
+      if(n>=5 && s/Math.max(1,total)>=th-0.35) close[mi]=1;
     }
   }
 
@@ -11388,13 +11468,15 @@ function analyzeCellInImage(idx,r,c){
     for(let gx=0; gx<gw; gx++){
       const start=gy*gw+gx;
       if(!close[start] || visited[start]) continue;
-      let cells=0, sx=0, sy=0, scoreSum=0;
+      let cells=0, sx=0, sy=0, scoreSum=0, yellowSum=0, exgSum=0, chromaSum=0, coreCells=0;
       let minGX=gx, maxGX=gx, minGY=gy, maxGY=gy;
       const stack=[[gx,gy]];
       visited[start]=1;
       while(stack.length){
         const p=stack.pop(), x=p[0], y=p[1], pos=y*gw+x;
         cells++; sx+=x; sy+=y; scoreSum+=scores[pos];
+        yellowSum+=yellows[pos]; exgSum+=exgs[pos]; chromaSum+=chromas[pos];
+        if(scores[pos]>=th+0.55) coreCells++;
         if(x<minGX) minGX=x; if(x>maxGX) maxGX=x; if(y<minGY) minGY=y; if(y>maxGY) maxGY=y;
         for(const d of dirs){
           const nx=x+d[0], ny=y+d[1];
@@ -11410,6 +11492,10 @@ function analyzeCellInImage(idx,r,c){
       const density = cells / bboxCells;
       const elongation = Math.max(widthPx,heightPx) / Math.max(1,Math.min(widthPx,heightPx));
       const meanScore = scoreSum / Math.max(1,cells);
+      const meanYellow = yellowSum / Math.max(1,cells);
+      const meanExg = exgSum / Math.max(1,cells);
+      const meanChroma = chromaSum / Math.max(1,cells);
+      const coreRatio = coreCells / Math.max(1,cells);
       const cx=minX + (sx/cells)*step, cy=minY + (sy/cells)*step;
       const valid =
         area>=minArea &&
@@ -11418,7 +11504,11 @@ function analyzeCellInImage(idx,r,c){
         elongation<=8.5 &&
         widthPx<=Math.max(16, w*0.18) &&
         heightPx<=Math.max(16, h*0.22) &&
-        meanScore>=th-0.15 &&
+        meanScore>=th+0.05 &&
+        meanYellow>=9 &&
+        meanExg<58 &&
+        meanChroma>=14 &&
+        coreRatio>=0.12 &&
         pointInPolygon(cx,cy,poly);
       if(valid){
         marks.push({x:cx,y:cy,area:area,score:meanScore});
@@ -11525,6 +11615,7 @@ function rebuildRows(){
   document.getElementById('statNoHit').textContent = noHit;
   document.getElementById('statReview').textContent = review;
   document.getElementById('statFirstDate').textContent = 'Primeira data geral: ' + (firstGeneral || '--');
+  renderOrthoSummary();
 }
 
 function runChronologicalAnalysis(){
