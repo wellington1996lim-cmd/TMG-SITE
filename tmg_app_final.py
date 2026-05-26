@@ -5735,6 +5735,7 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
                 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
                 if st.button(f"Selecionar {nome}", key=f"btn_cultura_{nome}", type="primary"):
                     st.session_state.cultura_selecionada = nome
+                    st.session_state.pagina_ativa = "Checklist"
                     app_rerun()
 
         if can_open_partners:
@@ -5789,6 +5790,141 @@ if "logo_sistema" not in st.session_state:
 
 def ir_para(pagina):
     st.session_state.pagina_ativa = pagina
+
+def _cultura_ambiente_info(cultura: str = "") -> dict:
+    cultura_norm = str(cultura or st.session_state.get("cultura_selecionada") or "").strip().upper()
+    dados = {
+        "SOJA": {
+            "icone": "🌱",
+            "nome": "SOJA",
+            "subtitulo": "Ambiente de Análise de Soja",
+            "cor": "#4caf50",
+            "glow": "76, 175, 80",
+        },
+        "MILHO": {
+            "icone": "🌽",
+            "nome": "MILHO",
+            "subtitulo": "Ambiente de Análise de Milho",
+            "cor": "#ffb300",
+            "glow": "255, 179, 0",
+        },
+        "ALGODÃO": {
+            "icone": "🌿",
+            "nome": "ALGODÃO",
+            "subtitulo": "Ambiente de Análise de Algodão",
+            "cor": "#80cbc4",
+            "glow": "128, 203, 196",
+        },
+        "PARCEIROS": {
+            "icone": "🤝",
+            "nome": "PARCEIROS",
+            "subtitulo": "Controle de Voos e Dados",
+            "cor": THEME_PRIMARY_COLOR,
+            "glow": THEME_PRIMARY_RGB,
+        },
+    }
+    return dados.get(cultura_norm, dados["SOJA"])
+
+def render_cultura_ambiente_css() -> None:
+    st.markdown("""
+    <style>
+    .cultura-env-card {
+        width: 100%;
+        margin: 4px 0 18px 0;
+        padding: 14px 18px;
+        border-radius: 16px;
+        border: 1px solid rgba(120, 220, 255, .44);
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.14), transparent 28%),
+            linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.78), rgba(0,212,255,.12));
+        box-shadow:
+            0 16px 34px rgba(0,0,0,.42),
+            0 0 28px rgba(0,212,255,.18),
+            inset 0 1px 0 rgba(255,255,255,.20),
+            inset 0 -12px 20px rgba(2,14,36,.38);
+        backdrop-filter: blur(12px) saturate(145%);
+        -webkit-backdrop-filter: blur(12px) saturate(145%);
+        text-align: center;
+    }
+    .cultura-env-logo {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 52px;
+        height: 52px;
+        margin: 0 auto 8px auto;
+        border-radius: 16px;
+        border: 1px solid rgba(255,255,255,.28);
+        background:
+            radial-gradient(circle at 30% 18%, rgba(255,255,255,.35), transparent 32%),
+            linear-gradient(145deg, rgba(255,255,255,.12), rgba(2,14,36,.72));
+        font-size: 2rem;
+        box-shadow:
+            0 10px 22px rgba(0,0,0,.38),
+            0 0 24px var(--culture-glow),
+            inset 0 1px 0 rgba(255,255,255,.26);
+    }
+    .cultura-env-title {
+        color: #ffffff;
+        font-family: 'Segoe UI', Arial, sans-serif;
+        font-size: 1rem;
+        font-weight: 950;
+        letter-spacing: 1.8px;
+        text-transform: uppercase;
+        text-shadow:
+            0 1px 0 rgba(0,0,0,.95),
+            0 0 12px var(--culture-glow);
+    }
+    .cultura-env-subtitle {
+        margin-top: 4px;
+        color: #dffbff;
+        font-size: .74rem;
+        font-weight: 800;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        text-shadow: 0 1px 0 rgba(0,0,0,.85);
+    }
+    .cultura-env-top {
+        max-width: 720px;
+        margin: 0 auto 20px auto;
+        padding: 13px 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+    }
+    .cultura-env-top .cultura-env-logo {
+        width: 46px;
+        height: 46px;
+        margin: 0;
+        font-size: 1.75rem;
+    }
+    @media (max-width: 720px) {
+        .cultura-env-top {
+            flex-direction: column;
+            gap: 8px;
+            padding: 12px 14px;
+        }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+def render_cultura_ambiente_card(topo: bool = False) -> None:
+    cultura = st.session_state.get("cultura_selecionada")
+    if not cultura or cultura == "PARCEIROS":
+        return
+    info = _cultura_ambiente_info(cultura)
+    glow = f"rgba({info['glow']}, .42)"
+    extra_class = " cultura-env-top" if topo else ""
+    st.markdown(f"""
+    <div class="cultura-env-card{extra_class}" style="--culture-glow:{glow}; border-color:{info['cor']}88;">
+        <div class="cultura-env-logo">{info['icone']}</div>
+        <div>
+            <div class="cultura-env-title">Ambiente {html.escape(info['nome'])}</div>
+            <div class="cultura-env-subtitle">{html.escape(info['subtitulo'])}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # Adicionado um payload oculto para receber as coordenadas vindas do JavaScript
 st.text_input("grid_payload", key="grid_payload", label_visibility="hidden")
@@ -11702,6 +11838,7 @@ show_culture_modules = bool(_auth_allowed_cultures(current_user))
 show_partners_module = _auth_can_partners(current_user)
 show_admin_config = _auth_is_admin(current_user)
 is_partners_page = st.session_state.pagina_ativa == 'Parceiros'
+render_cultura_ambiente_css()
 
 with st.sidebar:
 
@@ -11709,6 +11846,15 @@ with st.sidebar:
     <div class='menu-3d-title'>&#9776; MENU</div>
     <hr class='separator-glow'>
     """, unsafe_allow_html=True)
+
+    if show_culture_modules and not is_partners_page and st.session_state.get("cultura_selecionada") not in (None, "", "PARCEIROS"):
+        render_cultura_ambiente_card(topo=False)
+        ambiente_info = _cultura_ambiente_info()
+        if st.button(f"{ambiente_info['icone']} Ambiente {ambiente_info['nome']}", key="btn_ambiente_cultura_atual", use_container_width=True):
+            st.session_state.cultura_selecionada = None
+            st.session_state.pagina_ativa = "Checklist"
+            app_rerun()
+        st.markdown("<hr class='separator-glow'>", unsafe_allow_html=True)
 
     if is_partners_page and show_partners_module:
         if _auth_menu_allowed("menu_parceiros", current_user):
@@ -11786,6 +11932,7 @@ if st.session_state.logo_sistema and st.session_state.pagina_ativa not in ('Tran
 
 if st.session_state.pagina_ativa not in ('TransferenciaVoos', 'VoosDirecionados'):
     st.markdown("<h1 class='main-header'>TMG SISTEMA DE ANÁLISE</h1>", unsafe_allow_html=True)
+    render_cultura_ambiente_card(topo=True)
 
 # ==========================================
 # CONTEÚDO[cite: 1]
