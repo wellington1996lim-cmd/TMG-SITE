@@ -1,0 +1,42 @@
+{
+  "messages": [
+    {
+      "id": "d74d9e3b6c3f4b6bc2",
+      "remetente": "Wellington",
+      "remetente_nome": "Wellington",
+      "destinatario": "123456",
+      "destinatario_nome": "123456",
+      "texto": "oiii",
+      "data": "14/05/2026",
+      "hora": "14:11:45",
+      "timestamp": "2026-05-14T14:11:45",
+      "lida": true,
+      "lida_em": "2026-05-14T14:12:26"
+    },
+    {
+      "id": "b14e952bbf503b8c23",
+      "remetente": "123456",
+      "remetente_nome": "123456",
+      "destinatario": "Wellington",
+      "destinatario_nome": "Wellington",
+      "texto": "tudo bem?",
+      "data": "14/05/2026",
+      "hora": "14:12:42",
+      "timestamp": "2026-05-14T14:12:42",
+      "lida": true,
+      "lida_em": "2026-05-14T14:12:54"
+    },
+    {
+      "id": "fff268d19e945afb95",
+      "remetente": "Wellington",
+      "remetente_nome": "Wellington",
+      "destinatario": "João Vitor Braga Visioli",
+      "destinatario_nome": "João Vitor Braga Visioli",
+      "texto": "oii",
+      "data": "15/05/2026",
+      "hora": "16:30:35",
+      "timestamp": "2026-05-15T16:30:35",
+      "lida": false
+    }
+  ]
+}

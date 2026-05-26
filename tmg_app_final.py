@@ -20,6 +20,8 @@ import html
 import re
 import subprocess
 import sqlite3
+import threading
+import time
 from datetime import datetime, date
 import pandas as pd
 
@@ -31,6 +33,30 @@ except ImportError:
     HAS_STREAMLIT_IMAGE_COORDINATES = False
 
 APP_ROOT = Path(__file__).resolve().parent
+APP_TEMP_DIR = APP_ROOT / "tmg_data" / "tmp"
+APP_ULTRALYTICS_DIR = APP_ROOT / "Ultralytics"
+APP_MPLCONFIG_DIR = APP_ROOT / "tmg_data" / "matplotlib"
+
+for _local_dir in (
+    APP_ROOT / ".streamlit",
+    APP_ROOT / "tmg_data",
+    APP_ROOT / "tmg_config",
+    APP_TEMP_DIR,
+    APP_ULTRALYTICS_DIR,
+    APP_MPLCONFIG_DIR,
+):
+    _local_dir.mkdir(parents=True, exist_ok=True)
+
+os.environ.setdefault("TMG_APP_ROOT", str(APP_ROOT))
+os.environ.setdefault("TMG_DATA_DIR", str(APP_ROOT / "tmg_data"))
+os.environ.setdefault("TMG_CONFIG_DIR", str(APP_ROOT / "tmg_config"))
+os.environ.setdefault("STREAMLIT_CONFIG_DIR", str(APP_ROOT / ".streamlit"))
+os.environ.setdefault("YOLO_CONFIG_DIR", str(APP_ULTRALYTICS_DIR))
+os.environ.setdefault("MPLCONFIGDIR", str(APP_MPLCONFIG_DIR))
+os.environ.setdefault("TMP", str(APP_TEMP_DIR))
+os.environ.setdefault("TEMP", str(APP_TEMP_DIR))
+os.environ.setdefault("TMPDIR", str(APP_TEMP_DIR))
+tempfile.tempdir = str(APP_TEMP_DIR)
 
 # NOVO - Configurações para suportar imagens grandes e formatos variados
 Image.MAX_IMAGE_PIXELS = None
@@ -278,6 +304,186 @@ def _img_to_base64_css(path: Path) -> str:
         data = base64.b64encode(f.read()).decode()
     return f"data:image/png;base64,{data}"
 
+def get_progress_color(progress: int | float) -> str:
+    try:
+        pct = max(0, min(100, int(float(progress))))
+    except Exception:
+        pct = 0
+    theme = globals().get("DEPLOY_BAR_THEME", {})
+    if pct >= 100:
+        return theme.get("fill_100", "linear-gradient(90deg,#00bcd4,#00e676)")
+    if pct >= 86:
+        return theme.get("fill_86_99", "linear-gradient(90deg,#0d47a1,#1565c0,#42a5f5)")
+    if pct >= 61:
+        return theme.get("fill_61_85", "linear-gradient(90deg,#1565c0,#1976d2,#42a5f5)")
+    if pct >= 31:
+        return theme.get("fill_31_60", "linear-gradient(90deg,#1976d2,#42a5f5,#64b5f6)")
+    return theme.get("fill_0_30", "linear-gradient(90deg,#64b5f6,#90caf9,#bbdefb)")
+
+def _tmg_loading_logo_html() -> str:
+    try:
+        if LOGO_PATH.exists():
+            logo_src = _img_to_base64_css(LOGO_PATH)
+            return f"<img class='tmg-load-logo-img' src='{logo_src}' alt='TMG'>"
+    except Exception:
+        pass
+    return "<div class='tmg-load-logo-fallback'>TMG</div>"
+
+def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", container=None):
+    try:
+        pct = max(0, min(100, int(float(progress))))
+    except Exception:
+        pct = 0
+    texto_seguro = html.escape(str(texto or "Carregando arquivo..."))
+    status = "Carregamento concluído com sucesso." if pct >= 100 else texto_seguro
+    fill = get_progress_color(pct)
+    theme = globals().get("DEPLOY_BAR_THEME", {})
+    card_background = theme.get(
+        "card_background",
+        "linear-gradient(145deg, rgba(14,26,43,.96), rgba(16,18,24,.98)), radial-gradient(circle at top left, rgba(0,229,255,.14), transparent 36%)",
+    )
+    card_border = theme.get("card_border", "rgba(66,165,245,.36)")
+    card_shadow = theme.get(
+        "card_shadow",
+        "0 16px 34px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.08), inset 0 -10px 22px rgba(0,0,0,.18)",
+    )
+    track_background = theme.get("track_background", "linear-gradient(180deg,#070b12,#111d2c)")
+    track_border = theme.get("track_border", "rgba(255,255,255,.10)")
+    track_shadow = theme.get("track_shadow", "inset 0 3px 8px rgba(0,0,0,.65), 0 8px 18px rgba(0,0,0,.28)")
+    fill_shadow = theme.get("fill_shadow", "inset 0 1px 0 rgba(255,255,255,.42), 0 0 18px rgba(66,165,245,.58)")
+    status_color = theme.get("status_success" if pct >= 100 else "status_loading", "#5ff2b1" if pct >= 100 else "#ffb347")
+    logo_html = _tmg_loading_logo_html()
+    markup = f"""
+    <style>
+    .tmg-load-card {{
+        width:100%;
+        margin:10px 0 14px 0;
+        padding:16px 18px;
+        border-radius:14px;
+        border:1px solid {card_border};
+        background:{card_background};
+        box-shadow:{card_shadow};
+        font-family:'Segoe UI', Arial, sans-serif;
+    }}
+    .tmg-load-head {{
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        gap:12px;
+        margin-bottom:12px;
+    }}
+    .tmg-load-logo-img {{
+        max-height:40px;
+        max-width:130px;
+        object-fit:contain;
+        filter:drop-shadow(0 6px 12px rgba(0,0,0,.45));
+    }}
+    .tmg-load-logo-fallback {{
+        color:#fff;
+        font-weight:900;
+        letter-spacing:4px;
+        font-size:1.15rem;
+        text-shadow:0 0 16px rgba(66,165,245,.55);
+    }}
+    .tmg-load-text {{
+        color:#f4f7fb;
+        font-size:.88rem;
+        font-weight:700;
+        letter-spacing:.3px;
+        text-align:center;
+    }}
+    .tmg-load-track {{
+        position:relative;
+        height:24px;
+        overflow:hidden;
+        border-radius:999px;
+        background:{track_background};
+        border:1px solid {track_border};
+        box-shadow:{track_shadow};
+    }}
+    .tmg-load-fill {{
+        width:{pct}%;
+        height:100%;
+        border-radius:999px;
+        background:{fill};
+        box-shadow:{fill_shadow};
+        transition:width .45s ease, background .45s ease;
+        position:relative;
+    }}
+    .tmg-load-fill:after {{
+        content:"";
+        position:absolute;
+        inset:0;
+        background:linear-gradient(120deg, transparent 0%, rgba(255,255,255,.38) 45%, transparent 75%);
+        transform:translateX(-100%);
+        animation:tmgLoadShine 1.4s ease-in-out infinite;
+    }}
+    .tmg-load-percent {{
+        position:absolute;
+        inset:0;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        color:#fff;
+        font-weight:900;
+        font-size:.78rem;
+        text-shadow:0 1px 4px rgba(0,0,0,.8);
+        letter-spacing:.5px;
+    }}
+    .tmg-load-status {{
+        margin-top:8px;
+        color:{status_color};
+        font-size:.78rem;
+        font-weight:700;
+        text-align:center;
+    }}
+    @keyframes tmgLoadShine {{
+        0% {{ transform:translateX(-100%); }}
+        100% {{ transform:translateX(180%); }}
+    }}
+    </style>
+    <div class="tmg-load-card">
+        <div class="tmg-load-head">{logo_html}<div class="tmg-load-text">{texto_seguro}</div></div>
+        <div class="tmg-load-track">
+            <div class="tmg-load-fill"></div>
+            <div class="tmg-load-percent">{pct}%</div>
+        </div>
+        <div class="tmg-load-status">{html.escape(status)}</div>
+    </div>
+    """
+    target = container if container is not None else st
+    target.markdown(markup, unsafe_allow_html=True)
+    return container
+
+def update_tmg_loading(container, progress, texto: str = "Carregando arquivo..."):
+    if container is None:
+        return None
+    return render_tmg_loading_bar(progress, texto, container=container)
+
+def render_progress_upload_tmg(progress, texto: str = "Carregando arquivo...", container=None):
+    return render_tmg_loading_bar(progress, texto, container=container)
+
+def render_upload_status_tmg(progress=100, texto: str = "Carregamento concluído com sucesso.", container=None):
+    return render_tmg_loading_bar(progress, texto, container=container)
+
+def clear_tmg_loading(container):
+    try:
+        if container is not None:
+            container.empty()
+    except Exception:
+        pass
+
+def finish_tmg_loading_and_clear(container, texto: str = "Carregamento concluído com sucesso.", hold_seconds: float = 0.45):
+    if container is None:
+        return
+    try:
+        update_tmg_loading(container, 100, texto)
+        if hold_seconds and hold_seconds > 0:
+            time.sleep(float(hold_seconds))
+    except Exception:
+        pass
+    clear_tmg_loading(container)
+
 def app_rerun():
     if hasattr(st, "rerun"):
         st.rerun()
@@ -292,7 +498,6 @@ def app_image(image, **kwargs):
 
 def _streamlit_secret(name: str, default: str = "") -> str:
     secrets_paths = [
-        Path.home() / ".streamlit" / "secrets.toml",
         APP_ROOT / ".streamlit" / "secrets.toml",
     ]
     if not any(path.exists() for path in secrets_paths):
@@ -303,11 +508,16 @@ def _streamlit_secret(name: str, default: str = "") -> str:
         return default
 
 def _configured_database_dir() -> str:
-    return (
+    configured = (
         os.getenv("TMG_DATABASE_DIR", "").strip()
         or _streamlit_secret("TMG_DATABASE_DIR").strip()
         or _streamlit_secret("database_dir").strip()
     )
+    if configured:
+        path = _resolve_system_path(configured)
+        if _path_inside_app_root(path):
+            return str(path)
+    return str((APP_ROOT / "tmg_data").resolve())
 
 def _int_setting(name: str, default: int, min_value: int, max_value: int) -> int:
     raw = os.getenv(name, "").strip() or _streamlit_secret(name).strip()
@@ -341,14 +551,27 @@ def _upload_limit_mb() -> int:
 def _looks_like_windows_drive_path(raw: str) -> bool:
     return len(raw) > 2 and raw[1] == ":" and raw[2:3] in ("\\", "/")
 
+def _path_inside_app_root(path: Path) -> bool:
+    try:
+        return Path(path).resolve().is_relative_to(APP_ROOT.resolve())
+    except Exception:
+        return False
+
+def _force_inside_app_root(path: Path, default_name: str = "tmg_data") -> Path:
+    path = Path(path)
+    if _path_inside_app_root(path):
+        return path.resolve()
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", path.name or default_name).strip("._") or default_name
+    return (APP_ROOT / safe_name).resolve()
+
 def _resolve_system_path(value: str) -> Path:
     raw = os.path.expandvars(str(value or "").strip())
     if os.name != "nt" and _looks_like_windows_drive_path(raw):
         raw = "tmg_data"
-    path = Path(raw).expanduser() if raw else Path("tmg_data")
+    path = Path(raw) if raw else Path("tmg_data")
     if not path.is_absolute():
         path = (APP_ROOT / path).resolve()
-    return path
+    return _force_inside_app_root(path, "tmg_data")
 
 def _load_system_config() -> dict:
     configured_dir = _configured_database_dir()
@@ -368,14 +591,12 @@ def _load_system_config() -> dict:
     data.setdefault("database_dir", str(default_dir))
     data.setdefault("updated_at", "")
     data.setdefault("tema", "padrao")
-    if configured_dir:
-        data["database_dir"] = str(default_dir)
-    else:
-        data["database_dir"] = str(_resolve_system_path(data.get("database_dir", "tmg_data")))
+    data["database_dir"] = str(_resolve_system_path(data.get("database_dir", default_dir)))
     return data
 
 def _save_system_config(data: dict) -> None:
     SYSTEM_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    data["database_dir"] = str(_resolve_system_path(data.get("database_dir", "tmg_data")))
     SYSTEM_CONFIG_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 SYSTEM_CONFIG = _load_system_config()
@@ -401,12 +622,87 @@ THEME_PALETTES = {
         "shadow_3": "#071f4a",
         "rgb": "66,165,245",
     },
+    "tmg_premium_neon_3d": {
+        "primary": "#00E5FF",
+        "primary_dark": "#0E3A70",
+        "primary_soft": "#00FF9D",
+        "shadow_1": "#1D7BFF",
+        "shadow_2": "#071A35",
+        "shadow_3": "#020E24",
+        "rgb": "0,229,255",
+    },
 }
 THEME_PALETTE = THEME_PALETTES.get(SYSTEM_CONFIG.get("tema", "padrao"), THEME_PALETTES["padrao"])
 THEME_PRIMARY_COLOR = THEME_PALETTE["primary"]
 THEME_PRIMARY_DARK = THEME_PALETTE["primary_dark"]
 THEME_PRIMARY_SOFT = THEME_PALETTE["primary_soft"]
 THEME_PRIMARY_RGB = THEME_PALETTE["rgb"]
+
+DEPLOY_BAR_THEME_PATH = SYSTEM_DATABASE_DIR / "deploy_bar_theme.json"
+
+def _default_deploy_bar_theme() -> dict:
+    return {
+        "version": 1,
+        "theme": SYSTEM_CONFIG.get("tema", "padrao"),
+        "card_background": (
+            f"radial-gradient(circle at top left, rgba({THEME_PRIMARY_RGB},.16), transparent 36%), "
+            "linear-gradient(145deg, rgba(2,14,36,.98), rgba(7,26,53,.96))"
+        ),
+        "card_border": f"rgba({THEME_PRIMARY_RGB},.50)",
+        "card_shadow": (
+            "0 18px 38px rgba(0,0,0,.48), "
+            f"0 0 28px rgba({THEME_PRIMARY_RGB},.22), "
+            "inset 0 1px 0 rgba(255,255,255,.08)"
+        ),
+        "track_background": "linear-gradient(180deg,#020e24,#061525)",
+        "track_border": f"rgba({THEME_PRIMARY_RGB},.42)",
+        "track_shadow": (
+            "inset 0 3px 8px rgba(0,0,0,.68), "
+            "0 8px 18px rgba(0,0,0,.30), "
+            f"0 0 14px rgba({THEME_PRIMARY_RGB},.18)"
+        ),
+        "fill_0_30": f"linear-gradient(90deg,{THEME_PRIMARY_SOFT},{THEME_PRIMARY_COLOR})",
+        "fill_31_60": f"linear-gradient(90deg,{THEME_PRIMARY_COLOR},#00d4ff)",
+        "fill_61_85": f"linear-gradient(90deg,{THEME_PRIMARY_DARK},{THEME_PRIMARY_COLOR},#00d4ff)",
+        "fill_86_99": f"linear-gradient(90deg,#020e24,{THEME_PRIMARY_DARK},{THEME_PRIMARY_COLOR})",
+        "fill_100": f"linear-gradient(90deg,#00bcd4,{THEME_PRIMARY_SOFT},#00e676)",
+        "fill_active": f"linear-gradient(90deg,#00e5ff 0%,{THEME_PRIMARY_DARK} 48%,#00ff9d 100%)",
+        "fill_shadow": (
+            "inset 0 1px 0 rgba(255,255,255,.46), "
+            f"0 0 16px rgba({THEME_PRIMARY_RGB},.56), "
+            "0 0 22px rgba(0,255,157,.22)"
+        ),
+        "status_success": "#5ff2b1",
+        "status_loading": THEME_PRIMARY_SOFT,
+    }
+
+def _load_deploy_bar_theme() -> dict:
+    default = _default_deploy_bar_theme()
+    try:
+        if DEPLOY_BAR_THEME_PATH.exists():
+            data = json.loads(DEPLOY_BAR_THEME_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        else:
+            data = {}
+    except Exception:
+        data = {}
+    if data.get("theme") not in (None, default["theme"]):
+        data = {}
+    merged = dict(default)
+    for key, value in data.items():
+        if key == "version" and isinstance(value, (int, float)):
+            merged[key] = value
+        elif key != "version" and isinstance(value, str):
+            merged[key] = value
+    try:
+        DEPLOY_BAR_THEME_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DEPLOY_BAR_THEME_PATH.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return merged
+
+DEPLOY_BAR_THEME = _load_deploy_bar_theme()
 
 st.markdown(f"""
 <style>
@@ -419,6 +715,14 @@ st.markdown(f"""
     --tmg-primary-shadow-3: {THEME_PALETTE["shadow_3"]};
     --tmg-primary-glow: rgba({THEME_PRIMARY_RGB}, .42);
     --tmg-primary-glow-soft: rgba({THEME_PRIMARY_RGB}, .18);
+    --tmg-deploy-card-bg: {DEPLOY_BAR_THEME.get("card_background")};
+    --tmg-deploy-border: {DEPLOY_BAR_THEME.get("card_border")};
+    --tmg-deploy-card-shadow: {DEPLOY_BAR_THEME.get("card_shadow")};
+    --tmg-deploy-track-bg: {DEPLOY_BAR_THEME.get("track_background")};
+    --tmg-deploy-track-border: {DEPLOY_BAR_THEME.get("track_border")};
+    --tmg-deploy-track-shadow: {DEPLOY_BAR_THEME.get("track_shadow")};
+    --tmg-deploy-fill-active: {DEPLOY_BAR_THEME.get("fill_active")};
+    --tmg-deploy-fill-shadow: {DEPLOY_BAR_THEME.get("fill_shadow")};
 }}
 [style*="#ff8c00"], [style*="#FF8C00"] {{
     color: var(--tmg-primary) !important;
@@ -437,8 +741,522 @@ h1, h2, h3 {{
         2px 2px 0 rgba(0,0,0,.45),
         0 0 18px var(--tmg-primary-glow) !important;
 }}
+header[data-testid="stHeader"],
+[data-testid="stHeader"] {{
+    background:
+        linear-gradient(90deg, rgba(2,14,36,.97), rgba(7,31,63,.96) 48%, rgba({THEME_PRIMARY_RGB}, .20)),
+        linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,0)) !important;
+    border-bottom:1px solid rgba({THEME_PRIMARY_RGB}, .42) !important;
+    box-shadow:
+        0 8px 24px rgba(0,0,0,.34),
+        0 0 24px rgba({THEME_PRIMARY_RGB}, .20) !important;
+    backdrop-filter: blur(10px) saturate(140%);
+    -webkit-backdrop-filter: blur(10px) saturate(140%);
+}}
+header[data-testid="stHeader"] > div,
+[data-testid="stHeader"] > div {{
+    background:transparent !important;
+}}
+[data-testid="stDecoration"] {{
+    background:linear-gradient(90deg, var(--tmg-primary-dark), var(--tmg-primary), var(--tmg-primary-soft)) !important;
+}}
+.tmg-user-chip-neon {{
+    position:fixed;
+    left:14px;
+    top:58px;
+    z-index:999997;
+    pointer-events:auto;
+    padding:9px 14px;
+    border-radius:14px;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .62);
+    background:
+        linear-gradient(120deg, rgba(255,255,255,.13), transparent 28%),
+        radial-gradient(circle at top left, rgba({THEME_PRIMARY_RGB}, .24), transparent 42%),
+        linear-gradient(145deg, rgba(2,14,36,.94), rgba(14,58,112,.82) 54%, rgba({THEME_PRIMARY_RGB}, .30));
+    color:#ffffff;
+    font-weight:900;
+    font-size:.82rem;
+    letter-spacing:.45px;
+    box-shadow:
+        0 13px 28px rgba(0,0,0,.48),
+        0 0 20px rgba({THEME_PRIMARY_RGB}, .38),
+        inset 0 1px 0 rgba(255,255,255,.24),
+        inset 0 -7px 14px rgba(2,14,36,.48);
+    text-shadow:
+        0 1px 0 rgba(0,0,0,.92),
+        0 0 12px rgba({THEME_PRIMARY_RGB}, .62);
+    backdrop-filter: blur(10px) saturate(140%);
+    -webkit-backdrop-filter: blur(10px) saturate(140%);
+    transform:translateZ(0);
+    transition:all .30s ease;
+}}
+.tmg-user-chip-neon:hover {{
+    border-color:var(--tmg-primary-soft);
+    box-shadow:
+        0 16px 34px rgba(0,0,0,.54),
+        0 0 28px rgba({THEME_PRIMARY_RGB}, .58),
+        0 0 42px rgba({THEME_PRIMARY_RGB}, .24),
+        inset 0 1px 0 rgba(255,255,255,.34),
+        inset 0 -8px 16px rgba(2,14,36,.44);
+    transform:translateY(-1px) scale(1.01);
+}}
+header [data-testid="stToolbar"] a,
+header [data-testid="stToolbar"] button,
+[data-testid="stToolbar"] a,
+[data-testid="stToolbar"] button {{
+    border-radius:14px !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .54) !important;
+    background:
+        linear-gradient(120deg, rgba(255,255,255,.14), transparent 30%),
+        linear-gradient(145deg, rgba(2,14,36,.92), rgba(14,58,112,.78), rgba({THEME_PRIMARY_RGB}, .26)) !important;
+    color:#ffffff !important;
+    font-weight:900 !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.84), 0 0 10px rgba({THEME_PRIMARY_RGB}, .56) !important;
+    box-shadow:
+        0 10px 24px rgba(0,0,0,.38),
+        0 0 18px rgba({THEME_PRIMARY_RGB}, .32),
+        inset 0 1px 0 rgba(255,255,255,.24),
+        inset 0 -5px 12px rgba(2,14,36,.50) !important;
+    transition:all .30s ease !important;
+    backdrop-filter: blur(9px) saturate(140%);
+    -webkit-backdrop-filter: blur(9px) saturate(140%);
+}}
+header [data-testid="stToolbar"] a:hover,
+header [data-testid="stToolbar"] button:hover,
+[data-testid="stToolbar"] a:hover,
+[data-testid="stToolbar"] button:hover {{
+    border-color:var(--tmg-primary-soft) !important;
+    box-shadow:
+        0 13px 28px rgba(0,0,0,.44),
+        0 0 26px rgba({THEME_PRIMARY_RGB}, .55),
+        0 0 38px rgba({THEME_PRIMARY_RGB}, .22),
+        inset 0 1px 0 rgba(255,255,255,.34) !important;
+    transform:translateY(-1px) scale(1.01) !important;
+}}
+header [data-testid="stToolbar"] a:active,
+header [data-testid="stToolbar"] button:active,
+[data-testid="stToolbar"] a:active,
+[data-testid="stToolbar"] button:active {{
+    transform:translateY(1px) scale(.99) !important;
+    box-shadow:inset 0 4px 10px rgba(0,0,0,.62), 0 0 14px rgba({THEME_PRIMARY_RGB}, .38) !important;
+}}
+[data-testid="stDeployButton"],
+[data-testid="stDeployButton"] button,
+header [data-testid="stToolbarActions"] button,
+header [data-testid="stToolbarActions"] a {{
+    border-radius:14px !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .58) !important;
+    background:
+        linear-gradient(120deg, rgba(255,255,255,.16), transparent 31%),
+        radial-gradient(circle at 18% 0%, rgba({THEME_PRIMARY_RGB}, .25), transparent 46%),
+        linear-gradient(145deg, rgba(2,14,36,.94), rgba(14,58,112,.80), rgba({THEME_PRIMARY_RGB}, .28)) !important;
+    color:#ffffff !important;
+    font-weight:900 !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 12px rgba({THEME_PRIMARY_RGB}, .62) !important;
+    box-shadow:
+        0 10px 24px rgba(0,0,0,.40),
+        0 0 20px rgba({THEME_PRIMARY_RGB}, .34),
+        inset 0 1px 0 rgba(255,255,255,.27),
+        inset 0 -6px 12px rgba(2,14,36,.50) !important;
+    transition:all .30s ease !important;
+    backdrop-filter: blur(9px) saturate(145%);
+    -webkit-backdrop-filter: blur(9px) saturate(145%);
+}}
+[data-testid="stDeployButton"] *,
+header [data-testid="stToolbarActions"] button *,
+header [data-testid="stToolbarActions"] a * {{
+    color:#ffffff !important;
+    font-weight:900 !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 12px rgba({THEME_PRIMARY_RGB}, .62) !important;
+}}
+[data-testid="stDeployButton"]:hover,
+[data-testid="stDeployButton"] button:hover,
+header [data-testid="stToolbarActions"] button:hover,
+header [data-testid="stToolbarActions"] a:hover {{
+    border-color:var(--tmg-primary-soft) !important;
+    box-shadow:
+        0 13px 28px rgba(0,0,0,.46),
+        0 0 28px rgba({THEME_PRIMARY_RGB}, .58),
+        0 0 42px rgba({THEME_PRIMARY_RGB}, .24),
+        inset 0 1px 0 rgba(255,255,255,.36) !important;
+    transform:translateY(-1px) scale(1.01) !important;
+}}
+[data-testid="stDeployButton"]:active,
+[data-testid="stDeployButton"] button:active,
+header [data-testid="stToolbarActions"] button:active,
+header [data-testid="stToolbarActions"] a:active {{
+    transform:translateY(1px) scale(.99) !important;
+    box-shadow:inset 0 4px 10px rgba(0,0,0,.64), 0 0 15px rgba({THEME_PRIMARY_RGB}, .40) !important;
+}}
+div[data-testid="stTextInput"] input,
+div[data-testid="stNumberInput"] input,
+div[data-testid="stTextArea"] textarea,
+div[data-testid="stDateInput"] input,
+div[data-testid="stTimeInput"] input {{
+    border-radius:8px !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .64) !important;
+    background:
+        linear-gradient(120deg, rgba(255,255,255,.10), transparent 30%),
+        linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.82), rgba({THEME_PRIMARY_RGB}, .16)) !important;
+    color:#ffffff !important;
+    font-weight:700 !important;
+    box-shadow:
+        0 9px 22px rgba(0,0,0,.34),
+        0 0 18px rgba({THEME_PRIMARY_RGB}, .20),
+        inset 0 1px 0 rgba(255,255,255,.18),
+        inset 0 -5px 12px rgba(2,14,36,.42) !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.78) !important;
+    transition:all .30s ease !important;
+}}
+div[data-testid="stTextInput"] input:hover,
+div[data-testid="stNumberInput"] input:hover,
+div[data-testid="stTextArea"] textarea:hover,
+div[data-testid="stDateInput"] input:hover,
+div[data-testid="stTimeInput"] input:hover,
+div[data-testid="stTextInput"] input:focus,
+div[data-testid="stNumberInput"] input:focus,
+div[data-testid="stTextArea"] textarea:focus,
+div[data-testid="stDateInput"] input:focus,
+div[data-testid="stTimeInput"] input:focus {{
+    border-color:var(--tmg-primary-soft) !important;
+    box-shadow:
+        0 10px 26px rgba(0,0,0,.38),
+        0 0 26px rgba({THEME_PRIMARY_RGB}, .36),
+        inset 0 1px 0 rgba(255,255,255,.26) !important;
+}}
+div[data-testid="stTextInput"] input::placeholder,
+div[data-testid="stNumberInput"] input::placeholder,
+div[data-testid="stTextArea"] textarea::placeholder {{
+    color:rgba(224,247,255,.72) !important;
+}}
+div[data-testid="stSelectbox"] [data-baseweb="select"],
+div[data-testid="stMultiSelect"] [data-baseweb="select"] {{
+    border-radius:9px !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .58) !important;
+    background:
+        linear-gradient(120deg, rgba(255,255,255,.13), transparent 32%),
+        radial-gradient(circle at right, rgba({THEME_PRIMARY_RGB}, .32), transparent 44%),
+        linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.78), rgba({THEME_PRIMARY_RGB}, .22)) !important;
+    box-shadow:
+        0 10px 24px rgba(0,0,0,.36),
+        0 0 22px rgba({THEME_PRIMARY_RGB}, .30),
+        inset 0 1px 0 rgba(255,255,255,.22),
+        inset 0 -6px 12px rgba(2,14,36,.44) !important;
+    transition:all .30s ease !important;
+}}
+div[data-testid="stSelectbox"] [data-baseweb="select"]:hover,
+div[data-testid="stMultiSelect"] [data-baseweb="select"]:hover {{
+    border-color:var(--tmg-primary-soft) !important;
+    box-shadow:
+        0 12px 28px rgba(0,0,0,.42),
+        0 0 30px rgba({THEME_PRIMARY_RGB}, .46),
+        inset 0 1px 0 rgba(255,255,255,.30) !important;
+}}
+div[data-testid="stSelectbox"] [data-baseweb="select"] *,
+div[data-testid="stMultiSelect"] [data-baseweb="select"] * {{
+    color:#ffffff !important;
+    font-weight:800 !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.78), 0 0 10px rgba({THEME_PRIMARY_RGB}, .38) !important;
+}}
 </style>
 """, unsafe_allow_html=True)
+
+def aplicar_estilo_titulos_3d():
+    st.markdown("""
+    <style>
+    div[data-testid="stMarkdownContainer"] h1,
+    div[data-testid="stMarkdownContainer"] h2,
+    div[data-testid="stMarkdownContainer"] h3,
+    div[data-testid="stMarkdownContainer"] h4,
+    div[data-testid="stMarkdownContainer"] h5,
+    div[data-testid="stMarkdownContainer"] h6,
+    .main-header,
+    .menu-3d-title,
+    .cultura-title,
+    .login-title,
+    .cfg-panel-title,
+    .vd-login-title,
+    .vd-section-title,
+    .partner-excel-title,
+    .partner-toolbox-title,
+    .partner-window-title,
+    .partner-card-title,
+    .partner-hero-title,
+    .assessment-panel-title {
+        background: linear-gradient(135deg,#ffffff 0%,#b8f3ff 22%,#42a5f5 52%,#00d4ff 75%,#5ff2b1 100%) !important;
+        -webkit-background-clip: text !important;
+        background-clip: text !important;
+        -webkit-text-fill-color: #ffffff !important;
+        color: #ffffff !important;
+        text-shadow:
+            0 2px 0 rgba(0,0,0,.92),
+            0 6px 14px rgba(0,0,0,.58),
+            0 0 14px rgba(0,212,255,.42),
+            0 0 28px rgba(95,242,177,.22) !important;
+        letter-spacing: .6px;
+    }
+    div[data-testid="stMarkdownContainer"] h4,
+    div[data-testid="stMarkdownContainer"] h5,
+    div[data-testid="stMarkdownContainer"] h6,
+    .vd-section-title,
+    .partner-toolbox-title,
+    .partner-card-title,
+    .assessment-panel-title {
+        letter-spacing: .35px;
+    }
+    .login-subtitle,
+    .cultura-subtitle,
+    .partner-excel-subtitle,
+    .partner-window-subtitle,
+    .partner-hero-subtitle,
+    .vd-login-sub,
+    div[data-testid="stCaptionContainer"] {
+        color: #d9fbff !important;
+        text-shadow:
+            0 1px 0 rgba(0,0,0,.85),
+            0 0 10px rgba(0,188,212,.30),
+            0 0 18px rgba(66,165,245,.18) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+aplicar_estilo_titulos_3d()
+
+def _tmg_embedded_visualizer_theme_markup() -> str:
+    return f"""
+<style id="tmg-embedded-viewer-theme">
+:root {{
+  --tmg-primary:{THEME_PRIMARY_COLOR};
+  --tmg-primary-dark:{THEME_PRIMARY_DARK};
+  --tmg-primary-soft:{THEME_PRIMARY_SOFT};
+  --tmg-primary-rgb:{THEME_PRIMARY_RGB};
+  --tmg-bg-0:#020e24;
+  --tmg-bg-1:#061525;
+  --tmg-bg-2:#0d2b45;
+  --tmg-glass:linear-gradient(120deg, rgba(255,255,255,.12), transparent 32%), linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.82), rgba({THEME_PRIMARY_RGB},.18));
+  --tmg-glow:0 14px 30px rgba(0,0,0,.38), 0 0 24px rgba({THEME_PRIMARY_RGB},.24), inset 0 1px 0 rgba(255,255,255,.14);
+}}
+html, body {{
+  color:#ffffff !important;
+  background:
+    radial-gradient(circle at 14% 0%, rgba({THEME_PRIMARY_RGB},.14), transparent 36%),
+    linear-gradient(135deg, #020e24 0%, #061525 50%, #0d2b45 100%) !important;
+}}
+body {{
+  scrollbar-color:var(--tmg-primary) #020e24;
+}}
+::-webkit-scrollbar {{ width:11px; height:11px; }}
+::-webkit-scrollbar-track {{ background:linear-gradient(180deg,#020e24,#071a2c); border-radius:999px; }}
+::-webkit-scrollbar-thumb {{
+  background:linear-gradient(180deg,var(--tmg-primary-soft),var(--tmg-primary),var(--tmg-primary-dark));
+  border:2px solid #020e24;
+  border-radius:999px;
+  box-shadow:0 0 14px rgba({THEME_PRIMARY_RGB},.38);
+}}
+button,
+.btn,
+.grid-btn,
+.tool-btn,
+.toolbar button,
+.controls button,
+.side button,
+.panel button,
+.sidebar button,
+input[type="button"],
+input[type="submit"] {{
+  border-radius:10px !important;
+  border:1px solid rgba({THEME_PRIMARY_RGB},.68) !important;
+  background:var(--tmg-glass) !important;
+  color:#ffffff !important;
+  font-weight:850 !important;
+  text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 10px rgba({THEME_PRIMARY_RGB},.42) !important;
+  box-shadow:var(--tmg-glow) !important;
+  transition:transform .25s ease, box-shadow .30s ease, border-color .30s ease, filter .30s ease !important;
+}}
+button:hover,
+.btn:hover,
+.grid-btn:hover,
+.tool-btn:hover {{
+  transform:translateY(-1px) !important;
+  border-color:var(--tmg-primary-soft) !important;
+  box-shadow:0 16px 34px rgba(0,0,0,.48), 0 0 34px rgba({THEME_PRIMARY_RGB},.46), inset 0 1px 0 rgba(255,255,255,.24) !important;
+  filter:brightness(1.08);
+}}
+button:active,
+.btn:active,
+.grid-btn:active,
+.tool-btn:active {{
+  transform:translateY(1px) scale(.99) !important;
+}}
+button.active,
+.btn.active,
+.grid-btn.active,
+.tool-btn.active {{
+  border-color:#5ff2b1 !important;
+  box-shadow:0 0 0 1px rgba(95,242,177,.34), 0 0 28px rgba({THEME_PRIMARY_RGB},.44), inset 0 1px 0 rgba(255,255,255,.26) !important;
+}}
+input,
+select,
+textarea {{
+  border-radius:9px !important;
+  border:1px solid rgba({THEME_PRIMARY_RGB},.58) !important;
+  background:linear-gradient(145deg, rgba(2,14,36,.95), rgba(18,62,100,.74), rgba({THEME_PRIMARY_RGB},.12)) !important;
+  color:#ffffff !important;
+  font-weight:750 !important;
+  box-shadow:0 8px 18px rgba(0,0,0,.28), 0 0 16px rgba({THEME_PRIMARY_RGB},.16), inset 0 1px 0 rgba(255,255,255,.12) !important;
+}}
+input::placeholder,
+textarea::placeholder {{
+  color:rgba(224,247,255,.74) !important;
+}}
+.toolbar,
+.topbar,
+.controls,
+.panel,
+.side,
+.sidebar,
+.summary,
+.card,
+.box,
+.status-box,
+.count-panel,
+.result-panel,
+.layer-panel,
+.date-card,
+.qgis-like-card,
+.qgis-panel,
+[class*="panel"],
+[class*="card"],
+[class*="sidebar"],
+[class*="summary"] {{
+  border:1px solid rgba({THEME_PRIMARY_RGB},.44) !important;
+  background:var(--tmg-glass) !important;
+  color:#ffffff !important;
+  box-shadow:var(--tmg-glow) !important;
+  backdrop-filter:blur(10px) saturate(140%);
+  -webkit-backdrop-filter:blur(10px) saturate(140%);
+}}
+.viewer,
+#viewer,
+#vc,
+#cronViewer,
+.canvas-wrap,
+.map-wrap,
+.image-stage,
+.ortho-stage,
+[class*="viewer"] {{
+  background:
+    radial-gradient(circle at 50% 0%, rgba({THEME_PRIMARY_RGB},.10), transparent 42%),
+    linear-gradient(145deg,#020e24,#061525) !important;
+  border:1px solid rgba({THEME_PRIMARY_RGB},.36) !important;
+  box-shadow:0 16px 34px rgba(0,0,0,.42), 0 0 24px rgba({THEME_PRIMARY_RGB},.18) !important;
+}}
+.title,
+.panel-title,
+.qgis-panel-title,
+h1,h2,h3,h4,
+label {{
+  color:#ffffff !important;
+  text-shadow:0 2px 0 rgba(0,0,0,.88), 0 0 14px rgba({THEME_PRIMARY_RGB},.42) !important;
+}}
+.subtle,
+.hint,
+.status,
+.date-meta,
+.coord,
+.info,
+.help,
+p,
+small {{
+  color:#dffbff !important;
+  text-shadow:0 1px 0 rgba(0,0,0,.72) !important;
+}}
+.progress,
+.progress-track,
+[class*="progress"] {{
+  border-radius:999px !important;
+  border:1px solid rgba({THEME_PRIMARY_RGB},.56) !important;
+  background:linear-gradient(180deg,#020e24,#071a2c) !important;
+  box-shadow:inset 0 3px 8px rgba(0,0,0,.70), 0 0 16px rgba({THEME_PRIMARY_RGB},.24) !important;
+  overflow:hidden !important;
+}}
+.progress > div,
+.progress div,
+.progress-fill,
+[class*="progress"] > div {{
+  background:linear-gradient(90deg,var(--tmg-primary-soft),var(--tmg-primary),#00ff9d) !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.44), 0 0 18px rgba({THEME_PRIMARY_RGB},.54) !important;
+  transition:width .35s ease !important;
+}}
+table {{
+  color:#ffffff !important;
+  background:rgba(2,14,36,.72) !important;
+  border-color:rgba({THEME_PRIMARY_RGB},.30) !important;
+}}
+th {{
+  background:linear-gradient(145deg, rgba(18,62,100,.96), rgba({THEME_PRIMARY_RGB},.30)) !important;
+  color:#ffffff !important;
+  text-shadow:0 1px 0 rgba(0,0,0,.82), 0 0 8px rgba({THEME_PRIMARY_RGB},.26) !important;
+}}
+td {{
+  border-color:rgba({THEME_PRIMARY_RGB},.22) !important;
+}}
+tr:nth-child(odd) {{ background:rgba(2,14,36,.48) !important; }}
+tr:nth-child(even) {{ background:rgba(13,43,69,.38) !important; }}
+tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
+</style>
+<script id="tmg-embedded-viewer-loading-autohide">
+(function() {{
+  function setProgressVisibility(bar) {{
+    if (!bar) return;
+    var parent = bar.closest('.progress') || bar.parentElement;
+    if (!parent) return;
+    var width = String(bar.style && bar.style.width || '').trim();
+    if (width === '100%') {{
+      clearTimeout(bar.__tmgHideTimer);
+      bar.__tmgHideTimer = setTimeout(function() {{
+        if (String(bar.style && bar.style.width || '').trim() === '100%') parent.style.opacity = '0';
+      }}, 900);
+    }} else {{
+      parent.style.opacity = '1';
+    }}
+    parent.style.transition = 'opacity .30s ease';
+  }}
+  function scanProgress() {{
+    document.querySelectorAll('.progress > div, [class*="progress"] > div').forEach(setProgressVisibility);
+  }}
+  try {{
+    scanProgress();
+    new MutationObserver(scanProgress).observe(document.documentElement, {{attributes:true, childList:true, subtree:true, attributeFilter:['style','class']}});
+  }} catch (e) {{}}
+}})();
+</script>
+"""
+
+def _inject_tmg_embedded_visualizer_theme(markup: str) -> str:
+    if not isinstance(markup, str) or "tmg-embedded-viewer-theme" in markup:
+        return markup
+    lower = markup.lower()
+    viewer_signals = (
+        "<canvas",
+        "grid-btn",
+        "visualizador",
+        "viewer",
+        "ortofoto",
+        "cronviewer",
+        "qgis",
+        "btnexport",
+    )
+    if not any(signal in lower for signal in viewer_signals):
+        return markup
+    theme_markup = _tmg_embedded_visualizer_theme_markup()
+    if "</head>" in lower:
+        return re.sub(r"</head>", theme_markup + "</head>", markup, count=1, flags=re.IGNORECASE)
+    body_match = re.search(r"<body[^>]*>", markup, flags=re.IGNORECASE)
+    if body_match:
+        insert_at = body_match.end()
+        return markup[:insert_at] + theme_markup + markup[insert_at:]
+    return theme_markup + markup
 
 def _theme_colorize_markup(value):
     if not isinstance(value, str):
@@ -448,10 +1266,35 @@ def _theme_colorize_markup(value):
         "#ff8c00": THEME_PRIMARY_COLOR,
         "#FF8C00": THEME_PRIMARY_COLOR,
         "#ff9e33": THEME_PRIMARY_COLOR,
+        "#FF9E33": THEME_PRIMARY_COLOR,
         "#e67600": THEME_PRIMARY_DARK,
+        "#E67600": THEME_PRIMARY_DARK,
         "#e07000": THEME_PRIMARY_DARK,
+        "#E07000": THEME_PRIMARY_DARK,
         "#ffaa33": THEME_PRIMARY_SOFT,
+        "#FFAA33": THEME_PRIMARY_SOFT,
         "#ffb347": THEME_PRIMARY_SOFT,
+        "#FFB347": THEME_PRIMARY_SOFT,
+        "#00cfff": THEME_PRIMARY_SOFT,
+        "#00CFFF": THEME_PRIMARY_SOFT,
+        "#00d4ff": THEME_PRIMARY_SOFT,
+        "#00D4FF": THEME_PRIMARY_SOFT,
+        "#00e5ff": THEME_PRIMARY_SOFT,
+        "#00E5FF": THEME_PRIMARY_SOFT,
+        "#42a5f5": THEME_PRIMARY_COLOR,
+        "#42A5F5": THEME_PRIMARY_COLOR,
+        "#64b5f6": THEME_PRIMARY_SOFT,
+        "#64B5F6": THEME_PRIMARY_SOFT,
+        "#90caf9": THEME_PRIMARY_SOFT,
+        "#90CAF9": THEME_PRIMARY_SOFT,
+        "#75b7ff": THEME_PRIMARY_SOFT,
+        "#75B7FF": THEME_PRIMARY_SOFT,
+        "#5599ff": THEME_PRIMARY_COLOR,
+        "#5599FF": THEME_PRIMARY_COLOR,
+        "#2d8cff": THEME_PRIMARY_COLOR,
+        "#2D8CFF": THEME_PRIMARY_COLOR,
+        "#1e90ff": THEME_PRIMARY_COLOR,
+        "#1E90FF": THEME_PRIMARY_COLOR,
         "#2a1a00": "#0d2b45",
         "#1a0a00": "#071a2c",
         "#160b00": "#061525",
@@ -461,11 +1304,24 @@ def _theme_colorize_markup(value):
     }
     for old, new in replacements.items():
         themed = themed.replace(old, new)
-    themed = re.sub(
-        r"rgba\(\s*255\s*,\s*140\s*,\s*0\s*,\s*([0-9.]+)\s*\)",
-        rf"rgba({THEME_PRIMARY_RGB},\1)",
-        themed,
-    )
+    for red, green, blue in (
+        (255, 140, 0),
+        (0, 207, 255),
+        (0, 212, 255),
+        (0, 229, 255),
+        (66, 165, 245),
+        (100, 181, 246),
+        (144, 202, 249),
+        (117, 183, 255),
+        (85, 153, 255),
+        (45, 140, 255),
+        (30, 144, 255),
+    ):
+        themed = re.sub(
+            rf"rgba\(\s*{red}\s*,\s*{green}\s*,\s*{blue}\s*,\s*([0-9.]+)\s*\)",
+            rf"rgba({THEME_PRIMARY_RGB},\1)",
+            themed,
+        )
     return themed
 
 _ORIGINAL_ST_MARKDOWN = st.markdown
@@ -475,7 +1331,7 @@ def _themed_markdown(body, *args, **kwargs):
     return _ORIGINAL_ST_MARKDOWN(_theme_colorize_markup(body), *args, **kwargs)
 
 def _themed_components_html(html, *args, **kwargs):
-    return _ORIGINAL_COMPONENTS_HTML(_theme_colorize_markup(html), *args, **kwargs)
+    return _ORIGINAL_COMPONENTS_HTML(_inject_tmg_embedded_visualizer_theme(_theme_colorize_markup(html)), *args, **kwargs)
 
 st.markdown = _themed_markdown
 components.html = _themed_components_html
@@ -943,6 +1799,126 @@ def _render_system_chat(current_user: dict) -> None:
                 st.session_state["tmg_chat_open"] = not st.session_state.get("tmg_chat_open", False)
             if st.session_state.get("tmg_chat_open", False):
                 _render_chat_body(current_user)
+
+if SYSTEM_CONFIG.get("tema", "padrao") == "tmg_premium_neon_3d":
+    st.markdown("""
+<style>
+    .stApp {
+        background:
+            radial-gradient(circle at top left, rgba(0,229,255,.16), transparent 34%),
+            radial-gradient(circle at bottom right, rgba(0,255,157,.10), transparent 30%),
+            linear-gradient(145deg, #020E24 0%, #071A35 55%, #020E24 100%) !important;
+        color: #FFFFFF !important;
+    }
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #020E24 0%, #071A35 55%, #1A1A1A 100%) !important;
+        border-right: 1px solid rgba(0,229,255,.42) !important;
+        box-shadow: 8px 0 28px rgba(0,0,0,.45), inset -1px 0 0 rgba(0,255,157,.20) !important;
+    }
+    .main-header,
+    .menu-3d-title,
+    .cultura-title,
+    .login-title,
+    .cfg-panel-title,
+    .vd-login-title,
+    .vd-section-title,
+    .partner-excel-title,
+    .partner-toolbox-title,
+    .partner-window-title,
+    .partner-card-title,
+    .partner-hero-title,
+    .assessment-panel-title,
+    div[data-testid="stMarkdownContainer"] h1,
+    div[data-testid="stMarkdownContainer"] h2,
+    div[data-testid="stMarkdownContainer"] h3,
+    div[data-testid="stMarkdownContainer"] h4 {
+        background: linear-gradient(135deg, #FFFFFF 0%, #D6D6D6 18%, #00E5FF 48%, #1D7BFF 68%, #00FF9D 100%) !important;
+        -webkit-background-clip: text !important;
+        background-clip: text !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+        color: #FFFFFF !important;
+        text-shadow:
+            0 2px 0 #020E24,
+            0 4px 0 #071A35,
+            0 8px 18px rgba(0,0,0,.82),
+            0 0 16px rgba(0,229,255,.70),
+            0 0 34px rgba(0,255,157,.28) !important;
+        letter-spacing: .8px !important;
+    }
+    div.stButton > button,
+    button[kind="secondary"],
+    button[kind="primary"] {
+        background: linear-gradient(145deg, #071A35 0%, #0E3A70 48%, #00E5FF 100%) !important;
+        color: #FFFFFF !important;
+        border: 1px solid rgba(0,229,255,.56) !important;
+        border-radius: 14px !important;
+        box-shadow:
+            0 10px 24px rgba(0,0,0,.42),
+            inset 0 1px 0 rgba(255,255,255,.22),
+            inset 0 -5px 14px rgba(2,14,36,.55),
+            0 0 16px rgba(0,229,255,.28) !important;
+        text-shadow: 0 2px 3px rgba(0,0,0,.72) !important;
+        transform: translateZ(0);
+    }
+    div.stButton > button:hover,
+    button[kind="secondary"]:hover,
+    button[kind="primary"]:hover {
+        border-color: #00FF9D !important;
+        box-shadow:
+            0 14px 30px rgba(0,0,0,.50),
+            0 0 22px rgba(0,229,255,.55),
+            0 0 32px rgba(0,255,157,.22) !important;
+        transform: translateY(-2px) scale(1.01) !important;
+    }
+    div.stButton > button:active,
+    button[kind="secondary"]:active,
+    button[kind="primary"]:active {
+        transform: translateY(1px) scale(.99) !important;
+        box-shadow: inset 0 4px 10px rgba(0,0,0,.62), 0 0 12px rgba(0,229,255,.35) !important;
+    }
+    .card,
+    [data-testid="stExpander"],
+    [data-testid="stForm"],
+    div[data-testid="stDataFrame"],
+    div[data-testid="stFileUploader"] section {
+        background: linear-gradient(145deg, rgba(7,26,53,.94), rgba(26,26,26,.88)) !important;
+        border: 1px solid rgba(0,229,255,.42) !important;
+        border-radius: 16px !important;
+        box-shadow: 0 16px 34px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.08), 0 0 20px rgba(0,229,255,.16) !important;
+    }
+    div[data-testid="stFileUploader"] section {
+        border-style: solid !important;
+        background:
+            radial-gradient(circle at top, rgba(0,229,255,.18), transparent 38%),
+            linear-gradient(145deg, rgba(7,26,53,.95), rgba(14,58,112,.78)) !important;
+    }
+    div[data-testid="stFileUploader"] section button {
+        font-size: 0 !important;
+    }
+    div[data-testid="stFileUploader"] section button::after {
+        content: "Importar";
+        font-size: .92rem !important;
+        font-weight: 800 !important;
+        letter-spacing: .4px !important;
+    }
+    .tmg-load-card {
+        background: var(--tmg-deploy-card-bg) !important;
+        border-color: var(--tmg-deploy-border) !important;
+        box-shadow: var(--tmg-deploy-card-shadow) !important;
+    }
+    .tmg-load-status { color: #00FF9D !important; }
+    .tmg-chat-title,
+    .partner-hero-subtitle,
+    .login-subtitle,
+    div[data-testid="stCaptionContainer"] {
+        color: #D6D6D6 !important;
+        text-shadow: 0 0 10px rgba(0,229,255,.28) !important;
+    }
+    svg, .st-emotion-cache svg {
+        filter: drop-shadow(0 3px 6px rgba(0,0,0,.65)) drop-shadow(0 0 6px rgba(0,229,255,.45)) !important;
+    }
+</style>
+    """, unsafe_allow_html=True)
 
 def _partners_default_partner() -> dict:
     return {
@@ -1566,12 +2542,22 @@ if SYSTEM_CONFIG.get("tema", "padrao") == "tmg_azul":
 # HELPER — PROCESSAR ORTOFOTO PARA VISUALIZAÇÃO[cite: 1]
 # ==========================================
 @st.cache_data(show_spinner=False, max_entries=12)
-def processar_ortofoto(file_bytes: bytes, filename: str):
+def _processar_ortofoto_cached(
+    file_bytes: bytes,
+    filename: str,
+    preview_max_dim: int,
+    preview_jpeg_quality: int,
+    preview_max_payload_mb: int,
+    preview_min_dim: int,
+):
     """Converte ortofotos para pré-visualização de alta qualidade no Streamlit.
 
     Ajuste focado em TIF/GeoTIFF/RGB e formatos comuns, preservando metadados espaciais
     e reduzindo a imagem somente para o tamanho seguro de navegação no browser.
     """
+    def _set_progress(pct: int, message: str):
+        return None
+
     ext = Path(filename).suffix.lower()
     img = None
     erro = None
@@ -1584,7 +2570,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         "orig_height": 0,
         "preview_width": 0,
         "preview_height": 0,
-        "preview_quality": _preview_jpeg_quality(),
+        "preview_quality": preview_jpeg_quality,
     }
 
     def _stretch_band(band):
@@ -1623,11 +2609,13 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         return pil_img
 
     try:
+        _set_progress(14, f"Lendo ortofoto: {Path(filename).name}")
         import rasterio
         from rasterio.enums import Resampling
         from rasterio.io import MemoryFile
         with MemoryFile(file_bytes) as memfile:
             with memfile.open() as src:
+                _set_progress(24, "Interpretando metadados e dimensões da ortofoto...")
                 spatial_meta["orig_width"] = int(src.width)
                 spatial_meta["orig_height"] = int(src.height)
                 if getattr(src, "crs", None):
@@ -1635,7 +2623,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                 if getattr(src, "transform", None):
                     spatial_meta["transform"] = src.transform.to_gdal()
 
-                max_dim = _preview_max_dim()
+                max_dim = preview_max_dim
                 ratio = min(1.0, max_dim / max(src.width, src.height))
                 out_width = max(1, int(src.width * ratio))
                 out_height = max(1, int(src.height * ratio))
@@ -1647,6 +2635,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                 bands = int(src.count)
 
                 if bands >= 3:
+                    _set_progress(42, "Gerando pré-visualização RGB de alta qualidade...")
                     # Mantém RGB verdadeiro quando o GeoTIFF já está em uint8; faz realce leve somente em 16/32 bits.
                     band_indexes = [1, 2, 3]
                     data = src.read(
@@ -1662,12 +2651,14 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                         arr = np.transpose(np.stack([_stretch_band(data[i]) for i in range(3)]), (1, 2, 0))
                     img = Image.fromarray(arr, "RGB")
                 elif bands == 2:
+                    _set_progress(42, "Preparando ortofoto com canal alfa...")
                     data = src.read(1, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
                     alpha = src.read(2, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
                     gray = _preserve_uint8_band(data) if np.dtype(src.dtypes[0]) == np.dtype("uint8") else _stretch_band(data)
                     rgba = np.dstack([gray, gray, gray, _preserve_uint8_band(alpha)])
                     img = _rgba_to_rgb(Image.fromarray(rgba, "RGBA"))
                 else:
+                    _set_progress(42, "Preparando banda única da ortofoto...")
                     data = src.read(1, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
                     if np.dtype(src.dtypes[0]) == np.dtype("uint8"):
                         img = Image.fromarray(_preserve_uint8_band(data), "L").convert("RGB")
@@ -1675,17 +2666,20 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                         img = Image.fromarray(_stretch_band(data), "L").convert("RGB")
     except ImportError:
         try:
+            _set_progress(30, "Lendo imagem com Pillow...")
             img = Image.open(BytesIO(file_bytes))
         except Exception as e_pil:
             erro = f"Falha ao ler imagem sem Rasterio: {e_pil}"
     except Exception as e_rast:
         try:
+            _set_progress(30, "Lendo imagem em modo compatível...")
             img = Image.open(BytesIO(file_bytes))
         except Exception as e_pil:
             erro = f"Falha ao ler formato {ext}: {e_rast} | {e_pil}"
 
     if erro is None and img is None:
         try:
+            _set_progress(34, "Interpretando imagem...")
             img = Image.open(BytesIO(file_bytes))
         except Exception as e:
             erro = f"Falha ao interpretar a imagem: {e}"
@@ -1699,14 +2693,18 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         spatial_meta["orig_width"] = img.width
         spatial_meta["orig_height"] = img.height
 
+    _set_progress(58, "Ajustando cores e transparência da ortofoto...")
     img = _rgba_to_rgb(img)
 
-    MAX_DIM = _preview_max_dim()
+    MAX_DIM = preview_max_dim
     if max(img.size) > MAX_DIM:
+        _set_progress(68, "Otimizando tamanho para o visualizador...")
         ratio = MAX_DIM / max(img.size)
         spatial_meta["ratio"] = ratio
         resample_filter = getattr(Image, 'Resampling', Image).LANCZOS
         img = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))), resample_filter)
+    else:
+        _set_progress(68, "Preservando dimensão do preview da ortofoto...")
 
     spatial_meta["preview_width"] = img.width
     spatial_meta["preview_height"] = img.height
@@ -1730,14 +2728,15 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
             raise last_error
         raise OSError("Falha ao salvar preview JPEG.")
 
-    max_payload_bytes = _preview_max_payload_mb() * 1024 * 1024
-    min_preview_dim = min(_preview_min_dim(), _preview_max_dim())
-    quality = _preview_jpeg_quality()
+    max_payload_bytes = preview_max_payload_mb * 1024 * 1024
+    min_preview_dim = min(preview_min_dim, preview_max_dim)
+    quality = preview_jpeg_quality
     preview_img = img
     buf = BytesIO()
 
     try:
-        for _ in range(18):
+        for step_idx in range(18):
+            _set_progress(min(92, 72 + int((step_idx / 18) * 20)), "Comprimindo preview sem perder qualidade visual...")
             buf = _save_preview_jpeg(preview_img, quality)
             payload_size = buf.tell()
             if payload_size <= max_payload_bytes:
@@ -1779,41 +2778,89 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
     spatial_meta["preview_payload_mb"] = round(buf.tell() / (1024 * 1024), 2)
     if spatial_meta["orig_width"]:
         spatial_meta["ratio"] = img.width / spatial_meta["orig_width"]
+    _set_progress(96, "Finalizando visualização da ortofoto...")
     b64 = base64.b64encode(buf.getvalue()).decode()
 
     return b64, img.size, None, spatial_meta
+
+def processar_ortofoto(file_bytes: bytes, filename: str):
+    file_name = Path(filename or "ortofoto").name
+    total_mb = (len(file_bytes or b"") / (1024 * 1024)) if file_bytes is not None else 0
+    loading_slot = st.empty()
+    preview_max_dim = _preview_max_dim()
+    preview_jpeg_quality = _preview_jpeg_quality()
+    preview_max_payload_mb = _preview_max_payload_mb()
+    preview_min_dim = _preview_min_dim()
+
+    def _progress(pct: int, message: str):
+        detail = f"{message} · {total_mb:.1f} MB" if total_mb else message
+        update_tmg_loading(loading_slot, pct, detail)
+
+    try:
+        _progress(6, f"Iniciando carregamento da ortofoto: {file_name}")
+        _progress(18, "Preparando cache e parâmetros de alta qualidade...")
+        _progress(32, f"Processando preview até {preview_max_dim}px com qualidade {preview_jpeg_quality}...")
+        result = _processar_ortofoto_cached(
+            file_bytes,
+            filename,
+            preview_max_dim,
+            preview_jpeg_quality,
+            preview_max_payload_mb,
+            preview_min_dim,
+        )
+        _progress(94, "Aplicando preview otimizado no visualizador...")
+        finish_tmg_loading_and_clear(loading_slot, "Ortofoto carregada com sucesso.")
+        return result
+    except Exception:
+        clear_tmg_loading(loading_slot)
+        raise
 
 
 PENDAO_AVANCADO_PARAMS = {
     "clahe_clip_limit": 2.5,
     "illumination_kernel": 31,
     "sharpen_strength": 0.25,
-    "green_hsv_low": (35, 35, 35),
-    "green_hsv_high": (90, 255, 255),
-    "exg_threshold": 105,
-    "new_tassel_hsv_low": (15, 25, 130),
-    "new_tassel_hsv_high": (45, 255, 255),
+    "green_lower": (32, 35, 25),
+    "green_upper": (95, 255, 255),
+    "green_hsv_low": (32, 35, 25),
+    "green_hsv_high": (95, 255, 255),
+    "green_light_s_min": 18,
+    "green_light_v_min": 72,
+    "exg_threshold": 88,
+    "hsv_tassel_lower_1": (12, 25, 95),
+    "hsv_tassel_upper_1": (42, 180, 255),
+    "hsv_tassel_lower_2": (0, 0, 135),
+    "hsv_tassel_upper_2": (60, 95, 255),
+    "new_tassel_hsv_low": (12, 25, 95),
+    "new_tassel_hsv_high": (42, 180, 255),
     "dry_tassel_hsv_low": (8, 20, 90),
     "dry_tassel_hsv_high": (35, 180, 240),
     "old_tassel_hsv_low": (5, 25, 70),
     "old_tassel_hsv_high": (28, 200, 210),
-    "cream_l_min": 145,
-    "cream_s_max": 90,
-    "cream_v_min": 120,
-    "lab_l_threshold": 128,
-    "texture_threshold": 18,
-    "texture_ratio_min": 0.055,
-    "yellow_ratio_min": 0.07,
-    "clear_ratio_min": 0.12,
-    "area_min": 6,
-    "area_max": 2500,
+    "cream_l_min": 138,
+    "cream_s_max": 98,
+    "cream_v_min": 118,
+    "lab_l_threshold": 132,
+    "min_v_threshold": 82,
+    "max_glare_v": 248,
+    "texture_threshold": 16,
+    "texture_ratio_min": 0.045,
+    "yellow_ratio_min": 0.06,
+    "clear_ratio_min": 0.16,
+    "area_min": 18,
+    "area_max": 1800,
     "area_min_fraction": 0.00001,
     "area_max_fraction": 0.035,
-    "max_circularity": 0.90,
+    "max_circularity": 0.86,
     "min_solidity": 0.08,
-    "max_green_ratio": 0.50,
-    "merge_distance": 16,
-    "nms_distance": 18,
+    "max_green_ratio": 0.38,
+    "min_branch_directions": 3,
+    "star_direction_count": 8,
+    "star_ray_fill_min": 0.08,
+    "star_reach_fraction": 0.34,
+    "merge_distance": 12,
+    "nms_distance": 12,
+    "min_distance": 12,
     "morph_open_kernel": 3,
     "morph_close_kernel": 5,
     "dilate_kernel": 3,
@@ -1841,6 +2888,48 @@ PENDAO_AVANCADO_PARAMS = {
     "yolo_min_texture_ratio": 0.015,
     "yolo_max_green_ratio": 0.78,
     "yolo_merge_distance": 18,
+    "manual_crop_size_default": 96,
+    "reference_matching_enabled": True,
+    "reference_max_templates": 28,
+    "reference_match_max_dim": 1600,
+    "reference_match_threshold": 0.58,
+    "reference_match_min_distance": 18,
+    "reference_match_scales": (0.65, 0.85, 1.00, 1.20, 1.40),
+}
+
+PENDAO_ANALISE_PARAMS = {
+    "clahe_clip_limit": 2.4,
+    "clahe_tile_grid_size": (8, 8),
+    "sharpen_strength": 0.22,
+    "gaussian_blur_kernel": 3,
+    "illumination_kernel": 31,
+    "exg_threshold": 112,
+    "green_hsv_low": (35, 40, 40),
+    "green_hsv_high": (85, 255, 255),
+    "yellow_hsv_low": (16, 35, 140),
+    "yellow_hsv_high": (38, 255, 255),
+    "lab_l_threshold": 166,
+    "morph_open_kernel": 3,
+    "morph_close_kernel": 3,
+    "texture_threshold": 22,
+    "texture_ratio_min": 0.16,
+    "yellow_ratio_min": 0.22,
+    "area_min": 14,
+    "area_max": 1200,
+    "area_min_fraction": 0.00003,
+    "area_max_fraction": 0.018,
+    "aspect_ratio_min": 1.2,
+    "max_width_ratio": 0.68,
+    "vertical_cut_ratio": 1.0,
+    "clear_ratio_min": 0.42,
+    "min_bright_pixels": 12,
+    "texture_dilate_kernel": 5,
+    "x_size_factor": 0.38,
+    "x_min_size": 6,
+    "x_max_size": 18,
+    "x_thickness": 2,
+    "entropy_threshold": 16,
+    "entropy_disk_radius": 3,
 }
 
 PENDAO_YOLO_CLASSES = (
@@ -1855,10 +2944,77 @@ PENDAO_YOLO_CLASSES = (
     "pendão",
 )
 
-YOLO_TRAIN_ROOT = APP_ROOT / "dados_treinamento_yolo" / "pendao_milho"
+PENDAO_YOLO_CONFIG_PATH = SYSTEM_DATABASE_DIR / "pendoamento_yolo_config.json"
+PENDAO_YOLO_DEFAULT_ROOT = APP_ROOT / "dados_treinamento_yolo" / "pendoes"
+
+
+def _load_pendoamento_yolo_config() -> dict:
+    default = {
+        "training_dir": str(PENDAO_YOLO_DEFAULT_ROOT),
+        "updated_at": "",
+    }
+    try:
+        if PENDAO_YOLO_CONFIG_PATH.exists():
+            data = json.loads(PENDAO_YOLO_CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                default.update({k: v for k, v in data.items() if isinstance(v, str)})
+    except Exception:
+        pass
+    return default
+
+
+def _resolve_pendoamento_yolo_dir(path_value: str | Path | None = None) -> Path:
+    raw = str(path_value or "").strip()
+    if not raw:
+        raw = str(PENDAO_YOLO_DEFAULT_ROOT)
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = APP_ROOT / path
+    return path.resolve()
+
+
+def configurar_pasta_treinamento_yolo(path_value: str | Path | None = None) -> Path:
+    global YOLO_TRAIN_ROOT, YOLO_TRAIN_LOG_PATH, YOLO_HISTORY_PATH
+    selected = _resolve_pendoamento_yolo_dir(path_value)
+    selected.mkdir(parents=True, exist_ok=True)
+    YOLO_TRAIN_ROOT = selected
+    YOLO_TRAIN_LOG_PATH = YOLO_TRAIN_ROOT / "treino_yolo.log"
+    YOLO_HISTORY_PATH = YOLO_TRAIN_ROOT / "historico_pendoes.jsonl"
+    try:
+        PENDAO_YOLO_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PENDAO_YOLO_CONFIG_PATH.write_text(
+            json.dumps(
+                {
+                    "training_dir": str(YOLO_TRAIN_ROOT),
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    return YOLO_TRAIN_ROOT
+
+
+YOLO_TRAIN_ROOT = _resolve_pendoamento_yolo_dir(_load_pendoamento_yolo_config().get("training_dir"))
+YOLO_LEGACY_TRAIN_ROOT = APP_ROOT / "dados_treinamento_yolo" / "pendao_milho"
 YOLO_MODELS_DIR = APP_ROOT / "modelos_yolo"
 YOLO_BEST_MODEL_PATH = YOLO_MODELS_DIR / "pendao_milho_best.pt"
 YOLO_TRAIN_LOG_PATH = YOLO_TRAIN_ROOT / "treino_yolo.log"
+YOLO_HISTORY_PATH = YOLO_TRAIN_ROOT / "historico_pendoes.jsonl"
+configurar_pasta_treinamento_yolo(YOLO_TRAIN_ROOT)
+PENDAO_YOLO_WORLD_LOCAL = APP_ROOT / "yolov8s-world.pt"
+if PENDAO_YOLO_WORLD_LOCAL.exists():
+    PENDAO_AVANCADO_PARAMS["yolo_world_model"] = str(PENDAO_YOLO_WORLD_LOCAL)
+
+
+def _bases_treinamento_yolo(include_legacy: bool = True):
+    bases = [YOLO_TRAIN_ROOT]
+    if include_legacy and YOLO_LEGACY_TRAIN_ROOT != YOLO_TRAIN_ROOT and YOLO_LEGACY_TRAIN_ROOT.exists():
+        bases.append(YOLO_LEGACY_TRAIN_ROOT)
+    return bases
 
 
 def garantir_estrutura_treinamento_yolo(base_dir: Path | None = None):
@@ -1876,7 +3032,7 @@ def garantir_estrutura_treinamento_yolo(base_dir: Path | None = None):
         folder.mkdir(parents=True, exist_ok=True)
     data_yaml = base / "data.yaml"
     data_yaml.write_text(
-        "path: dados_treinamento_yolo/pendao_milho\n"
+        f"path: {str(base).replace(os.sep, '/')}\n"
         "train: images/train\n"
         "val: images/val\n"
         "names:\n"
@@ -1887,13 +3043,30 @@ def garantir_estrutura_treinamento_yolo(base_dir: Path | None = None):
 
 
 def contar_amostras_treinamento_yolo(base_dir: Path | None = None):
-    base = garantir_estrutura_treinamento_yolo(base_dir)
+    bases = [garantir_estrutura_treinamento_yolo(base_dir)] if base_dir else [garantir_estrutura_treinamento_yolo(YOLO_TRAIN_ROOT)]
+    if not base_dir:
+        bases.extend([base for base in _bases_treinamento_yolo(include_legacy=True)[1:] if base.exists()])
     counts = {}
     for split in ("train", "val"):
-        counts[f"images_{split}"] = len(list((base / "images" / split).glob("*.*")))
-        counts[f"labels_{split}"] = len(list((base / "labels" / split).glob("*.txt")))
+        counts[f"images_{split}"] = len({
+            str(path.resolve())
+            for base in bases
+            for path in base.glob(f"**/images/{split}/*.*")
+            if path.is_file()
+        })
+        counts[f"labels_{split}"] = len({
+            str(path.resolve())
+            for base in bases
+            for path in base.glob(f"**/labels/{split}/*.txt")
+            if path.is_file()
+        })
     for kind in ("pendao_confirmado", "falso_positivo", "pendao_faltante"):
-        counts[f"crops_{kind}"] = len(list((base / "crops" / kind).glob("*.*")))
+        counts[f"crops_{kind}"] = len({
+            str(path.resolve())
+            for base in bases
+            for path in base.glob(f"**/crops/{kind}/*.*")
+            if path.is_file() and path.suffix.lower() != ".json"
+        })
     counts["total_images"] = counts["images_train"] + counts["images_val"]
     counts["total_labels"] = counts["labels_train"] + counts["labels_val"]
     return counts
@@ -1958,6 +3131,52 @@ def _bbox_yolo_automatica_do_crop(crop_rgb, sample_type: str, params=None):
     return fallback
 
 
+def _extrair_caracteristicas_crop_pendao(crop_rgb, params=None):
+    params = _pendao_params(params)
+    crop = _as_rgb_uint8(crop_rgb)
+    if crop is None:
+        return {}
+    h, w = crop.shape[:2]
+    try:
+        proc, hsv, lab, gray, lab_l = _preprocessar_pendao_opencv(crop, params)
+        sem_verde, green_mask = remover_verde_agressivo(proc, params)
+        cor_mask, _ = criar_mascara_pendoes_multicor(proc, lab_l, params)
+        textura_mask = calcular_mascara_textura(gray, params)
+        brilho_mask = cv2.threshold(lab_l, int(params.get("lab_l_threshold", 132)), 255, cv2.THRESH_BINARY)[1]
+        suporte = cv2.bitwise_and(cv2.bitwise_and(cor_mask, sem_verde), cv2.bitwise_or(textura_mask, brilho_mask))
+        if np.count_nonzero(suporte) < 4:
+            suporte = cv2.bitwise_and(cor_mask, sem_verde)
+        star = validar_formato_estrela(suporte, params)
+        valid_pixels = suporte > 0
+        if not np.any(valid_pixels):
+            valid_pixels = np.ones((h, w), dtype=bool)
+        hsv_valid = hsv[valid_pixels]
+        lab_valid = lab[valid_pixels]
+        rgb_valid = proc[valid_pixels]
+        return {
+            "crop_width": int(w),
+            "crop_height": int(h),
+            "mean_rgb": [round(float(v), 3) for v in np.mean(rgb_valid, axis=0)],
+            "mean_hsv": [round(float(v), 3) for v in np.mean(hsv_valid, axis=0)],
+            "mean_lab": [round(float(v), 3) for v in np.mean(lab_valid, axis=0)],
+            "yellow_ratio": round(float(np.mean(cor_mask > 0)), 6),
+            "green_ratio": round(float(np.mean(green_mask > 0)), 6),
+            "texture_ratio": round(float(np.mean(textura_mask > 0)), 6),
+            "clear_ratio": round(float(np.mean(brilho_mask > 0)), 6),
+            "valid_tassel_ratio": round(float(np.mean(suporte > 0)), 6),
+            "star_ok": bool(star.get("ok", False)),
+            "star_directions": int(star.get("directions", 0)),
+            "star_score": round(float(star.get("score", 0.0)), 6),
+            "center_hint": [round(float(v), 3) for v in star.get("center", (w / 2, h / 2))],
+        }
+    except Exception as exc:
+        return {
+            "crop_width": int(w),
+            "crop_height": int(h),
+            "feature_error": str(exc),
+        }
+
+
 def salvar_amostra_treinamento_yolo(
     file_bytes: bytes,
     x: float,
@@ -1970,7 +3189,13 @@ def salvar_amostra_treinamento_yolo(
     base = garantir_estrutura_treinamento_yolo()
     sample_type = sample_type if sample_type in {"pendao_confirmado", "pendao_faltante", "falso_positivo"} else "pendao_confirmado"
     crop_size = int(np.clip(int(crop_size or 128), 48, 256))
-    img = Image.open(BytesIO(file_bytes)).convert("RGB")
+    try:
+        img = Image.open(BytesIO(file_bytes)).convert("RGB")
+    except Exception:
+        decoded = _decode_rgb_for_pendao(file_bytes, source_name)
+        if decoded is None:
+            raise
+        img = Image.fromarray(_as_rgb_uint8(decoded)).convert("RGB")
     img_w, img_h = img.size
     if img_w <= 0 or img_h <= 0:
         raise ValueError("Imagem inválida para salvar amostra YOLO.")
@@ -1993,15 +3218,17 @@ def salvar_amostra_treinamento_yolo(
     split = "val" if (counts["total_images"] + 1) % 5 == 0 else "train"
     safe_source = _nome_seguro_treino_yolo(Path(source_name or "ortofoto").stem)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    filename = f"{stamp}_{safe_source}_{sample_type}.jpg"
+    filename = f"pendao_{counts['total_images'] + 1:04d}_{stamp}_{safe_source}_{sample_type}.png"
     image_path = base / "images" / split / filename
     label_path = base / "labels" / split / f"{Path(filename).stem}.txt"
     crop_path = base / "crops" / sample_type / filename
     meta_path = base / "crops" / sample_type / f"{Path(filename).stem}.json"
 
-    crop_canvas.save(image_path, format="JPEG", quality=95)
-    crop_canvas.save(crop_path, format="JPEG", quality=95)
-    bbox = _bbox_yolo_automatica_do_crop(np.array(crop_canvas), sample_type)
+    crop_canvas.save(image_path, format="PNG")
+    crop_canvas.save(crop_path, format="PNG")
+    crop_array = np.array(crop_canvas)
+    bbox = _bbox_yolo_automatica_do_crop(crop_array, sample_type)
+    features = _extrair_caracteristicas_crop_pendao(crop_array)
     if sample_type == "falso_positivo":
         label_text = ""
     else:
@@ -2022,26 +3249,645 @@ def salvar_amostra_treinamento_yolo(
         "label": str(label_path),
         "crop": str(crop_path),
         "bbox_yolo": bbox,
+        "features": features,
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        YOLO_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with YOLO_HISTORY_PATH.open("a", encoding="utf-8") as history_file:
+            history_file.write(json.dumps(metadata, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
     return metadata
 
 
-def listar_marcas_treinamento_yolo(source_name: str = "", source_date: str = ""):
+def salvar_crop_treinamento_yolo(
+    crop_rgb,
+    original_x: float,
+    original_y: float,
+    sample_type: str = "pendao_confirmado",
+    crop_size: int = 128,
+    source_name: str = "",
+    source_date: str = "",
+):
     base = garantir_estrutura_treinamento_yolo()
-    marks = []
-    for meta_path in (base / "crops").glob("*/*.json"):
+    sample_type = sample_type if sample_type in {"pendao_confirmado", "pendao_faltante", "falso_positivo"} else "pendao_confirmado"
+    crop_size = int(np.clip(int(crop_size or 128), 48, 256))
+    crop = Image.fromarray(_as_rgb_uint8(crop_rgb)).convert("RGB")
+    if crop.size != (crop_size, crop_size):
+        crop = crop.resize((crop_size, crop_size), Image.LANCZOS)
+    counts = contar_amostras_treinamento_yolo(base)
+    split = "val" if (counts["total_images"] + 1) % 5 == 0 else "train"
+    safe_source = _nome_seguro_treino_yolo(Path(source_name or "ortofoto").stem)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"pendao_{counts['total_images'] + 1:04d}_{stamp}_{safe_source}_{sample_type}.png"
+    image_path = base / "images" / split / filename
+    label_path = base / "labels" / split / f"{Path(filename).stem}.txt"
+    crop_path = base / "crops" / sample_type / filename
+    meta_path = base / "crops" / sample_type / f"{Path(filename).stem}.json"
+    crop.save(image_path, format="PNG")
+    crop.save(crop_path, format="PNG")
+    crop_array = np.array(crop)
+    bbox = _bbox_yolo_automatica_do_crop(crop_array, sample_type)
+    features = _extrair_caracteristicas_crop_pendao(crop_array)
+    if sample_type == "falso_positivo":
+        label_text = ""
+    else:
+        if not bbox:
+            bbox = (0.5, 0.5, 0.45, 0.45)
+        label_text = "0 {:.6f} {:.6f} {:.6f} {:.6f}\n".format(*bbox)
+    label_path.write_text(label_text, encoding="utf-8")
+    metadata = {
+        "id": Path(filename).stem,
+        "source_name": source_name,
+        "source_date": source_date,
+        "sample_type": sample_type,
+        "split": split,
+        "original_x": int(round(float(original_x))),
+        "original_y": int(round(float(original_y))),
+        "crop_size": crop_size,
+        "image": str(image_path),
+        "label": str(label_path),
+        "crop": str(crop_path),
+        "bbox_yolo": bbox,
+        "features": features,
+        "saved_from": "browser_click_auto",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        YOLO_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with YOLO_HISTORY_PATH.open("a", encoding="utf-8") as history_file:
+            history_file.write(json.dumps(metadata, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    return metadata
+
+
+def _path_dentro_treino_yolo(path_value, base: Path) -> bool:
+    try:
+        path = Path(path_value).resolve()
+        return path.is_relative_to(base.resolve())
+    except Exception:
+        return False
+
+
+def _path_dentro_alguma_base_treino_yolo(path_value) -> bool:
+    return any(_path_dentro_treino_yolo(path_value, base) for base in _bases_treinamento_yolo(include_legacy=True))
+
+
+def excluir_amostra_treinamento_yolo(sample_id: str = "", crop_file: str = "", source_name: str = "", source_date: str = ""):
+    garantir_estrutura_treinamento_yolo()
+    bases = [base for base in _bases_treinamento_yolo(include_legacy=True) if base.exists()]
+    sample_id = Path(str(sample_id or "").strip()).stem
+    crop_file = Path(str(crop_file or "").strip()).name
+    crop_stem = Path(crop_file).stem if crop_file else ""
+    target_stems = {stem for stem in (sample_id, crop_stem) if stem}
+    candidates = []
+
+    for stem in target_stems:
+        for base in bases:
+            for kind in ("pendao_confirmado", "pendao_faltante", "falso_positivo"):
+                meta_path = base / "crops" / kind / f"{stem}.json"
+                if meta_path.exists():
+                    candidates.append(meta_path)
+
+    if not candidates:
+        for base in bases:
+            for meta_path in base.glob("**/crops/*/*.json"):
+                try:
+                    item = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                item_id = str(item.get("id", ""))
+                item_crop = Path(str(item.get("crop", item.get("image", item.get("file", ""))))).name
+                if (sample_id and item_id == sample_id) or (crop_file and item_crop == crop_file) or (crop_stem and Path(item_crop).stem == crop_stem):
+                    candidates.append(meta_path)
+
+    if source_name or source_date:
+        filtered = []
+        for meta_path in candidates:
+            try:
+                item = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            item_source = item.get("source_name") or item.get("ortho", "")
+            item_date = item.get("source_date") or item.get("date", "")
+            if source_name and item_source != source_name:
+                continue
+            if source_date and item_date != source_date:
+                continue
+            filtered.append(meta_path)
+        if filtered:
+            candidates = filtered
+
+    if not candidates:
+        return False, "Amostra de treinamento não encontrada."
+
+    meta_path = candidates[0]
+    try:
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        metadata = {}
+
+    stems = set(target_stems)
+    for key in ("image", "label", "crop"):
+        value = metadata.get(key)
+        if value:
+            stems.add(Path(str(value)).stem)
+    if metadata.get("file"):
+        stems.add(Path(str(metadata.get("file"))).stem)
+    if metadata.get("id"):
+        stems.add(str(metadata.get("id")))
+    stems = {stem for stem in stems if stem}
+
+    paths_to_delete = {meta_path}
+    for key in ("image", "label", "crop"):
+        value = metadata.get(key)
+        if value:
+            paths_to_delete.add(Path(value))
+    if metadata.get("file"):
+        paths_to_delete.add(meta_path.parent / str(metadata.get("file")))
+    sample_base = meta_path.parents[2]
+    for stem in stems:
+        for folder in (
+            meta_path.parents[2] / "images" / "train",
+            meta_path.parents[2] / "images" / "val",
+            meta_path.parents[2] / "labels" / "train",
+            meta_path.parents[2] / "labels" / "val",
+            meta_path.parents[2] / "crops" / "pendao_confirmado",
+            meta_path.parents[2] / "crops" / "pendao_faltante",
+            meta_path.parents[2] / "crops" / "falso_positivo",
+        ):
+            for candidate in folder.glob(f"{stem}.*"):
+                paths_to_delete.add(candidate)
+        for candidate in sample_base.glob(f"**/{stem}.*"):
+            paths_to_delete.add(candidate)
+
+    deleted = 0
+    for path in sorted(paths_to_delete, key=lambda item: len(str(item)), reverse=True):
         try:
-            item = json.loads(meta_path.read_text(encoding="utf-8"))
+            if path.exists() and path.is_file() and _path_dentro_alguma_base_treino_yolo(path):
+                path.unlink()
+                deleted += 1
         except Exception:
             continue
-        if source_name and item.get("source_name") != source_name:
+
+    if deleted:
+        try:
+            if YOLO_HISTORY_PATH.exists() and stems:
+                kept_lines = []
+                for line in YOLO_HISTORY_PATH.read_text(encoding="utf-8").splitlines():
+                    try:
+                        item = json.loads(line)
+                    except Exception:
+                        kept_lines.append(line)
+                        continue
+                    item_stems = {str(item.get("id", ""))}
+                    for key in ("image", "label", "crop", "file"):
+                        if item.get(key):
+                            item_stems.add(Path(str(item.get(key))).stem)
+                    if item_stems.isdisjoint(stems):
+                        kept_lines.append(line)
+                YOLO_HISTORY_PATH.write_text(("\n".join(kept_lines) + ("\n" if kept_lines else "")), encoding="utf-8")
+        except Exception:
+            pass
+        return True, f"Amostra removida. Arquivos apagados: {deleted}."
+    return False, "Nenhum arquivo vinculado foi apagado."
+
+
+YOLO_CAPTURE_SERVER_PORT = int(os.environ.get("TMG_YOLO_CAPTURE_PORT", "8765"))
+_YOLO_CAPTURE_SERVER_STARTED = False
+
+
+def _decode_data_url_image(data_url: str):
+    if not data_url or "," not in data_url:
+        raise ValueError("crop_data_url inválido")
+    _, encoded = data_url.split(",", 1)
+    raw = base64.b64decode(encoded)
+    return np.array(Image.open(BytesIO(raw)).convert("RGB"))
+
+
+def iniciar_servidor_captura_yolo_pendoamento():
+    global _YOLO_CAPTURE_SERVER_STARTED
+    if _YOLO_CAPTURE_SERVER_STARTED:
+        return True, f"http://127.0.0.1:{YOLO_CAPTURE_SERVER_PORT}/pendoamento-yolo"
+    try:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    except Exception as exc:
+        return False, f"Servidor local indisponível: {exc}"
+
+    class _PendoamentoYoloHandler(BaseHTTPRequestHandler):
+        def _headers(self, status=200):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+
+        def do_OPTIONS(self):
+            self._headers(204)
+
+        def do_POST(self):
+            if self.path.split("?", 1)[0] != "/pendoamento-yolo":
+                self._headers(404)
+                self.wfile.write(json.dumps({"ok": False, "error": "rota inválida"}).encode("utf-8"))
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length)
+                payload = json.loads(raw.decode("utf-8"))
+                action = str(payload.get("action", "")).lower()
+                if action == "sample":
+                    crop = _decode_data_url_image(str(payload.get("crop_data_url", "")))
+                    meta = salvar_crop_treinamento_yolo(
+                        crop,
+                        float(payload.get("orig_x", payload.get("x", 0))),
+                        float(payload.get("orig_y", payload.get("y", 0))),
+                        "pendao_confirmado",
+                        int(payload.get("crop_size") or PENDAO_AVANCADO_PARAMS.get("manual_crop_size_default", 96)),
+                        str(payload.get("name", "")),
+                        str(payload.get("date", "")),
+                    )
+                    counts = contar_amostras_treinamento_yolo()
+                    response = {
+                        "ok": True,
+                        "message": "Mini foto salva automaticamente.",
+                        "id": meta.get("id", ""),
+                        "file": Path(str(meta.get("crop", ""))).name,
+                        "crop": meta.get("crop", ""),
+                        "folder": str(YOLO_TRAIN_ROOT),
+                        "total_images": counts.get("total_images", 0),
+                    }
+                elif action == "delete_sample":
+                    ok, msg = excluir_amostra_treinamento_yolo(
+                        sample_id=str(payload.get("sample_id", "")),
+                        crop_file=str(payload.get("file", "")),
+                        source_name=str(payload.get("name", "")),
+                        source_date=str(payload.get("date", "")),
+                    )
+                    counts = contar_amostras_treinamento_yolo()
+                    response = {
+                        "ok": bool(ok),
+                        "message": msg,
+                        "folder": str(YOLO_TRAIN_ROOT),
+                        "total_images": counts.get("total_images", 0),
+                    }
+                else:
+                    response = {"ok": False, "error": "ação inválida"}
+                self._headers(200 if response.get("ok") else 400)
+                self.wfile.write(json.dumps(response, ensure_ascii=False).encode("utf-8"))
+            except Exception as exc:
+                self._headers(500)
+                self.wfile.write(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False).encode("utf-8"))
+
+        def log_message(self, format, *args):
+            return
+
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", YOLO_CAPTURE_SERVER_PORT), _PendoamentoYoloHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True, name="TMG-Pendoamento-YOLO-Capture")
+        thread.start()
+        _YOLO_CAPTURE_SERVER_STARTED = True
+        return True, f"http://127.0.0.1:{YOLO_CAPTURE_SERVER_PORT}/pendoamento-yolo"
+    except OSError:
+        _YOLO_CAPTURE_SERVER_STARTED = True
+        return True, f"http://127.0.0.1:{YOLO_CAPTURE_SERVER_PORT}/pendoamento-yolo"
+    except Exception as exc:
+        return False, f"Servidor local indisponível: {exc}"
+
+
+def selecionar_pasta_treinamento_yolo_dialogo():
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        selected = filedialog.askdirectory(
+            title="Selecionar pasta para salvar mini fotos YOLO de pendoamento",
+            initialdir=str(YOLO_TRAIN_ROOT if YOLO_TRAIN_ROOT.exists() else APP_ROOT),
+        )
+        root.destroy()
+        return selected or ""
+    except Exception:
+        return ""
+
+
+def listar_marcas_treinamento_yolo(source_name: str = "", source_date: str = ""):
+    garantir_estrutura_treinamento_yolo()
+    marks = []
+    for base in _bases_treinamento_yolo(include_legacy=True):
+        if not base.exists():
             continue
-        if source_date and item.get("source_date") != source_date:
-            continue
-        marks.append(item)
+        for meta_path in base.glob("**/crops/*/*.json"):
+            try:
+                item = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not item.get("id"):
+                item["id"] = Path(str(item.get("file", meta_path.stem))).stem
+            if not item.get("source_name"):
+                item["source_name"] = item.get("ortho", "")
+            if not item.get("source_date"):
+                item["source_date"] = item.get("date", "")
+            if not item.get("sample_type"):
+                item["sample_type"] = item.get("type", meta_path.parent.name)
+            if not item.get("crop") and item.get("file"):
+                item["crop"] = str(meta_path.parent / str(item.get("file")))
+            if source_name and item.get("source_name") != source_name:
+                continue
+            if source_date and item.get("source_date") != source_date:
+                continue
+            marks.append(item)
     return sorted(marks, key=lambda it: it.get("created_at", ""))
+
+
+def _arquivos_referencia_treinamento_yolo(base_dir: Path | None = None, limit: int | None = None):
+    bases = [garantir_estrutura_treinamento_yolo(base_dir)] if base_dir else [garantir_estrutura_treinamento_yolo(YOLO_TRAIN_ROOT)]
+    if not base_dir:
+        bases.extend([base for base in _bases_treinamento_yolo(include_legacy=True)[1:] if base.exists()])
+    files = []
+    for base in bases:
+        for kind in ("pendao_confirmado", "pendao_faltante"):
+            for suffix in ("*.jpg", "*.jpeg", "*.png", "*.webp", "*.tif", "*.tiff"):
+                files.extend(base.glob(f"**/crops/{kind}/{suffix}"))
+    files = [path for path in files if path.is_file()]
+    files = list({str(path.resolve()): path for path in files}.values())
+    files.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
+    if limit:
+        files = files[: int(limit)]
+    return files
+
+
+def _metadata_treino_yolo_por_crop(crop_path: Path):
+    try:
+        crop_path = Path(crop_path)
+        meta_path = crop_path.with_suffix(".json")
+        if meta_path.exists():
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        for base in _bases_treinamento_yolo(include_legacy=True):
+            candidate = base / "crops" / crop_path.parent.name / f"{crop_path.stem}.json"
+            if candidate.exists():
+                return json.loads(candidate.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {}
+
+
+def assinatura_referencias_treino_yolo() -> str:
+    files = _arquivos_referencia_treinamento_yolo(limit=300)
+    if not files:
+        return "refs:0"
+    hasher = hashlib.sha1()
+    for path in files:
+        try:
+            stat = path.stat()
+            hasher.update(str(path).encode("utf-8", errors="ignore"))
+            hasher.update(str(stat.st_size).encode("ascii"))
+            hasher.update(str(stat.st_mtime_ns).encode("ascii"))
+        except Exception:
+            continue
+    return f"refs:{len(files)}:{hasher.hexdigest()[:16]}"
+
+
+def marcas_treinamento_yolo_preview(source_name: str, source_date: str, preview_dims: tuple, original_dims: tuple):
+    preview_w, preview_h = [float(v or 1) for v in preview_dims]
+    orig_w, orig_h = [float(v or 1) for v in original_dims]
+    scale_x = preview_w / max(1.0, orig_w)
+    scale_y = preview_h / max(1.0, orig_h)
+    marks = []
+    for mark in listar_marcas_treinamento_yolo(source_name, source_date)[-800:]:
+        try:
+            crop_size = float(mark.get("crop_size", PENDAO_AVANCADO_PARAMS.get("manual_crop_size_default", 128)))
+            crop_path = Path(str(mark.get("crop", mark.get("image", ""))))
+            marks.append({
+                "id": mark.get("id", crop_path.stem),
+                "x": round(float(mark.get("original_x", 0)) * scale_x, 2),
+                "y": round(float(mark.get("original_y", 0)) * scale_y, 2),
+                "size": round(max(12.0, crop_size * max(scale_x, scale_y)), 2),
+                "type": mark.get("sample_type", "pendao_confirmado"),
+                "file": crop_path.name,
+                "crop": str(mark.get("crop", "")),
+                "source_name": mark.get("source_name", source_name),
+                "source_date": mark.get("source_date", source_date),
+                "created_at": mark.get("created_at", ""),
+            })
+        except Exception:
+            continue
+    return marks
+
+
+def _preparar_template_referencia_pendao(crop_rgb, params=None):
+    params = _pendao_params(params)
+    crop = _as_rgb_uint8(crop_rgb)
+    if crop is None:
+        return None
+    h, w = crop.shape[:2]
+    if min(h, w) < 16:
+        return None
+    max_side = 96
+    if max(h, w) > max_side:
+        scale = max_side / max(h, w)
+        crop = cv2.resize(crop, (max(12, int(w * scale)), max(12, int(h * scale))), interpolation=cv2.INTER_AREA)
+    proc, hsv, lab, gray, lab_l = _preprocessar_pendao_opencv(crop, params)
+    if proc is None:
+        return None
+    sem_verde, green_mask = remover_verde_agressivo(proc, params)
+    cor_mask, _ = criar_mascara_pendoes_multicor(proc, lab_l, params)
+    textura_mask = calcular_mascara_textura(gray, params)
+    brilho_mask = cv2.threshold(lab_l, int(params.get("lab_l_threshold", 128)), 255, cv2.THRESH_BINARY)[1]
+    valid_mask = cv2.bitwise_and(cv2.bitwise_and(cor_mask, sem_verde), cv2.bitwise_or(textura_mask, brilho_mask))
+    valid_ratio = float(np.mean(valid_mask > 0))
+    green_ratio = float(np.mean(green_mask > 0))
+    if valid_ratio < 0.004:
+        return None
+    if green_ratio > 0.97 and valid_ratio < 0.025:
+        return None
+    gray_eq = cv2.equalizeHist(gray)
+    masked = cv2.bitwise_and(gray_eq, gray_eq, mask=cv2.dilate(valid_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))))
+    if float(np.std(masked)) < 4.0:
+        masked = gray_eq
+    return {
+        "gray": np.ascontiguousarray(masked.astype(np.uint8)),
+        "w": int(masked.shape[1]),
+        "h": int(masked.shape[0]),
+        "valid_ratio": valid_ratio,
+        "green_ratio": green_ratio,
+    }
+
+
+def _roi_compativel_com_caracteristicas_treino_pendao(roi, template):
+    features = (template or {}).get("features") or {}
+    if not isinstance(features, dict):
+        return True
+    try:
+        ref_green = float(features.get("green_ratio", template.get("green_ratio", 0.0)))
+        ref_yellow = float(features.get("yellow_ratio", 0.0))
+        ref_texture = float(features.get("texture_ratio", 0.0))
+        ref_clear = float(features.get("clear_ratio", 0.0))
+        ref_valid = float(features.get("valid_tassel_ratio", template.get("valid_ratio", 0.0)))
+    except Exception:
+        return True
+    green_limit = min(0.96, max(0.42, ref_green + 0.12))
+    yellow_min = max(0.006, min(0.16, ref_yellow * 0.35))
+    texture_min = max(0.006, min(0.14, ref_texture * 0.30))
+    clear_min = max(0.06, min(0.28, ref_clear * 0.28))
+    valid_min = max(0.004, min(0.12, ref_valid * 0.22))
+    return (
+        float(roi.get("green_ratio", 1.0)) <= green_limit
+        and float(roi.get("yellow_ratio", 0.0)) >= yellow_min
+        and float(roi.get("texture_ratio", 0.0)) >= texture_min
+        and float(roi.get("clear_ratio", 0.0)) >= clear_min
+        and float(roi.get("yellow_ratio", 0.0)) + float(roi.get("texture_ratio", 0.0)) >= valid_min
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def carregar_referencias_treino_yolo(signature: str = "", max_templates: int = 28):
+    params = _pendao_params()
+    templates = []
+    for path in _arquivos_referencia_treinamento_yolo(limit=max_templates):
+        try:
+            crop = np.array(Image.open(path).convert("RGB"))
+            template = _preparar_template_referencia_pendao(crop, params)
+            if not template:
+                continue
+            metadata = _metadata_treino_yolo_por_crop(path)
+            template["name"] = path.name
+            template["metadata_id"] = metadata.get("id", path.stem) if isinstance(metadata, dict) else path.stem
+            template["features"] = metadata.get("features", {}) if isinstance(metadata, dict) else {}
+            templates.append(template)
+        except Exception:
+            continue
+    return templates
+
+
+def _inferir_pendoes_por_referencias(rgb_img, existing=None, params=None):
+    params = _pendao_params(params)
+    if not bool(params.get("reference_matching_enabled", True)):
+        return [], "Referências manuais desativadas."
+    rgb = _as_rgb_uint8(rgb_img)
+    if rgb is None:
+        return [], "Imagem inválida para referências manuais."
+    signature = assinatura_referencias_treino_yolo()
+    templates = carregar_referencias_treino_yolo(signature, int(params.get("reference_max_templates", 28)))
+    if not templates:
+        return [], "Sem mini imagens manuais para referência."
+
+    orig_h, orig_w = rgb.shape[:2]
+    max_dim = int(params.get("reference_match_max_dim", 1600))
+    scale_back = 1.0
+    if max(orig_h, orig_w) > max_dim:
+        scale = max_dim / max(orig_h, orig_w)
+        work = cv2.resize(rgb, (max(1, int(orig_w * scale)), max(1, int(orig_h * scale))), interpolation=cv2.INTER_AREA)
+        scale_back = 1.0 / scale
+    else:
+        work = rgb
+
+    proc, hsv, lab, gray, lab_l = _preprocessar_pendao_opencv(work, params)
+    if proc is None:
+        return [], "Falha no preparo das referências manuais."
+    sem_verde, _ = remover_verde_agressivo(proc, params)
+    cor_mask, _ = criar_mascara_pendoes_multicor(proc, lab_l, params)
+    textura_mask = calcular_mascara_textura(gray, params)
+    brilho_mask = cv2.threshold(lab_l, int(params.get("lab_l_threshold", 128)), 255, cv2.THRESH_BINARY)[1]
+    ref_mask = cv2.bitwise_and(cv2.bitwise_and(cor_mask, sem_verde), cv2.bitwise_or(textura_mask, brilho_mask))
+    gray_ref = cv2.equalizeHist(gray)
+    gray_ref = cv2.bitwise_and(gray_ref, gray_ref, mask=cv2.dilate(ref_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))))
+    if float(np.std(gray_ref)) < 4.0:
+        gray_ref = gray
+
+    scales = params.get("reference_match_scales", (0.70, 0.90, 1.10))
+    threshold = float(params.get("reference_match_threshold", 0.64))
+    close_distance = float(params.get("reference_match_min_distance", params.get("nms_distance", 18))) * scale_back
+    existing_centers = []
+    for det in existing or []:
+        try:
+            existing_centers.append(tuple(float(v) for v in det.get("center", (0, 0))))
+        except Exception:
+            continue
+
+    detections = []
+    max_per_template = 70
+    for template in templates:
+        base_gray = template["gray"]
+        if base_gray.size == 0:
+            continue
+        for scale in scales:
+            tw = max(10, int(base_gray.shape[1] * float(scale)))
+            th = max(10, int(base_gray.shape[0] * float(scale)))
+            if tw >= gray_ref.shape[1] or th >= gray_ref.shape[0]:
+                continue
+            templ = cv2.resize(base_gray, (tw, th), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
+            if float(np.std(templ)) < 3.0:
+                continue
+            try:
+                score_map = cv2.matchTemplate(gray_ref, templ, cv2.TM_CCOEFF_NORMED)
+            except Exception:
+                continue
+            if score_map.size == 0:
+                continue
+            local_max = cv2.dilate(score_map, np.ones((7, 7), dtype=np.uint8))
+            ys, xs = np.where((score_map >= threshold) & (score_map >= local_max - 1e-6))
+            if len(xs) > max_per_template:
+                vals = score_map[ys, xs]
+                keep_idx = np.argsort(vals)[-max_per_template:]
+                xs = xs[keep_idx]
+                ys = ys[keep_idx]
+            for x, y in zip(xs, ys):
+                match_score = float(score_map[y, x])
+                x1, y1, x2, y2 = float(x), float(y), float(x + tw), float(y + th)
+                roi = _roi_features_pendao(work, (x1, y1, x2, y2), params)
+                if not roi:
+                    continue
+                ref_features = template.get("features") or {}
+                try:
+                    ref_green_limit = min(0.96, max(0.72, float(ref_features.get("green_ratio", 0.72)) + 0.12))
+                except Exception:
+                    ref_green_limit = min(0.90, float(params.get("yolo_max_green_ratio", 0.78)))
+                if (
+                    roi["green_ratio"] > ref_green_limit
+                    or roi["yellow_ratio"] < 0.010
+                    or roi["texture_ratio"] < 0.010
+                    or roi["score"] < 1.15
+                ):
+                    continue
+                if not _roi_compativel_com_caracteristicas_treino_pendao(roi, template):
+                    continue
+                cx, cy = roi["center"]
+                orig_center = (float(cx * scale_back), float(cy * scale_back))
+                if any(((orig_center[0] - ex[0]) ** 2 + (orig_center[1] - ex[1]) ** 2) ** 0.5 <= close_distance for ex in existing_centers):
+                    continue
+                existing_centers.append(orig_center)
+                bx, by, bw, bh = roi["bbox"]
+                score = float(roi["score"] + match_score * 2.6 + template.get("valid_ratio", 0) * 1.4)
+                detections.append({
+                    "center": orig_center,
+                    "bbox": (float(bx * scale_back), float(by * scale_back), float(bw * scale_back), float(bh * scale_back)),
+                    "size": float(np.clip(roi["size"] * scale_back, params.get("x_min_size", 6), params.get("x_max_size", 20))),
+                    "score": score,
+                    "confianca": "alta" if score >= 4.8 else ("media" if score >= 3.0 else "baixa"),
+                    "tipo": roi.get("tipo", "referencia"),
+                    "yellow_ratio": roi.get("yellow_ratio", 0),
+                    "texture_ratio": roi.get("texture_ratio", 0),
+                    "clear_ratio": roi.get("clear_ratio", 0),
+                    "green_ratio": roi.get("green_ratio", 0),
+                    "source": "Refinamento OpenCV",
+                    "reference": template.get("name", ""),
+                    "reference_id": template.get("metadata_id", ""),
+                    "template_score": match_score,
+                    "area": float(bw * bh * scale_back * scale_back),
+                })
+    if detections:
+        detections = agrupar_componentes_estrelados(detections, params)
+        detections = remover_deteccoes_duplicadas(detections, params)
+    return detections, f"Referências manuais: {len(detections)} candidatos refinados a partir de {len(templates)} mini imagens."
 
 
 def preparar_preview_treino_yolo(file_bytes: bytes, source_name: str = "", source_date: str = "", max_size=(1180, 680)):
@@ -2066,69 +3912,11 @@ def preparar_preview_treino_yolo(file_bytes: bytes, source_name: str = "", sourc
 def treinar_yolo_pendoamento(epochs: int = 100, imgsz: int = 960, batch: int = 4):
     base = garantir_estrutura_treinamento_yolo()
     counts = contar_amostras_treinamento_yolo(base)
-    if counts["images_train"] < 5:
-        return False, "Treino não iniciado: salve pelo menos 5 imagens em images/train."
-    try:
-        import ultralytics  # noqa: F401
-    except ImportError:
-        return False, "Ultralytics não instalado. Instale com: pip install -U ultralytics"
-
-    YOLO_MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = YOLO_TRAIN_LOG_PATH
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    code = f"""
-from pathlib import Path
-import shutil
-
-base = Path(r'{str(base)}')
-log_path = Path(r'{str(log_path)}')
-models_dir = Path(r'{str(YOLO_MODELS_DIR)}')
-models_dir.mkdir(parents=True, exist_ok=True)
-
-def log(msg):
-    with log_path.open('a', encoding='utf-8') as f:
-        f.write(str(msg) + '\\n')
-
-try:
-    import torch
-    from ultralytics import YOLO
-    device = 0 if torch.cuda.is_available() else 'cpu'
-    batch = {int(batch)} if device != 'cpu' else min({int(batch)}, 2)
-    log('Iniciando treino YOLO de pendoamento')
-    log(f'Device: {{device}} | batch={{batch}} | epochs={int(epochs)} | imgsz={int(imgsz)}')
-    model = YOLO('yolov8n.pt')
-    result = model.train(
-        data=str(base / 'data.yaml'),
-        epochs={int(epochs)},
-        imgsz={int(imgsz)},
-        batch=batch,
-        device=device,
-        project='runs/detect',
-        name='pendao_milho',
-        exist_ok=True,
+    return (
+        False,
+        "O treino automático do modelo foi substituído pelo modo manual do visualizador: "
+        f"use o botão Treinar YOLO para capturar mini imagens e Aplicar Treino para recontar. Amostras disponíveis: {counts['total_images']} em {base}.",
     )
-    candidate = Path('runs/detect/pendao_milho/weights/best.pt')
-    if not candidate.exists():
-        candidate = Path('runs/detect/train/weights/best.pt')
-    if candidate.exists():
-        target = models_dir / 'pendao_milho_best.pt'
-        shutil.copy2(candidate, target)
-        log(f'Modelo salvo em: {{target}}')
-    else:
-        log('best.pt não encontrado após o treino.')
-except Exception as exc:
-    log(f'ERRO NO TREINO: {{exc}}')
-"""
-    log_path.write_text("Treino YOLO solicitado.\n", encoding="utf-8")
-    popen_kwargs = {
-        "cwd": str(APP_ROOT),
-        "stderr": subprocess.STDOUT,
-    }
-    if os.name == "nt":
-        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    with log_path.open("a", encoding="utf-8") as log_handle:
-        subprocess.Popen([sys.executable, "-c", code], stdout=log_handle, **popen_kwargs)
-    return True, f"Treino iniciado em segundo plano. Log: {log_path}"
 
 
 def _pendao_params(params=None) -> dict:
@@ -2208,13 +3996,29 @@ def remover_verde_agressivo(rgb_img, params=None):
     )
     green_hsv = cv2.inRange(
         hsv,
-        np.array(params.get("green_hsv_low", (35, 35, 35)), dtype=np.uint8),
-        np.array(params.get("green_hsv_high", (90, 255, 255)), dtype=np.uint8),
+        np.array(params.get("green_lower", params.get("green_hsv_low", (32, 35, 25))), dtype=np.uint8),
+        np.array(params.get("green_upper", params.get("green_hsv_high", (95, 255, 255))), dtype=np.uint8),
     )
-    green_mask = cv2.bitwise_or(exg_green, green_hsv)
+    h = hsv[:, :, 0].astype(np.int16)
+    s = hsv[:, :, 1].astype(np.int16)
+    v = hsv[:, :, 2].astype(np.int16)
+    folha_clara = (
+        (h >= int(params.get("green_lower", (32, 35, 25))[0]))
+        & (h <= int(params.get("green_upper", (95, 255, 255))[0]))
+        & (s >= int(params.get("green_light_s_min", 18)))
+        & (v >= int(params.get("green_light_v_min", 72)))
+        & (g >= (r * 0.92))
+        & (g >= (b * 1.04))
+    ).astype(np.uint8) * 255
+    green_mask = cv2.bitwise_or(cv2.bitwise_or(exg_green, green_hsv), folha_clara)
     green_mask = cv2.morphologyEx(
         green_mask,
         cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    )
+    green_mask = cv2.dilate(
+        green_mask,
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
         iterations=1,
     )
@@ -2230,6 +4034,16 @@ def criar_mascara_pendoes_multicor(rgb_img, lab_l=None, params=None):
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
     lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
     lab_l = lab_l if lab_l is not None else lab[:, :, 0]
+    palha_1 = cv2.inRange(
+        hsv,
+        np.array(params.get("hsv_tassel_lower_1", (12, 25, 95)), dtype=np.uint8),
+        np.array(params.get("hsv_tassel_upper_1", (42, 180, 255)), dtype=np.uint8),
+    )
+    palha_2 = cv2.inRange(
+        hsv,
+        np.array(params.get("hsv_tassel_lower_2", (0, 0, 135)), dtype=np.uint8),
+        np.array(params.get("hsv_tassel_upper_2", (60, 95, 255)), dtype=np.uint8),
+    )
     novo = cv2.inRange(
         hsv,
         np.array(params.get("new_tassel_hsv_low", (15, 25, 130)), dtype=np.uint8),
@@ -2272,9 +4086,12 @@ def criar_mascara_pendoes_multicor(rgb_img, lab_l=None, params=None):
         & (v > 75)
         & (s > 18)
     ).astype(np.uint8) * 255
-    mascara = cv2.bitwise_or(cv2.bitwise_or(novo, seco), cv2.bitwise_or(velho, creme))
+    mascara = cv2.bitwise_or(cv2.bitwise_or(palha_1, palha_2), cv2.bitwise_or(novo, seco))
+    mascara = cv2.bitwise_or(mascara, cv2.bitwise_or(velho, creme))
     mascara = cv2.bitwise_or(mascara, cv2.bitwise_or(indice_amarelo, exr_mask))
     return mascara, {
+        "palha_1": palha_1,
+        "palha_2": palha_2,
         "novo": novo,
         "seco": seco,
         "velho": velho,
@@ -2323,6 +4140,90 @@ def _detection_center_from_component(component_mask, x, y, w, h):
     if moments.get("m00", 0):
         return float(x + moments["m10"] / moments["m00"]), float(y + moments["m01"] / moments["m00"])
     return float(x + w / 2), float(y + h / 2)
+
+
+def validar_formato_estrela(roi_mask, params=None):
+    params = _pendao_params(params)
+    mask = np.asarray(roi_mask, dtype=np.uint8)
+    if mask.ndim == 3:
+        mask = cv2.cvtColor(mask, cv2.COLOR_RGB2GRAY)
+    mask = (mask > 0).astype(np.uint8) * 255
+    if mask.size == 0 or int(np.count_nonzero(mask)) < 6:
+        return {"ok": False, "directions": 0, "score": 0.0, "center": (mask.shape[1] / 2 if mask.ndim == 2 else 0, mask.shape[0] / 2 if mask.ndim == 2 else 0)}
+
+    h, w = mask.shape[:2]
+    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
+    _, _, _, max_loc = cv2.minMaxLoc(dist)
+    moments = cv2.moments(mask, binaryImage=True)
+    if moments.get("m00", 0):
+        mx = moments["m10"] / moments["m00"]
+        my = moments["m01"] / moments["m00"]
+        cx = (max_loc[0] * 0.65) + (mx * 0.35)
+        cy = (max_loc[1] * 0.65) + (my * 0.35)
+    else:
+        cx, cy = max_loc
+
+    rays = int(params.get("star_direction_count", 8))
+    rays = max(8, rays)
+    min_dirs = int(params.get("min_branch_directions", 3))
+    fill_min = float(params.get("star_ray_fill_min", 0.08))
+    reach_fraction = float(params.get("star_reach_fraction", 0.34))
+    radius = max(4.0, min(w, h) * 0.5)
+    branch_dirs = 0
+    fills = []
+    reaches = []
+
+    for idx in range(rays):
+        angle = (2.0 * np.pi * idx) / rays
+        dx = np.cos(angle)
+        dy = np.sin(angle)
+        samples = []
+        farthest = 0.0
+        start_r = max(2.0, radius * 0.10)
+        for rr in np.linspace(start_r, radius, 18):
+            px = int(round(cx + dx * rr))
+            py = int(round(cy + dy * rr))
+            if px < 0 or py < 0 or px >= w or py >= h:
+                continue
+            hit = mask[py, px] > 0
+            samples.append(hit)
+            if hit:
+                farthest = max(farthest, float(rr))
+        if not samples:
+            fills.append(0.0)
+            reaches.append(0.0)
+            continue
+        fill = float(np.mean(samples))
+        reach = farthest / max(1.0, radius)
+        fills.append(fill)
+        reaches.append(reach)
+        if fill >= fill_min and reach >= reach_fraction:
+            branch_dirs += 1
+
+    radial_score = (branch_dirs / rays) + (float(np.mean(fills)) if fills else 0.0) + (float(np.mean(reaches)) * 0.35 if reaches else 0.0)
+    return {
+        "ok": branch_dirs >= min_dirs,
+        "directions": int(branch_dirs),
+        "score": float(radial_score),
+        "center": (float(cx), float(cy)),
+    }
+
+
+def _centro_pendao_radial(component_mask, x, y, w, h, support_mask=None, params=None):
+    mask = (np.asarray(component_mask, dtype=np.uint8) > 0).astype(np.uint8) * 255
+    if support_mask is not None:
+        support = (np.asarray(support_mask, dtype=np.uint8) > 0).astype(np.uint8) * 255
+        if support.shape == mask.shape:
+            supported = cv2.bitwise_and(mask, support)
+            if np.count_nonzero(supported) >= 4:
+                mask = supported
+    star = validar_formato_estrela(mask, params)
+    if star.get("ok") or np.count_nonzero(mask) >= 4:
+        cx, cy = star.get("center", (w / 2, h / 2))
+        return float(x + cx), float(y + cy), star
+    cx, cy = _detection_center_from_component((np.asarray(component_mask, dtype=np.uint8) > 0).astype(np.uint8), x, y, w, h)
+    star["center"] = (float(cx - x), float(cy - y))
+    return cx, cy, star
 
 
 def _merge_close_detections(detections, distance):
@@ -2415,6 +4316,289 @@ def _grid_cells_from_grade(grade, img_w, img_h):
     return cells
 
 
+def _pendao_analise_params(params=None) -> dict:
+    merged = dict(PENDAO_ANALISE_PARAMS)
+    if params:
+        merged.update(params)
+    return merged
+
+
+def _pendao_entropy_mask(gray_img, params):
+    try:
+        from skimage.filters.rank import entropy
+        from skimage.morphology import disk
+    except Exception:
+        return None
+    try:
+        radius = max(1, int(params.get("entropy_disk_radius", 3)))
+        entropy_img = entropy(np.asarray(gray_img, dtype=np.uint8), disk(radius))
+        entropy_norm = cv2.normalize(entropy_img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        return cv2.threshold(
+            entropy_norm,
+            int(params.get("entropy_threshold", 16)),
+            255,
+            cv2.THRESH_BINARY,
+        )[1]
+    except Exception:
+        return None
+
+
+def detectar_pendoes_pendoamento_opencv_parametrizado(rgb_img, grade=None, params=None):
+    if "cv2" not in globals() or cv2 is None:
+        return {
+            "dims": (0, 0),
+            "rows": 0,
+            "cols": 0,
+            "grid": grade,
+            "parcelas": [],
+            "total": 0,
+            "detector_status": "Instale opencv-python.",
+            "detector_mode": "OpenCV indisponível",
+            "detector_counts": {"opencv": 0, "yolo": 0, "refinado": 0},
+            "backend_ready": False,
+        }
+
+    params = _pendao_analise_params(params)
+    rgb = _as_rgb_uint8(rgb_img)
+    if rgb is None:
+        return {
+            "dims": (0, 0),
+            "rows": 0,
+            "cols": 0,
+            "grid": grade,
+            "parcelas": [],
+            "total": 0,
+            "detector_status": "Imagem inválida para análise de pendoamento.",
+            "detector_mode": "OpenCV parametrizado TMG",
+            "detector_counts": {"opencv": 0, "yolo": 0, "refinado": 0},
+            "backend_ready": False,
+        }
+
+    orig_h, orig_w = rgb.shape[:2]
+    scale = 1.0
+    scale_back = 1.0
+    max_dim = int(PENDAO_AVANCADO_PARAMS.get("analysis_max_dim", 2200))
+    if max(orig_h, orig_w) > max_dim:
+        scale = max_dim / max(orig_h, orig_w)
+        work = cv2.resize(
+            rgb,
+            (max(1, int(orig_w * scale)), max(1, int(orig_h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+        scale_back = 1.0 / scale
+    else:
+        work = rgb
+
+    h_img, w_img = work.shape[:2]
+    cells = _grid_cells_from_grade(grade, orig_w, orig_h)
+    scaled_cells = []
+    for index, row, col, poly in cells:
+        scaled_cells.append((index, row, col, np.asarray(poly, dtype=np.float32) * float(scale)))
+    grid_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+    for _, _, _, poly in scaled_cells:
+        cv2.fillPoly(grid_mask, [np.round(poly).astype(np.int32)], 255)
+    if not np.any(grid_mask):
+        grid_mask[:, :] = 255
+
+    lab = cv2.cvtColor(work, cv2.COLOR_RGB2LAB)
+    l_chan, a_chan, b_chan = cv2.split(lab)
+    clahe = cv2.createCLAHE(
+        clipLimit=float(params.get("clahe_clip_limit", 2.4)),
+        tileGridSize=tuple(params.get("clahe_tile_grid_size", (8, 8))),
+    )
+    l_eq = clahe.apply(l_chan)
+    illum_k = _odd_kernel(params.get("illumination_kernel", 31), 9)
+    illumination = cv2.GaussianBlur(l_eq, (illum_k, illum_k), 0)
+    l_float = l_eq.astype(np.float32)
+    illumination_float = np.maximum(illumination.astype(np.float32), 1.0)
+    l_corr = cv2.normalize((l_float / illumination_float) * 128.0, None, 0, 255, cv2.NORM_MINMAX)
+    l_corr = np.clip(l_corr, 0, 255).astype(np.uint8)
+    lab_corr = cv2.merge([l_corr, a_chan, b_chan])
+    rgb_corr = cv2.cvtColor(lab_corr, cv2.COLOR_LAB2RGB)
+
+    blur_k = _odd_kernel(params.get("gaussian_blur_kernel", 3), 3)
+    blur = cv2.GaussianBlur(rgb_corr, (blur_k, blur_k), 0)
+    strength = float(params.get("sharpen_strength", 0.22))
+    sharp = cv2.addWeighted(rgb_corr, 1.0 + strength, blur, -strength, 0)
+
+    hsv = cv2.cvtColor(sharp, cv2.COLOR_RGB2HSV)
+    lab_final = cv2.cvtColor(sharp, cv2.COLOR_RGB2LAB)
+    lab_l = lab_final[:, :, 0]
+    gray = cv2.cvtColor(sharp, cv2.COLOR_RGB2GRAY)
+
+    r = sharp[:, :, 0].astype(np.int16)
+    g = sharp[:, :, 1].astype(np.int16)
+    b = sharp[:, :, 2].astype(np.int16)
+    exg = (2 * g) - r - b
+    exg_green = (exg >= int(params.get("exg_threshold", 112))).astype(np.uint8) * 255
+    hsv_green = cv2.inRange(
+        hsv,
+        np.array(params.get("green_hsv_low", (35, 40, 40)), dtype=np.uint8),
+        np.array(params.get("green_hsv_high", (85, 255, 255)), dtype=np.uint8),
+    )
+    green_mask = cv2.bitwise_or(exg_green, hsv_green)
+    green_mask = cv2.morphologyEx(
+        green_mask,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1,
+    )
+    green_mask = cv2.dilate(
+        green_mask,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1,
+    )
+    non_green_mask = cv2.bitwise_not(green_mask)
+
+    yellow_mask = cv2.inRange(
+        hsv,
+        np.array(params.get("yellow_hsv_low", (16, 35, 140)), dtype=np.uint8),
+        np.array(params.get("yellow_hsv_high", (38, 255, 255)), dtype=np.uint8),
+    )
+    bright_mask = cv2.threshold(lab_l, int(params.get("lab_l_threshold", 166)), 255, cv2.THRESH_BINARY)[1]
+    sat = hsv[:, :, 1]
+    sat_mask = cv2.inRange(sat, 20, 210)
+
+    lap = cv2.convertScaleAbs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))
+    texture_mask = cv2.threshold(
+        lap,
+        int(params.get("texture_threshold", 22)),
+        255,
+        cv2.THRESH_BINARY,
+    )[1]
+    entropy_mask = _pendao_entropy_mask(gray, params)
+    if entropy_mask is not None:
+        texture_mask = cv2.bitwise_or(texture_mask, entropy_mask)
+    texture_k = _odd_kernel(params.get("texture_dilate_kernel", 5), 3)
+    texture_mask = cv2.dilate(
+        texture_mask,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (texture_k, texture_k)),
+        iterations=1,
+    )
+
+    candidatos = cv2.bitwise_and(yellow_mask, bright_mask)
+    candidatos = cv2.bitwise_and(candidatos, non_green_mask)
+    candidatos = cv2.bitwise_and(candidatos, sat_mask)
+    candidatos = cv2.bitwise_and(candidatos, grid_mask)
+    open_k = _odd_kernel(params.get("morph_open_kernel", 3), 3)
+    close_k = _odd_kernel(params.get("morph_close_kernel", 3), 3)
+    candidatos = cv2.morphologyEx(
+        candidatos,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_k, open_k)),
+        iterations=1,
+    )
+    candidatos = cv2.morphologyEx(
+        candidatos,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k)),
+        iterations=1,
+    )
+    candidatos = cv2.bitwise_and(candidatos, cv2.bitwise_or(texture_mask, bright_mask))
+
+    contours, _ = cv2.findContours(candidatos, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    img_area = float(max(1, w_img * h_img))
+    area_min = max(float(params.get("area_min", 14)), img_area * float(params.get("area_min_fraction", 0.00003)))
+    area_max = min(float(params.get("area_max", 1200)), max(area_min + 1, img_area * float(params.get("area_max_fraction", 0.018))))
+    detections = []
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if area < area_min or area > area_max:
+            continue
+        x, y, w, h = cv2.boundingRect(contour)
+        if w <= 0 or h <= 0:
+            continue
+        vertical_ratio = float(h) / max(1.0, float(w))
+        if vertical_ratio < float(params.get("aspect_ratio_min", 1.2)):
+            continue
+        if vertical_ratio < float(params.get("vertical_cut_ratio", 1.0)):
+            continue
+        if w > max(10.0, float(w_img) * float(params.get("max_width_ratio", 0.68))):
+            continue
+
+        roi_mask = np.zeros((h, w), dtype=np.uint8)
+        local_contour = contour - np.array([[[x, y]]], dtype=contour.dtype)
+        cv2.drawContours(roi_mask, [local_contour], -1, 255, thickness=-1)
+        support = roi_mask > 0
+        if not np.any(support):
+            continue
+        yellow_ratio = float(np.mean(yellow_mask[y:y + h, x:x + w][support] > 0))
+        clear_region = lab_l[y:y + h, x:x + w] > int(params.get("lab_l_threshold", 166))
+        clear_ratio = float(np.mean(clear_region[support]))
+        texture_ratio = float(np.mean(texture_mask[y:y + h, x:x + w][support] > 0))
+        bright_pixels = int(np.count_nonzero(clear_region & support))
+        if clear_ratio < float(params.get("clear_ratio_min", 0.42)):
+            continue
+        if yellow_ratio < float(params.get("yellow_ratio_min", 0.22)):
+            continue
+        if texture_ratio < float(params.get("texture_ratio_min", 0.16)):
+            continue
+        if bright_pixels < int(params.get("min_bright_pixels", 12)):
+            continue
+
+        moments = cv2.moments(contour)
+        if moments.get("m00", 0):
+            cx = float(moments["m10"] / moments["m00"])
+            cy = float(moments["m01"] / moments["m00"])
+        else:
+            cx = float(x + w / 2)
+            cy = float(y + h / 2)
+        if cv2.pointPolygonTest(np.array([[0, 0], [w_img - 1, 0], [w_img - 1, h_img - 1], [0, h_img - 1]], dtype=np.float32), (cx, cy), False) < 0:
+            continue
+        if not any(cv2.pointPolygonTest(poly.astype(np.float32), (cx, cy), False) >= 0 for _, _, _, poly in scaled_cells):
+            continue
+
+        score = (
+            clear_ratio * 2.2
+            + yellow_ratio * 2.1
+            + texture_ratio * 1.8
+            + min(1.0, area / max(1.0, area_min * 5.0))
+            + min(1.0, vertical_ratio / 3.0) * 0.6
+        )
+        size = float(np.clip(max(w, h) * float(params.get("x_size_factor", 0.38)) * scale_back, params.get("x_min_size", 6), params.get("x_max_size", 18)))
+        detections.append({
+            "center": (float(cx * scale_back), float(cy * scale_back)),
+            "size": size,
+            "bbox": (float(x * scale_back), float(y * scale_back), float(w * scale_back), float(h * scale_back)),
+            "score": float(score),
+            "confianca": "alta" if score >= 4.2 else ("media" if score >= 3.4 else "baixa"),
+            "tipo": "pendao_claro",
+            "yellow_ratio": yellow_ratio,
+            "texture_ratio": texture_ratio,
+            "clear_ratio": clear_ratio,
+            "green_ratio": 0.0,
+            "area": float(area * scale_back * scale_back),
+            "source": "OpenCV",
+        })
+
+    detections = remover_deteccoes_duplicadas(detections, {"nms_distance": 12})
+    rows = int((grade or {}).get("rows") or (grade or {}).get("linhas") or 1)
+    cols = int((grade or {}).get("cols") or (grade or {}).get("colunas") or 1)
+    parcelas = []
+    total = 0
+    for index, row, col, poly in cells:
+        dets = []
+        for det in detections:
+            cx, cy = det["center"]
+            if cv2.pointPolygonTest(poly.astype(np.float32), (float(cx), float(cy)), False) >= 0:
+                dets.append({k: v for k, v in det.items() if k != "area"})
+        total += len(dets)
+        parcelas.append({"index": int(index), "row": int(row), "col": int(col), "count": len(dets), "detections": dets})
+
+    return {
+        "dims": (orig_w, orig_h),
+        "rows": rows,
+        "cols": cols,
+        "grid": grade,
+        "parcelas": parcelas,
+        "total": int(total),
+        "detector_status": "OpenCV parametrizado executado com os parâmetros TMG de pendoamento.",
+        "detector_mode": "OpenCV parametrizado TMG",
+        "detector_counts": {"opencv": int(len(detections)), "yolo": 0, "refinado": 0},
+        "backend_ready": True,
+    }
+
+
 def detectar_pendoes_opencv_puro(rgb_img, grade=None, params=None):
     params = _pendao_params(params)
     rgb = _as_rgb_uint8(rgb_img)
@@ -2436,7 +4620,20 @@ def detectar_pendoes_opencv_puro(rgb_img, grade=None, params=None):
         return {"dims": (orig_w, orig_h), "rows": 0, "cols": 0, "grid": grade, "parcelas": [], "total": 0}
     sem_verde, green_mask = remover_verde_agressivo(img, params)
     cor_mask, tipo_masks = criar_mascara_pendoes_multicor(img, lab_l, params)
-    brilho_mask = cv2.threshold(lab_l, int(params.get("lab_l_threshold", 135)), 255, cv2.THRESH_BINARY)[1]
+    h_chan = hsv[:, :, 0]
+    s_chan = hsv[:, :, 1]
+    v_chan = hsv[:, :, 2]
+    brilho_lab = cv2.threshold(lab_l, int(params.get("lab_l_threshold", 132)), 255, cv2.THRESH_BINARY)[1]
+    brilho_v = cv2.threshold(v_chan, int(params.get("min_v_threshold", 82)), 255, cv2.THRESH_BINARY)[1]
+    brilho_mask = cv2.bitwise_and(brilho_lab, brilho_v)
+    saturacao_baixa_media = cv2.inRange(s_chan, 0, 190)
+    sombra_mask = cv2.bitwise_not(cv2.inRange(v_chan, 0, int(params.get("min_v_threshold", 82)) - 1))
+    reflexo_isolado = (
+        (s_chan < 18)
+        & (v_chan > int(params.get("max_glare_v", 248)))
+        & (lab[:, :, 2] < 132)
+    ).astype(np.uint8) * 255
+    sem_reflexo = cv2.bitwise_not(reflexo_isolado)
     textura_mask = calcular_mascara_textura(gray, params)
 
     textura_expandida = cv2.dilate(
@@ -2448,14 +4645,17 @@ def detectar_pendoes_opencv_puro(rgb_img, grade=None, params=None):
     secos_mask = cv2.bitwise_or(tipo_masks.get("seco", cor_mask), tipo_masks.get("velho", cor_mask))
     dificeis_mask = cv2.bitwise_or(tipo_masks.get("indice", cor_mask), tipo_masks.get("exr", cor_mask))
 
-    pass_claros = cv2.bitwise_and(cv2.bitwise_and(claros_mask, sem_verde), textura_expandida)
-    pass_secos = cv2.bitwise_and(cv2.bitwise_and(secos_mask, sem_verde), textura_expandida)
+    base_valida = cv2.bitwise_and(cv2.bitwise_and(sem_verde, sombra_mask), sem_reflexo)
+    base_valida = cv2.bitwise_and(base_valida, saturacao_baixa_media)
+    pass_claros = cv2.bitwise_and(cv2.bitwise_and(claros_mask, base_valida), cv2.bitwise_or(textura_expandida, brilho_mask))
+    pass_secos = cv2.bitwise_and(cv2.bitwise_and(secos_mask, base_valida), textura_expandida)
     pass_dificeis = cv2.bitwise_and(
-        cv2.bitwise_and(dificeis_mask, sem_verde),
+        cv2.bitwise_and(dificeis_mask, base_valida),
         cv2.bitwise_or(textura_expandida, brilho_mask),
     )
     candidatos = cv2.bitwise_or(cv2.bitwise_or(pass_claros, pass_secos), pass_dificeis)
     candidatos = cv2.bitwise_and(candidatos, cv2.bitwise_or(brilho_mask, cor_mask))
+    candidatos = cv2.bitwise_and(candidatos, base_valida)
 
     open_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_odd_kernel(params.get("morph_open_kernel", 3)),) * 2)
     close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_odd_kernel(params.get("morph_close_kernel", 5)),) * 2)
@@ -2493,6 +4693,8 @@ def detectar_pendoes_opencv_puro(rgb_img, grade=None, params=None):
         yellow_ratio = float(np.mean(cor_mask[comp_full] > 0)) if np.any(comp_full) else 0.0
         texture_ratio = float(np.mean(textura_mask[comp_full] > 0)) if np.any(comp_full) else 0.0
         clear_ratio = float(np.mean(lab_l[comp_full] > int(params.get("lab_l_threshold", 135)))) if np.any(comp_full) else 0.0
+        mean_sat = float(np.mean(s_chan[comp_full])) if np.any(comp_full) else 255.0
+        mean_val = float(np.mean(v_chan[comp_full])) if np.any(comp_full) else 0.0
         if green_ratio > float(params.get("max_green_ratio", 0.35)):
             continue
         if yellow_ratio < float(params.get("yellow_ratio_min", 0.10)):
@@ -2501,13 +4703,26 @@ def detectar_pendoes_opencv_puro(rgb_img, grade=None, params=None):
             continue
         if clear_ratio < float(params.get("clear_ratio_min", 0.20)):
             continue
+        if mean_val < float(params.get("min_v_threshold", 82)):
+            continue
+        if mean_sat > 205 and yellow_ratio < 0.18:
+            continue
         if circularity > float(params.get("max_circularity", 0.90)) and aspect < 1.8:
             continue
         if solidity < float(params.get("min_solidity", 0.08)) or density < 0.05:
             continue
         if aspect > 12 and texture_ratio < 0.22:
             continue
-        cx, cy = _detection_center_from_component(component, x, y, w, h)
+        suporte_roi = cv2.bitwise_and(
+            component * 255,
+            cv2.bitwise_and(
+                cv2.bitwise_or(cor_mask[y:y + h, x:x + w], brilho_mask[y:y + h, x:x + w]),
+                cv2.bitwise_or(textura_mask[y:y + h, x:x + w], candidatos[y:y + h, x:x + w]),
+            ),
+        )
+        cx, cy, star_info = _centro_pendao_radial(component, x, y, w, h, suporte_roi, params)
+        if not star_info.get("ok"):
+            continue
         sx = int(np.clip(cx, 0, hsv.shape[1] - 1))
         sy = int(np.clip(cy, 0, hsv.shape[0] - 1))
         tipo = classificar_tipo_pendao(hsv[sy, sx], lab[sy, sx], params)
@@ -2519,6 +4734,8 @@ def detectar_pendoes_opencv_puro(rgb_img, grade=None, params=None):
             + (1.0 - green_ratio) * 1.8
             + area_score
             + min(1.0, aspect / 4.0) * 0.35
+            + float(star_info.get("score", 0.0)) * 1.35
+            + min(1.0, float(star_info.get("directions", 0)) / 6.0) * 0.85
         )
         confianca = "alta" if score >= 5.2 else ("media" if score >= 4.0 else "baixa")
         detections.append({
@@ -2532,9 +4749,14 @@ def detectar_pendoes_opencv_puro(rgb_img, grade=None, params=None):
             "texture_ratio": texture_ratio,
             "clear_ratio": clear_ratio,
             "green_ratio": green_ratio,
+            "star_directions": int(star_info.get("directions", 0)),
+            "star_score": float(star_info.get("score", 0.0)),
             "area": float(area * scale_back * scale_back),
+            "source": "OpenCV",
         })
 
+    params["merge_distance"] = float(params.get("min_distance", params.get("merge_distance", 12)))
+    params["nms_distance"] = float(params.get("min_distance", params.get("nms_distance", 12)))
     detections = agrupar_componentes_estrelados(detections, params)
     detections = remover_deteccoes_duplicadas(detections, params)
     max_detections = int(params.get("max_detections", 30000))
@@ -2581,8 +4803,9 @@ def _pendao_model_candidates():
         APP_ROOT / "tmg_assets" / "models" / "best.pt",
     ]
     for candidate in env_candidates:
-        if candidate and Path(candidate).exists():
-            return str(Path(candidate).resolve()), "custom"
+        candidate_path = Path(candidate) if candidate else None
+        if candidate_path and candidate_path.exists() and _path_inside_app_root(candidate_path):
+            return str(candidate_path.resolve()), "custom"
     for candidate in local_candidates:
         if candidate.exists():
             return str(candidate.resolve()), "custom"
@@ -2776,11 +4999,29 @@ def detectar_pendoes_hibrido_yolo_opencv(rgb_img, grade=None, params=None):
         item = dict(det)
         item["source"] = item.get("source", "OpenCV")
         combined.append(item)
+    reference_detections, reference_status = _inferir_pendoes_por_referencias(rgb_img, existing=combined, params=params)
+    for det in reference_detections:
+        item = dict(det)
+        item["source"] = item.get("source", "Refinamento OpenCV")
+        combined.append(item)
     if combined:
         merge_params = dict(params)
         merge_params["nms_distance"] = float(params.get("yolo_merge_distance", params.get("nms_distance", 18)))
         combined = agrupar_componentes_estrelados(combined, merge_params)
         combined = remover_deteccoes_duplicadas(combined, merge_params)
+    source_counts = {
+        "yolo": 0,
+        "opencv": 0,
+        "refinado": 0,
+    }
+    for det in combined:
+        src = str(det.get("source", "")).lower()
+        if "yolo" in src:
+            source_counts["yolo"] += 1
+        elif "refinamento" in src or "refer" in src:
+            source_counts["refinado"] += 1
+        else:
+            source_counts["opencv"] += 1
     rows = int((grade or {}).get("rows") or (grade or {}).get("linhas") or 1)
     cols = int((grade or {}).get("cols") or (grade or {}).get("colunas") or 1)
     rgb = _as_rgb_uint8(rgb_img)
@@ -2797,8 +5038,24 @@ def detectar_pendoes_hibrido_yolo_opencv(rgb_img, grade=None, params=None):
         total += len(dets)
         parcelas.append({"index": int(index), "row": int(row), "col": int(col), "count": len(dets), "detections": dets})
     mode = "YOLO+OpenCV" if yolo_detections else "OpenCV fallback"
-    status = f"{mode}: {total} centros. {yolo_status}"
-    return {"dims": (img_w, img_h), "rows": rows, "cols": cols, "grid": grade, "parcelas": parcelas, "total": int(total), "detector_status": status, "detector_mode": mode}
+    if reference_detections:
+        mode = f"{mode}+Referências"
+    status = (
+        f"{mode}: {total} centros. "
+        f"YOLO={source_counts['yolo']} · OpenCV={source_counts['opencv']} · Refinamento={source_counts['refinado']}. "
+        f"{yolo_status} {reference_status}"
+    )
+    return {
+        "dims": (img_w, img_h),
+        "rows": rows,
+        "cols": cols,
+        "grid": grade,
+        "parcelas": parcelas,
+        "total": int(total),
+        "detector_status": status,
+        "detector_mode": mode,
+        "detector_counts": source_counts,
+    }
 
 
 def _decode_rgb_for_pendao(file_bytes: bytes, filename: str):
@@ -2844,26 +5101,123 @@ def _serializar_deteccoes_pendao_preview(result, rgb, preview_dims):
             "clear_ratio": round(float(det.get("clear_ratio", 0)), 4),
             "green_ratio": round(float(det.get("green_ratio", 0)), 4),
             "source": det.get("source", "OpenCV"),
+            "training_source": det.get("training_source", ""),
             "yolo_conf": round(float(det.get("yolo_conf", 0)), 4),
             "class_name": det.get("class_name", ""),
+            "reference": det.get("reference", ""),
+            "reference_id": det.get("reference_id", ""),
+            "template_score": round(float(det.get("template_score", 0)), 4),
+            "area": round(float(det.get("area", 0)), 4),
         })
     return dets
 
 
+def _centros_deteccoes_pendao(detections):
+    centers = []
+    for det in detections or []:
+        try:
+            cx, cy = det.get("center", (None, None))
+            centers.append((float(cx), float(cy)))
+        except Exception:
+            continue
+    return centers
+
+
+def _filtrar_deteccoes_treino_complementar(candidates, existing, params=None):
+    params = _pendao_params(params)
+    distance = float(params.get("reference_match_min_distance", params.get("nms_distance", 18)))
+    centers = _centros_deteccoes_pendao(existing)
+    accepted = []
+    ordered = sorted(candidates or [], key=lambda det: float(det.get("score", 0)), reverse=True)
+    for det in ordered:
+        try:
+            cx, cy = [float(v) for v in det.get("center", (None, None))]
+        except Exception:
+            continue
+        if any(((cx - ex) ** 2 + (cy - ey) ** 2) ** 0.5 <= distance for ex, ey in centers):
+            continue
+        item = dict(det)
+        item["training_source"] = item.get("source", "Treino YOLO")
+        item["source"] = "Aplicar Treino"
+        centers.append((cx, cy))
+        accepted.append(item)
+    return accepted
+
+
+def _preparar_deteccoes_treino_continuo_pendao(rgb, existing, params=None):
+    params = _pendao_params(params)
+    if not _arquivos_referencia_treinamento_yolo(limit=1):
+        return [], "Sem mini imagens salvas para aplicar treino.", {"yolo": 0, "referencias": 0, "novos": 0}
+    yolo_detections, yolo_status = _inferir_pendoes_yolo(rgb, params=params)
+    candidates = []
+    for det in yolo_detections:
+        item = dict(det)
+        item["source"] = item.get("source", "YOLO")
+        candidates.append(item)
+    reference_detections, reference_status = _inferir_pendoes_por_referencias(
+        rgb,
+        existing=list(existing or []) + candidates,
+        params=params,
+    )
+    for det in reference_detections:
+        item = dict(det)
+        item["source"] = item.get("source", "Referência manual")
+        candidates.append(item)
+    if candidates:
+        merge_params = dict(params)
+        merge_params["nms_distance"] = float(params.get("reference_match_min_distance", 18))
+        candidates = remover_deteccoes_duplicadas(candidates, merge_params)
+    novos = _filtrar_deteccoes_treino_complementar(candidates, existing, params)
+    counts = {
+        "yolo": int(len(yolo_detections)),
+        "referencias": int(len(reference_detections)),
+        "novos": int(len(novos)),
+    }
+    status = (
+        f"Aplicar Treino pronto. YOLO={counts['yolo']} · referências={counts['referencias']} · "
+        f"novos candidatos sem duplicidade={counts['novos']}. {yolo_status} {reference_status}"
+    )
+    return novos, status, counts
+
+
 @st.cache_data(show_spinner=False, max_entries=16)
-def preparar_deteccoes_pendoamento_hibrido(file_bytes: bytes, filename: str, preview_dims: tuple, model_signature: str = ""):
+def preparar_deteccoes_pendoamento_hibrido(file_bytes: bytes, filename: str, preview_dims: tuple, model_signature: str = "", usar_referencias: bool = True):
     rgb = _decode_rgb_for_pendao(file_bytes, filename)
     if rgb is None:
         return {
             "detections": [],
+            "training_detections": [],
             "status": "Imagem inválida para análise de pendoamento.",
             "mode": "erro",
         }
-    result = detectar_pendoes_hibrido_yolo_opencv(rgb, grade=None, params=PENDAO_AVANCADO_PARAMS)
+    params = dict(PENDAO_ANALISE_PARAMS)
+    result = detectar_pendoes_pendoamento_opencv_parametrizado(rgb, grade=None, params=params)
+    main_detections = _detections_from_result(result)
+    treino_detections = []
+    treino_status = "Aplicar Treino aguardando mini imagens."
+    treino_counts = {"yolo": 0, "referencias": 0, "novos": 0}
+    if usar_referencias:
+        try:
+            treino_detections, treino_status, treino_counts = _preparar_deteccoes_treino_continuo_pendao(
+                rgb,
+                main_detections,
+                params=_pendao_params(),
+            )
+        except Exception as exc:
+            treino_status = f"Aplicar Treino indisponível ({exc})."
     return {
         "detections": _serializar_deteccoes_pendao_preview(result, rgb, preview_dims),
+        "training_detections": _serializar_deteccoes_pendao_preview(
+            {"parcelas": [{"detections": treino_detections}], "dims": result.get("dims", (rgb.shape[1], rgb.shape[0]))},
+            rgb,
+            preview_dims,
+        ),
         "status": result.get("detector_status", ""),
-        "mode": result.get("detector_mode", "OpenCV fallback"),
+        "mode": result.get("detector_mode", "OpenCV parametrizado TMG"),
+        "counts": result.get("detector_counts", {}),
+        "training_status": treino_status,
+        "training_counts": treino_counts,
+        "backend_ready": bool(result.get("backend_ready", True)),
     }
 
 
@@ -2963,28 +5317,116 @@ if not st.session_state.logged_in:
         margin: 0 0 18px 0;
     }
 
-    .stTextInput > div > div > input {
-        background-color: #ffffff !important;
-        border: 1px solid #d6e3f0 !important;
-        border-radius: 10px !important;
-        color: #111827 !important;
-        padding: 10px 14px !important;
-        font-size: 0.95rem !important;
-        box-shadow: inset 0 1px 2px rgba(0,0,0,.12) !important;
-    }
-    .stTextInput > div > div > input::placeholder {
-        color: #6b7280 !important;
-    }
-    .stTextInput > div > div > input:focus {
-        border-color: var(--tmg-primary) !important;
-        box-shadow: inset 0 1px 2px rgba(0,0,0,.12), 0 0 8px var(--tmg-primary-glow) !important;
+    div[data-testid="stTextInput"] {
+        margin-bottom: 12px !important;
     }
 
-    .stTextInput label {
-        color: #888 !important;
-        font-size: 0.82rem !important;
-        letter-spacing: 1px !important;
+    div[data-testid="stTextInput"] > div,
+    div[data-testid="stTextInput"] div[data-baseweb="input"] {
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.12), transparent 32%),
+            linear-gradient(145deg, rgba(2,14,36,.98), rgba(18,62,100,.86), rgba(0,212,255,.20)) !important;
+        border: 1.5px solid rgba(156,205,248,.88) !important;
+        border-radius: 12px !important;
+        box-shadow:
+            0 10px 22px rgba(0,0,0,.34),
+            0 0 0 1px rgba(255,255,255,.10),
+            0 0 18px rgba(0,212,255,.26),
+            inset 0 1px 0 rgba(255,255,255,.22),
+            inset 0 -7px 14px rgba(2,14,36,.44) !important;
+    }
+
+    .stTextInput > div > div > input,
+    div[data-testid="stTextInput"] input {
+        background-color: transparent !important;
+        border: none !important;
+        border-radius: 12px !important;
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        caret-color: #ffffff !important;
+        padding: 11px 14px !important;
+        font-size: 1.02rem !important;
+        font-weight: 800 !important;
+        font-family: 'Segoe UI', Arial, sans-serif !important;
+        letter-spacing: .2px !important;
+        text-shadow: 0 1px 0 rgba(0,0,0,.88), 0 0 10px rgba(0,212,255,.28) !important;
+        box-shadow: none !important;
+    }
+
+    .stTextInput > div > div > input::placeholder,
+    div[data-testid="stTextInput"] input::placeholder {
+        color: rgba(224,247,255,.78) !important;
+        -webkit-text-fill-color: rgba(224,247,255,.78) !important;
+        opacity: 1 !important;
+        font-weight: 700 !important;
+    }
+
+    .stTextInput > div > div > input:-webkit-autofill,
+    div[data-testid="stTextInput"] input:-webkit-autofill {
+        -webkit-text-fill-color: #ffffff !important;
+        caret-color: #ffffff !important;
+        box-shadow:
+            0 0 0 1000px rgba(2,14,36,.96) inset,
+            0 10px 22px rgba(0,0,0,.34),
+            0 0 18px rgba(0,212,255,.26) !important;
+        transition: background-color 9999s ease-in-out 0s !important;
+    }
+
+    div[data-testid="stTextInput"]:focus-within > div,
+    div[data-testid="stTextInput"]:focus-within div[data-baseweb="input"] {
+        border-color: #38bdf8 !important;
+        box-shadow:
+            0 12px 26px rgba(0,0,0,.38),
+            0 0 0 2px rgba(56,189,248,.24),
+            0 0 22px rgba(0,212,255,.34),
+            inset 0 1px 0 rgba(255,255,255,.30),
+            inset 0 -7px 14px rgba(2,14,36,.40) !important;
+    }
+
+    .stTextInput label,
+    .stTextInput label p,
+    div[data-testid="stTextInput"] label,
+    div[data-testid="stTextInput"] label p,
+    div[data-testid="stTextInput"] [data-testid="stWidgetLabel"] p {
+        color: #e5e7eb !important;
+        font-size: 0.88rem !important;
+        font-weight: 850 !important;
+        letter-spacing: 1.45px !important;
         text-transform: uppercase !important;
+        text-shadow:
+            0 1px 0 rgba(0,0,0,.95),
+            0 0 10px rgba(56,189,248,.34) !important;
+        margin-bottom: 5px !important;
+    }
+
+    div[data-testid="stTextInput"] button,
+    div[data-testid="stTextInput"] [role="button"] {
+        color: #ffffff !important;
+        background:
+            linear-gradient(145deg, rgba(2,14,36,.92), rgba(18,62,100,.84), rgba(0,212,255,.20)) !important;
+        border-left: 1px solid rgba(56,189,248,.32) !important;
+        border-radius: 0 11px 11px 0 !important;
+        min-height: 100% !important;
+        opacity: 1 !important;
+        box-shadow:
+            inset 1px 0 0 rgba(255,255,255,.18),
+            0 0 12px rgba(0,212,255,.22) !important;
+    }
+
+    div[data-testid="stTextInput"] button:hover,
+    div[data-testid="stTextInput"] [role="button"]:hover {
+        background:
+            linear-gradient(145deg, rgba(7,31,63,.98), rgba(0,212,255,.36)) !important;
+        color: #ffffff !important;
+    }
+
+    div[data-testid="stTextInput"] button svg,
+    div[data-testid="stTextInput"] [role="button"] svg {
+        color: #ffffff !important;
+        fill: #ffffff !important;
+        stroke: #ffffff !important;
+        opacity: 1 !important;
+        filter: drop-shadow(0 0 5px rgba(0,212,255,.72));
     }
 
     .login-footer {
@@ -3113,8 +5555,12 @@ if not st.session_state.logged_in:
             )
 
             if nova_bg:
+                load_box = st.empty()
+                update_tmg_loading(load_box, 45, f"Carregando imagem de fundo: {Path(nova_bg.name).name}")
                 bg_img = Image.open(nova_bg).convert("RGB")
+                update_tmg_loading(load_box, 82, "Salvando imagem de fundo no pacote TMG...")
                 bg_img.save(str(LOGIN_BG_PATH), format="PNG")
+                update_tmg_loading(load_box, 100, "Carregamento concluído com sucesso.")
                 st.success(f"✅ Imagem salva em `{LOGIN_BG_PATH}` — recarregando...")
                 app_rerun()
 
@@ -3563,8 +6009,12 @@ def _mosaic_bytes_from_selection(option: str) -> tuple:
 
 def _mosaic_input_bytes(uploaded, selected_option: str, origem: str) -> tuple:
     if uploaded is not None:
+        load_box = st.empty()
+        update_tmg_loading(load_box, 35, f"Recebendo arquivo: {Path(uploaded.name).name}")
         raw = uploaded.getbuffer().tobytes()
+        update_tmg_loading(load_box, 78, "Registrando arquivo na biblioteca interna...")
         _mosaic_register_bytes(raw, uploaded.name, origem)
+        finish_tmg_loading_and_clear(load_box, "Carregamento concluído com sucesso.")
         return raw, uploaded.name
     return _mosaic_bytes_from_selection(selected_option)
 
@@ -3581,10 +6031,30 @@ def _resettable_ortho_uploader(label: str, key: str, accept_multiple_files: bool
     )
     has_upload = bool(uploaded) if accept_multiple_files else uploaded is not None
     if has_upload:
+        def _upload_signature(item):
+            if isinstance(item, (list, tuple)):
+                return "|".join(f"{Path(getattr(file, 'name', 'arquivo')).name}:{int(getattr(file, 'size', 0) or 0)}" for file in item)
+            return f"{Path(getattr(item, 'name', 'arquivo')).name}:{int(getattr(item, 'size', 0) or 0)}"
+        loading_signature_key = f"{key}_loading_signature"
+        current_signature = _upload_signature(uploaded or [])
+        show_upload_loading = st.session_state.get(loading_signature_key) != current_signature
+        if show_upload_loading:
+            st.session_state[loading_signature_key] = current_signature
+            load_box = st.empty()
+        if accept_multiple_files:
+            total_files = len(uploaded or [])
+            if show_upload_loading:
+                update_tmg_loading(load_box, 65, f"Recebendo {total_files} arquivo(s) para carregamento...")
+                finish_tmg_loading_and_clear(load_box, f"{total_files} arquivo(s) carregado(s) com sucesso.")
+        else:
+            if show_upload_loading:
+                update_tmg_loading(load_box, 65, f"Carregando ortofoto: {Path(uploaded.name).name}")
+                finish_tmg_loading_and_clear(load_box, "Carregamento concluído com sucesso.")
         _, clear_col = st.columns([3, 1])
         with clear_col:
             if st.button("🗑️ Excluir e importar nova", key=f"{key}_clear_{st.session_state[reset_key]}", use_container_width=True):
                 st.session_state[reset_key] += 1
+                st.session_state.pop(loading_signature_key, None)
                 app_rerun()
     return uploaded
 
@@ -3771,6 +6241,8 @@ def _tv_render_upload(manifest: dict) -> None:
         accept_multiple_files=True,
         key="tv_flight_upload"
     )
+    if files:
+        render_tmg_loading_bar(100, f"{len(files)} arquivo(s) de voo recebido(s).")
 
     col_a, col_b, col_c = st.columns([1, 1, 1])
     with col_a:
@@ -3786,9 +6258,10 @@ def _tv_render_upload(manifest: dict) -> None:
         else:
             project_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_tv_safe_name(nome)}"
             project_dir = TV_PROJECTS_DIR / project_id / "raw"
-            progress = st.progress(0)
+            progress = st.empty()
+            update_tmg_loading(progress, 0, "Iniciando upload do lote de voo...")
             saved, duplicates, total_size = _tv_save_uploaded_batch(files, project_dir, manifest, duplicate_check=checksum)
-            progress.progress(40)
+            update_tmg_loading(progress, 40, "Arquivos recebidos. Preparando pacote do voo...")
 
             zip_path = ""
             if compactar and saved:
@@ -3796,7 +6269,7 @@ def _tv_render_upload(manifest: dict) -> None:
                 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                     for item in saved:
                         zf.write(item["path"], arcname=Path(item["path"]).name)
-            progress.progress(75)
+            update_tmg_loading(progress, 75, "Atualizando manifesto e histórico do lote...")
 
             project = {
                 "project_id": project_id,
@@ -3820,7 +6293,7 @@ def _tv_render_upload(manifest: dict) -> None:
             manifest.setdefault("projects", []).insert(0, project)
             _tv_add_history(manifest, f"Lote enviado: {len(saved)} arquivo(s), {len(duplicates)} duplicado(s)", project_id)
             _tv_save_manifest(manifest)
-            progress.progress(100)
+            update_tmg_loading(progress, 100, "Carregamento concluído com sucesso.")
             st.success(f"Projeto `{project_id}` criado com {len(saved)} arquivo(s).")
             if duplicates:
                 st.warning("Duplicados ignorados: " + ", ".join(duplicates[:8]))
@@ -3874,6 +6347,8 @@ def _tv_render_receber_voos(manifest: dict) -> None:
             accept_multiple_files=True,
             key="tv_incoming_files"
         )
+        if incoming_files:
+            render_tmg_loading_bar(100, f"{len(incoming_files)} arquivo(s) recebido(s) para registro.")
         if st.button("Registrar voo recebido", type="primary", key="tv_register_incoming", use_container_width=True):
             if not incoming_files:
                 st.warning("Selecione o pacote ou as imagens recebidas.")
@@ -3975,6 +6450,8 @@ def _tv_render_orthos(manifest: dict) -> None:
         accept_multiple_files=True,
         key="tv_ortho_upload"
     )
+    if ortho_files:
+        render_tmg_loading_bar(100, f"{len(ortho_files)} ortofoto(s) recebida(s) para registro.")
     if st.button("Registrar ortofoto recebida", type="primary", key="tv_register_ortho", use_container_width=True):
         if not ortho_files:
             st.warning("Selecione uma ortofoto.")
@@ -4160,6 +6637,8 @@ def _tv_render_grid_parcelas(manifest: dict) -> None:
             accept_multiple_files=True,
             key="tv_grid_import"
         )
+        if imported:
+            render_tmg_loading_bar(100, f"{len(imported)} arquivo(s) GIS recebido(s) para importação.")
         if st.button("Registrar importação", key="tv_register_import", use_container_width=True):
             saved, _, _ = _tv_save_uploaded_batch(imported, TV_IMPORTS_DIR / datetime.now().strftime("%Y%m%d_%H%M%S"), manifest, duplicate_check=False)
             for item in saved:
@@ -4169,6 +6648,8 @@ def _tv_render_grid_parcelas(manifest: dict) -> None:
             st.success(f"{len(saved)} arquivo(s) importado(s).")
 
         grid_json = st.file_uploader("Reenviar grid JSON exportado pelo visualizador", type=["json"], key="tv_grid_json")
+        if grid_json is not None:
+            render_tmg_loading_bar(100, f"JSON do grid recebido: {Path(grid_json.name).name}")
         if st.button("Salvar versão do grid", type="primary", key="tv_save_grid_version", use_container_width=True):
             if grid_json is None:
                 st.warning("Selecione o JSON do grid exportado.")
@@ -4212,7 +6693,7 @@ def _tv_render_grid_parcelas(manifest: dict) -> None:
             ortho_id = selected.split(" · ")[0]
             record = next((o for o in manifest.get("orthos", []) if o.get("ortho_id") == ortho_id), None)
             if record and Path(record.get("path", "")).exists():
-                with st.spinner("Preparando visualizador GIS..."):
+                with st.container():
                     raw = Path(record["path"]).read_bytes()
                     b64, dims, err, _ = processar_ortofoto(raw, record["nome"])
                 if err:
@@ -4569,7 +7050,7 @@ def _vd_id_from_option(option: str) -> str:
     return option.split(" · ")[0] if option else ""
 
 def _vd_destination_status(destino: str, caminho: str, manifest: dict) -> dict:
-    path = Path(caminho.strip()) if caminho else VD_ROOT / "destinos" / _tv_safe_name(destino)
+    path = _resolve_system_path(caminho.strip()) if caminho else VD_ROOT / "destinos" / _tv_safe_name(destino)
     exists = path.exists()
     status = "Conectado" if exists else "Pendente"
     free = "Indisponível"
@@ -4618,7 +7099,7 @@ def _vd_save_uploaded_files(files, base_dir: Path, progress=None) -> tuple:
                 file_size += len(chunk)
                 written_total += len(chunk)
                 if progress and expected:
-                    progress.progress(min(99, int((written_total / expected) * 100)))
+                    update_tmg_loading(progress, min(99, int((written_total / expected) * 100)), f"Carregando arquivo: {Path(uploaded.name).name}")
         target = base_dir / Path(uploaded.name).name
         if target.exists():
             target = base_dir / f"{target.stem}_{datetime.now().strftime('%H%M%S%f')}{target.suffix}"
@@ -4634,7 +7115,7 @@ def _vd_save_uploaded_files(files, base_dir: Path, progress=None) -> tuple:
             "enviado_em": _tv_now()
         })
     if progress:
-        progress.progress(100)
+        update_tmg_loading(progress, 100, "Carregamento concluído com sucesso.")
     return saved, total_size
 
 def _vd_copy_to_destination(saved: list, caminho: str, lote_id: str, nome_voo: str = "") -> tuple:
@@ -4642,7 +7123,7 @@ def _vd_copy_to_destination(saved: list, caminho: str, lote_id: str, nome_voo: s
     if not caminho:
         return "", "Armazenado somente no banco interno"
     try:
-        base_destino = Path(str(caminho).strip()).expanduser()
+        base_destino = _resolve_system_path(str(caminho).strip())
         pasta_voo = _tv_safe_name(nome_voo) if nome_voo else lote_id
         dest_dir = base_destino / pasta_voo
         if dest_dir.exists():
@@ -4938,12 +7419,14 @@ def _vd_render_envio(manifest: dict) -> None:
         margin:0 0 10px 0;
       }
       .vd-progress-box {
-        background:#111;
-        border:1px solid #333;
-        border-left:4px solid #ff8c00;
-        border-radius:10px;
+        background:var(--tmg-deploy-card-bg);
+        border:1px solid var(--tmg-deploy-border);
+        border-left:4px solid var(--tmg-primary);
+        border-radius:14px;
         padding:14px;
         margin-top:12px;
+        box-shadow:var(--tmg-deploy-card-shadow);
+        color:#ffffff;
       }
       .vd-dest-path {
         color:#9f9f9f;
@@ -5006,7 +7489,7 @@ def _vd_render_envio(manifest: dict) -> None:
     d2.metric("Status", dest_status["status"])
     d3.metric("Espaço disponível", dest_status["espaco"])
     d4.metric("Último envio", dest_status["ultimo_envio"])
-    pasta_prevista = Path(str(caminho).strip()).expanduser() / _tv_safe_name(nome_voo)
+    pasta_prevista = _resolve_system_path(str(caminho).strip()) / _tv_safe_name(nome_voo)
     st.markdown(f"<div class='vd-dest-path'>Pasta que será criada no destino: <b>{pasta_prevista}</b></div>", unsafe_allow_html=True)
 
     st.markdown("<div class='vd-section-title'>Anexar imagens do voo</div>", unsafe_allow_html=True)
@@ -5018,6 +7501,7 @@ def _vd_render_envio(manifest: dict) -> None:
     )
     if files:
         total_previsto = sum(int(getattr(f, "size", 0) or 0) for f in files)
+        render_tmg_loading_bar(100, f"{len(files)} arquivo(s) selecionado(s) para envio.")
         st.info(f"{len(files)} arquivo(s) selecionado(s) · volume previsto: {_tv_human_size(total_previsto)}")
 
     confirmar_envio = st.checkbox(
@@ -5038,12 +7522,13 @@ def _vd_render_envio(manifest: dict) -> None:
             lote_id = f"VD_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_tv_safe_name(nome_voo)}"
             st.markdown("<div class='vd-progress-box'><b>Resumo da progressão de envio</b></div>", unsafe_allow_html=True)
             status_line = st.empty()
-            progress = st.progress(0)
+            progress = st.empty()
+            update_tmg_loading(progress, 0, "Iniciando envio de fotos do voo...")
             status_line.info("1/4 — Criando pasta interna do lote e gravando arquivos...")
             saved, total_size = _vd_save_uploaded_files(files, VD_FLIGHTS_DIR / lote_id / "raw", progress)
             status_line.info("2/4 — Criando pasta com o nome do voo no destino escolhido...")
             destino_path, envio_status = _vd_copy_to_destination(saved, caminho, lote_id, nome_voo)
-            progress.progress(92)
+            update_tmg_loading(progress, 92, "Registrando destino e resumo do envio...")
             status_line.info("3/4 — Atualizando manifesto e histórico do sistema...")
             record = {
                 "lote_id": lote_id,
@@ -5078,7 +7563,7 @@ def _vd_render_envio(manifest: dict) -> None:
             manifest.setdefault("config", {})["destino_envio_padrao"] = destino_envio
             _vd_add_history(manifest, f"Voo enviado com {len(saved)} arquivo(s) para pasta {record['pasta_nome_voo']}", lote_id, envio_status)
             _vd_save_manifest(manifest)
-            progress.progress(100)
+            update_tmg_loading(progress, 100, "Carregamento concluído com sucesso.")
             status_line.success("4/4 — Envio finalizado e registrado no resumo.")
             st.success(f"Lote `{lote_id}` enviado. Pasta criada: `{destino_path or pasta_prevista}`. Status: {envio_status}")
             if saved:
@@ -5135,6 +7620,8 @@ def _vd_render_ortofotos(manifest: dict) -> None:
             type=["tif", "tiff", "geotiff", "png", "jpg", "jpeg", "jp2", "img", "zip"],
             key="vd_ortho_file"
         )
+        if ortho_file is not None:
+            render_tmg_loading_bar(100, f"Ortofoto recebida: {Path(ortho_file.name).name}")
         importar_ortho = st.form_submit_button("Importar Ortofoto", type="primary", use_container_width=True)
 
     if importar_ortho:
@@ -5290,6 +7777,8 @@ def _vd_render_grid(manifest: dict) -> None:
         cols = st.number_input("Número de colunas", min_value=1, max_value=500, value=10, key="vd_grid_cols")
         escala = st.text_input("Escala / referência espacial", value="Preservar metadados da ortofoto", key="vd_grid_scale")
         grid_json = st.file_uploader("JSON do grid exportado pelo visualizador", type=["json"], key="vd_grid_json_upload")
+        if grid_json is not None:
+            render_tmg_loading_bar(100, f"JSON do grid recebido: {Path(grid_json.name).name}")
 
         if st.button("Salvar Grid no Sistema", type="primary", key="vd_save_grid_system", use_container_width=True):
             if not selected:
@@ -5851,6 +8340,8 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
             key=f"partner_upload_sheet_{partner_key}",
             help="Envie arquivos .xlsx, .xls ou .csv para espelhar os dados no sistema.",
         )
+        if uploaded_sheet is not None:
+            render_tmg_loading_bar(100, f"Planilha recebida: {Path(uploaded_sheet.name).name}")
         c1, c2, c3 = st.columns(3)
         with c1:
             import_clicked = st.button("📥 Importar planilha", key=f"partner_import_{partner_key}", use_container_width=True)
@@ -5863,16 +8354,22 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
 
     if import_clicked or update_clicked:
         try:
+            load_box = st.empty()
+            update_tmg_loading(load_box, 20, "Lendo planilha importada...")
             df, err = _partners_read_sheet_upload(uploaded_sheet)
             if err:
+                clear_tmg_loading(load_box)
                 st.warning("Não foi possível importar a planilha. Verifique o formato do arquivo e tente novamente.")
                 return
+            update_tmg_loading(load_box, 62, "Tratando colunas e comparando dados...")
             new_clean = _partners_clean_dataframe(df)
             if new_clean.empty and len(new_clean.columns) == 0:
+                clear_tmg_loading(load_box)
                 st.warning("Não foi possível importar a planilha. Verifique o formato do arquivo e tente novamente.")
                 return
             original_columns = [col for col in new_clean.columns if col != PARTNER_ROW_ID and col not in PARTNER_INTERNAL_COLUMNS]
             if not original_columns:
+                clear_tmg_loading(load_box)
                 st.warning("Não foi possível importar a planilha. Verifique o formato do arquivo e tente novamente.")
                 return
             baseline_rows = partner.get("baseline_rows", [])
@@ -5915,6 +8412,7 @@ def _render_partner_sheet_controls(state: dict, partner_key: str) -> None:
             partner["last_import"] = {"data_hora": _now_human(), "usuario": _auth_user_name(), "linhas": len(prepared), "fonte": f"Arquivo: {uploaded_sheet.name}"}
             partner["last_update"] = summary
             partner["diff_rows"] = diff_rows[:500]
+            update_tmg_loading(load_box, 100, "Carregamento concluído com sucesso.")
             _partners_add_history(
                 state,
                 partner_key,
@@ -6659,7 +9157,10 @@ def _render_partner_logo_settings() -> None:
                 key=f"cfg_partner_logo_{partner_key}",
             )
             if uploaded is not None:
+                load_box = st.empty()
+                update_tmg_loading(load_box, 50, f"Carregando logo {label}...")
                 _partners_save_logo(state, partner_key, uploaded)
+                update_tmg_loading(load_box, 100, "Carregamento concluído com sucesso.")
                 _partners_add_history(state, partner_key, "Logomarca atualizada", label)
                 _partners_save_state(state)
                 st.success(f"Logo {label} salva.")
@@ -6674,13 +9175,7 @@ def _render_logged_user_chip() -> None:
     user_name = _auth_user_name()
     st.markdown(
         f"""
-        <div style='position:fixed;left:14px;top:58px;z-index:999997;pointer-events:none;
-                    background:linear-gradient(145deg,rgba(20,48,78,.96),rgba(8,22,39,.96));
-                    border:1px solid var(--tmg-primary);border-radius:10px;padding:9px 13px;
-                    color:#e8f3ff;font-weight:800;font-size:.82rem;letter-spacing:.4px;
-                    box-shadow:4px 4px 12px rgba(0,0,0,.45),-1px -1px 5px rgba(255,255,255,.04),
-                               0 0 16px var(--tmg-primary-glow);
-                    text-shadow:1px 1px 0 rgba(0,0,0,.65);'>
+        <div class='tmg-user-chip-neon'>
             Usuário: {user_name}
         </div>
         """,
@@ -7113,6 +9608,8 @@ def _render_orthomosaic_generator() -> None:
         accept_multiple_files=True,
         key="ortho_generator_images",
     )
+    if files:
+        render_tmg_loading_bar(100, f"{len(files)} arquivo(s) recebido(s) para geração de ortomosaico.")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -7163,11 +9660,12 @@ def _render_orthomosaic_generator() -> None:
         input_dir = job_dir / project_slug / "images"
         logs_dir = job_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
-        progress = st.progress(0)
+        progress = st.empty()
         status = st.empty()
+        update_tmg_loading(progress, 0, "Iniciando carregamento das imagens do ortomosaico...")
         status.info("1/5 — Salvando imagens do voo com integridade...")
         saved, total_size = _save_uploaded_files_generic(files, input_dir)
-        progress.progress(25)
+        update_tmg_loading(progress, 25, "Imagens salvas. Preparando configuração do ortomosaico...")
 
         output_path = _resolve_system_path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -7219,12 +9717,12 @@ def _render_orthomosaic_generator() -> None:
             "criado_em": _now_human(),
             "atualizado_em": _now_human(),
         })
-        progress.progress(70)
+        update_tmg_loading(progress, 70, "Gerando pacote de integração e scripts...")
 
         package_base = jobs_root / f"{job_id}_pacote_integracao"
         package_zip = shutil.make_archive(str(package_base), "zip", root_dir=job_dir)
         opened, open_msg = _orthomosaic_open_vscode(job_dir)
-        progress.progress(100)
+        update_tmg_loading(progress, 100, "Carregamento concluído com sucesso.")
         status.success("5/5 — Projeto preparado para VS Code/Docker/WebODM.")
 
         st.success(f"Projeto `{job_id}` preparado com {len(saved)} arquivo(s), total {_tv_human_size(total_size)}.")
@@ -7302,7 +9800,6 @@ def _render_sync_backup() -> None:
 
     st.caption("Se a API do Google Drive exigir credenciais, preencha os campos acima. Sem credenciais, o sistema gera um pacote ZIP seguro para envio manual ou cópia local.")
     if st.button("▶ Iniciar sincronização / backup", type="primary", key="sync_start_backup", use_container_width=True):
-        progress = st.progress(0)
         status = st.empty()
         status.info("1/4 — Mapeando dados internos do sistema...")
         source = _resolve_system_path(local_source)
@@ -7315,7 +9812,6 @@ def _render_sync_backup() -> None:
             for path in source.rglob("*"):
                 if path.is_file() and backup_root not in path.parents:
                     files_to_zip.append(path)
-        progress.progress(30)
 
         status.info("2/4 — Compactando arquivos, históricos, tratativas, imagens e configurações...")
         with zipfile.ZipFile(backup_file, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -7327,7 +9823,6 @@ def _render_sync_backup() -> None:
             for extra in (SYSTEM_CONFIG_PATH, LOGO_PATH, LOGIN_BG_PATH):
                 if extra.exists():
                     zf.write(extra, arcname=str(Path("configuracoes") / extra.name))
-        progress.progress(70)
 
         copied_to = ""
         target_text = str(drive_target or "").strip()
@@ -7340,7 +9835,6 @@ def _render_sync_backup() -> None:
                 copied_to = str(copied)
             except Exception as exc:
                 copied_to = f"Não foi possível copiar automaticamente: {exc}"
-        progress.progress(90)
 
         sync_config = {
             "destino": drive_target,
@@ -7353,7 +9847,6 @@ def _render_sync_backup() -> None:
             "copiado_para": copied_to,
         }
         sync_config_path.write_text(json.dumps(sync_config, indent=2, ensure_ascii=False), encoding="utf-8")
-        progress.progress(100)
         status.success("4/4 — Backup finalizado e registro atualizado.")
         st.success(f"Backup criado: `{backup_file}`")
         st.json(sync_config)
@@ -7366,6 +9859,1853 @@ def _render_sync_backup() -> None:
         )
 
 
+
+
+# ==========================================
+# MODULO ISOLADO - ANALISE DE MARCACAO DE GRID
+# ==========================================
+GRIDMARK_ROOT = SYSTEM_DATABASE_DIR / "analise_marcacao_grid"
+GRIDMARK_UPLOAD_DIR = GRIDMARK_ROOT / "uploads"
+GRIDMARK_CACHE_DIR = GRIDMARK_ROOT / "cache"
+GRIDMARK_VECTOR_COLORS = ["#00d4ff", "#ff8c00", "#5ff2b1", "#ff4fd8", "#ffd166", "#7aa7ff", "#ff6b6b"]
+
+def preparar_cache_grid_viewer() -> Path:
+    GRIDMARK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        now_ts = datetime.now().timestamp()
+        for item in GRIDMARK_CACHE_DIR.iterdir():
+            try:
+                if item.is_file() and now_ts - item.stat().st_mtime > 7 * 24 * 3600:
+                    item.unlink(missing_ok=True)
+                elif item.is_dir() and now_ts - item.stat().st_mtime > 7 * 24 * 3600 and item.resolve().is_relative_to(GRIDMARK_CACHE_DIR.resolve()):
+                    shutil.rmtree(item, ignore_errors=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return GRIDMARK_CACHE_DIR
+
+def manter_estado_visualizador_grid() -> None:
+    _gridmark_init_state()
+    preparar_cache_grid_viewer()
+
+def atualizar_apenas_camada_modificada(layer_id: str = "") -> None:
+    st.session_state["gridmark_modified_layer_id"] = str(layer_id or "")
+    st.session_state["gridmark_refresh_token"] = datetime.now().isoformat(timespec="microseconds")
+
+def _gridmark_limpar_cache_temporario() -> None:
+    for path in (GRIDMARK_CACHE_DIR, GRIDMARK_UPLOAD_DIR):
+        try:
+            resolved = path.resolve()
+            root = GRIDMARK_ROOT.resolve()
+            if resolved == root or not resolved.is_relative_to(root):
+                continue
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+            path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+    for cached_fn in (
+        carregar_preview_raster_otimizado,
+        _gridmark_load_gdf_cached,
+        _gridmark_attrs_cached,
+        carregar_geojson_cacheado,
+    ):
+        try:
+            cached_fn.clear()
+        except Exception:
+            pass
+
+def _gridmark_limpar_analise() -> None:
+    st.session_state["gridmark_raster"] = None
+    st.session_state["gridmark_raster_visible"] = True
+    st.session_state["gridmark_layers"] = []
+    st.session_state["gridmark_selected_layer_id"] = ""
+    st.session_state["gridmark_selected_feature_index"] = None
+    st.session_state["gridmark_selected_feature_attrs"] = {}
+    st.session_state["gridmark_selection_payload"] = ""
+    st.session_state["gridmark_last_selection_payload"] = ""
+    st.session_state["gridmark_show_table"] = False
+    st.session_state["gridmark_zoom_layer_id"] = ""
+    st.session_state["gridmark_zoom_selected"] = False
+    _gridmark_limpar_cache_temporario()
+
+def _gridmark_init_state() -> None:
+    if "gridmark_raster" not in st.session_state:
+        st.session_state["gridmark_raster"] = None
+    if "gridmark_raster_visible" not in st.session_state:
+        st.session_state["gridmark_raster_visible"] = True
+    if "gridmark_layers" not in st.session_state:
+        st.session_state["gridmark_layers"] = []
+    if "gridmark_show_table" not in st.session_state:
+        st.session_state["gridmark_show_table"] = False
+    if "gridmark_selected_layer_id" not in st.session_state:
+        st.session_state["gridmark_selected_layer_id"] = ""
+    if "gridmark_selected_feature_index" not in st.session_state:
+        st.session_state["gridmark_selected_feature_index"] = None
+    if "gridmark_selected_feature_attrs" not in st.session_state:
+        st.session_state["gridmark_selected_feature_attrs"] = {}
+    if "gridmark_zoom_layer_id" not in st.session_state:
+        st.session_state["gridmark_zoom_layer_id"] = ""
+    if "gridmark_zoom_selected" not in st.session_state:
+        st.session_state["gridmark_zoom_selected"] = False
+    if "gridmark_selection_payload" not in st.session_state:
+        st.session_state["gridmark_selection_payload"] = ""
+    if "gridmark_last_selection_payload" not in st.session_state:
+        st.session_state["gridmark_last_selection_payload"] = ""
+    if "gridmark_show_all_layers" not in st.session_state:
+        st.session_state["gridmark_show_all_layers"] = True
+
+def _gridmark_logo_html() -> str:
+    try:
+        return _tmg_loading_logo_html()
+    except Exception:
+        return "<div class='tmg-load-logo-fallback'>TMG</div>"
+
+def render_loading_camadas(progress, texto: str = "Carregando camada...", arquivo: str = "", etapa: str = "", container=None):
+    try:
+        pct = max(0, min(100, int(float(progress))))
+    except Exception:
+        pct = 0
+    texto_seguro = html.escape(str(texto or "Carregando camada..."))
+    arquivo_seguro = html.escape(str(arquivo or ""))
+    etapa_segura = html.escape(str(etapa or ""))
+    logo_html = _gridmark_logo_html()
+    markup = f"""
+    <style>
+    @keyframes gridmarkLogoPulse {{
+        0%,100% {{ transform:scale(1); filter:drop-shadow(0 0 9px rgba(0,212,255,.34)); }}
+        50% {{ transform:scale(1.035); filter:drop-shadow(0 0 18px rgba(0,212,255,.58)); }}
+    }}
+    @keyframes gridmarkBarShine {{
+        0% {{ transform:translateX(-130%); opacity:.25; }}
+        55% {{ opacity:.75; }}
+        100% {{ transform:translateX(130%); opacity:.25; }}
+    }}
+    .gridmark-loading-card {{
+        margin:10px 0 14px 0;
+        padding:18px 20px;
+        border-radius:16px;
+        border:1px solid rgba(0,212,255,.42);
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.12), transparent 30%),
+            radial-gradient(circle at top left, rgba(0,212,255,.22), transparent 44%),
+            linear-gradient(145deg, rgba(2,14,36,.97), rgba(12,57,98,.88), rgba(0,212,255,.18));
+        box-shadow:
+            0 16px 34px rgba(0,0,0,.48),
+            0 0 28px rgba(0,212,255,.28),
+            inset 0 1px 0 rgba(255,255,255,.22),
+            inset 0 -9px 18px rgba(2,14,36,.50);
+        color:#fff;
+        text-align:center;
+        transition:all .30s ease;
+        backdrop-filter:blur(10px) saturate(145%);
+        -webkit-backdrop-filter:blur(10px) saturate(145%);
+    }}
+    .gridmark-loading-card:hover {{
+        box-shadow:
+            0 18px 38px rgba(0,0,0,.52),
+            0 0 36px rgba(0,212,255,.42),
+            inset 0 1px 0 rgba(255,255,255,.30);
+    }}
+    .gridmark-loading-card:active {{ transform:translateY(1px) scale(.998); }}
+    .gridmark-loading-logo .tmg-load-logo-img {{
+        max-height:52px;
+        max-width:140px;
+        object-fit:contain;
+        animation:gridmarkLogoPulse 1.8s ease-in-out infinite;
+    }}
+    .gridmark-loading-title {{
+        margin-top:8px;
+        font-size:.96rem;
+        font-weight:900;
+        letter-spacing:.8px;
+        color:#fff;
+        text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 14px rgba(0,212,255,.48);
+    }}
+    .gridmark-loading-file {{
+        margin-top:4px;
+        font-size:.78rem;
+        color:#d9fbff;
+        font-weight:700;
+        text-shadow:0 1px 0 rgba(0,0,0,.75);
+    }}
+    .gridmark-loading-track {{
+        position:relative;
+        height:18px;
+        margin-top:14px;
+        border-radius:999px;
+        overflow:hidden;
+        border:1px solid rgba(255,255,255,.14);
+        background:linear-gradient(180deg,#04101f,#0b2540);
+        box-shadow:inset 0 3px 8px rgba(0,0,0,.58), 0 0 16px rgba(0,212,255,.16);
+    }}
+    .gridmark-loading-fill {{
+        position:absolute;
+        inset:0 auto 0 0;
+        width:{pct}%;
+        border-radius:999px;
+        background:linear-gradient(90deg,#42a5f5,#00d4ff,#5ff2b1);
+        box-shadow:0 0 18px rgba(0,212,255,.55), inset 0 1px 0 rgba(255,255,255,.36);
+        transition:width .35s ease;
+        overflow:hidden;
+    }}
+    .gridmark-loading-fill:after {{
+        content:"";
+        position:absolute;
+        inset:0;
+        background:linear-gradient(90deg, transparent, rgba(255,255,255,.62), transparent);
+        animation:gridmarkBarShine 1.45s ease-in-out infinite;
+    }}
+    .gridmark-loading-pct {{
+        margin-top:8px;
+        font-size:.88rem;
+        font-weight:900;
+        color:#ffffff;
+        text-shadow:0 0 12px rgba(0,212,255,.50);
+    }}
+    </style>
+    <div class="gridmark-loading-card">
+        <div class="gridmark-loading-logo">{logo_html}</div>
+        <div class="gridmark-loading-title">{texto_seguro}</div>
+        <div class="gridmark-loading-file">{arquivo_seguro}</div>
+        <div class="gridmark-loading-track"><div class="gridmark-loading-fill"></div></div>
+        <div class="gridmark-loading-pct">{etapa_segura} {pct}%</div>
+    </div>
+    """
+    target = container if container is not None else st
+    target.markdown(markup, unsafe_allow_html=True)
+
+@st.cache_data(show_spinner=False, max_entries=10)
+def carregar_preview_raster_otimizado(file_bytes: bytes, filename: str):
+    return _processar_ortofoto_cached(
+        file_bytes,
+        filename,
+        _preview_max_dim(),
+        _preview_jpeg_quality(),
+        _preview_max_payload_mb(),
+        _preview_min_dim(),
+    )
+
+def render_loading_visualizador_grid(progress=67, texto: str = "Carregando visualizador...", etapa: str = "Preparando camadas selecionadas...") -> str:
+    try:
+        pct = max(0, min(100, int(float(progress))))
+    except Exception:
+        pct = 67
+    logo_html = _gridmark_logo_html()
+    texto_seguro = html.escape(str(texto or "Carregando visualizador..."))
+    etapa_segura = html.escape(str(etapa or "Preparando camadas selecionadas..."))
+    return f"""
+    <div class="qgisLoadingOverlay" id="viewerLoading">
+      <div class="qgisLoadingCard">
+        <div class="qgisLoadingLogo">{logo_html}</div>
+        <div class="qgisLoadingText">{texto_seguro}</div>
+        <div class="qgisLoadingTrack"><div class="qgisLoadingFill" id="viewerLoadingFill" style="width:{pct}%"></div></div>
+        <div class="qgisLoadingPct" id="viewerLoadingPct">{pct}%</div>
+        <div class="qgisLoadingStep" id="viewerLoadingStep">{etapa_segura}</div>
+      </div>
+    </div>
+    """
+
+def mostrar_loading_central_grid(container=None, progress=67, texto: str = "Carregando visualizador...", etapa: str = "Preparando camadas selecionadas...") -> None:
+    target = container if container is not None else st
+    target.markdown(
+        f"""
+        <style>
+        .gridmark-central-loading-preview {{
+            margin:12px auto;
+            max-width:430px;
+            border-radius:18px;
+            border:1px solid rgba(0,212,255,.42);
+            background:linear-gradient(145deg, rgba(2,14,36,.96), rgba(12,57,98,.84), rgba(0,212,255,.18));
+            box-shadow:0 18px 38px rgba(0,0,0,.48), 0 0 30px rgba(0,212,255,.28), inset 0 1px 0 rgba(255,255,255,.20);
+            padding:18px;
+            color:#fff;
+            text-align:center;
+        }}
+        </style>
+        <div class="gridmark-central-loading-preview">{render_loading_visualizador_grid(progress, texto, etapa)}</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def ocultar_loading_central_grid() -> None:
+    st.session_state["gridmark_loading_visible"] = False
+
+def _gridmark_safe_json(value):
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="ignore")
+        except Exception:
+            return str(value)
+    return value if isinstance(value, (str, int, float, bool)) or value is None else str(value)
+
+def _gridmark_layer_id(prefix: str, name: str, payload: bytes = b"") -> str:
+    seed = f"{prefix}_{name}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}".encode("utf-8") + (payload[:2048] or b"")
+    return hashlib.sha256(seed).hexdigest()[:16]
+
+def _gridmark_upload_signature(uploaded_files) -> str:
+    digest = hashlib.sha256()
+    for item in uploaded_files or []:
+        try:
+            data = item.getvalue()
+        except Exception:
+            data = b""
+        digest.update(str(item.name).encode("utf-8", errors="ignore"))
+        digest.update(str(len(data)).encode("ascii"))
+        digest.update(hashlib.sha256(data).hexdigest().encode("ascii"))
+    return digest.hexdigest()[:24]
+
+def _gridmark_read_raster(uploaded_file) -> tuple:
+    if uploaded_file is None:
+        return None, "Selecione uma camada raster para carregar."
+    try:
+        data = uploaded_file.getvalue()
+    except Exception as exc:
+        return None, f"Erro ao ler raster enviado: {exc}"
+    if not data:
+        return None, "Arquivo raster vazio."
+    try:
+        preparar_cache_grid_viewer()
+        b64, dims, err, spatial = carregar_preview_raster_otimizado(data, uploaded_file.name)
+        if err:
+            return None, err
+        if not b64 or not dims:
+            return None, "Não foi possível gerar a visualização do raster."
+        transform_gdal = spatial.get("transform")
+        if transform_gdal is not None:
+            try:
+                transform_gdal = [float(v) for v in transform_gdal]
+            except Exception:
+                transform_gdal = None
+        raster = {
+            "id": _gridmark_layer_id("raster", uploaded_file.name, data),
+            "name": uploaded_file.name,
+            "data_url": f"data:image/jpeg;base64,{b64}",
+            "width": int(spatial.get("preview_width") or dims[0]),
+            "height": int(spatial.get("preview_height") or dims[1]),
+            "orig_width": int(spatial.get("orig_width") or dims[0]),
+            "orig_height": int(spatial.get("orig_height") or dims[1]),
+            "ratio": float(spatial.get("ratio") or 1.0),
+            "crs_wkt": spatial.get("crs"),
+            "transform_gdal": transform_gdal,
+            "preview_payload_mb": spatial.get("preview_payload_mb", ""),
+        }
+        return raster, None
+    except Exception as exc:
+        return None, f"Erro ao carregar camada raster: {exc}"
+
+def _gridmark_extract_vector_path(uploaded_files) -> tuple:
+    if not uploaded_files:
+        return None, "Selecione uma camada vetorial para carregar."
+    try:
+        GRIDMARK_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        first_bytes = uploaded_files[0].getvalue() if uploaded_files else b""
+        upload_id = _gridmark_layer_id("vetor", uploaded_files[0].name, first_bytes)
+        target_dir = GRIDMARK_UPLOAD_DIR / upload_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        zip_file = next((f for f in uploaded_files if Path(f.name).suffix.lower() == ".zip"), None)
+        if zip_file is not None:
+            zip_path = target_dir / _tv_safe_name(zip_file.name)
+            zip_path.write_bytes(zip_file.getvalue())
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    zf.extractall(target_dir)
+            except Exception as exc:
+                return None, f"Erro ao extrair ZIP do shapefile: {exc}"
+        else:
+            for item in uploaded_files:
+                safe_name = _tv_safe_name(Path(item.name).stem) + Path(item.name).suffix.lower()
+                (target_dir / safe_name).write_bytes(item.getvalue())
+        shp_files = sorted(target_dir.rglob("*.shp"))
+        geojson_files = sorted([p for p in target_dir.rglob("*") if p.suffix.lower() in (".geojson", ".json")])
+        if shp_files:
+            folder_files = {p.suffix.lower() for p in shp_files[0].parent.iterdir() if p.is_file()}
+            missing = [ext for ext in (".shp", ".shx", ".dbf", ".prj") if ext not in folder_files]
+            if missing:
+                return None, "Shapefile incompleto. Envie o .zip contendo .shp, .shx, .dbf e .prj."
+            return shp_files[0], None
+        if geojson_files:
+            return geojson_files[0], None
+        return None, "Nenhum arquivo vetorial válido encontrado. Envie .shp completo, .geojson, .json ou .zip."
+    except Exception as exc:
+        return None, f"Erro ao preparar camada vetorial: {exc}"
+
+def _gridmark_extract_vector_paths(uploaded_files) -> tuple:
+    if not uploaded_files:
+        return [], "Selecione uma camada vetorial para carregar."
+    try:
+        GRIDMARK_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        upload_id = _gridmark_upload_signature(uploaded_files)
+        target_dir = GRIDMARK_UPLOAD_DIR / upload_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        zip_files = [f for f in uploaded_files if Path(f.name).suffix.lower() == ".zip"]
+        if zip_files:
+            for zip_file in zip_files:
+                zip_path = target_dir / _tv_safe_name(zip_file.name)
+                zip_path.write_bytes(zip_file.getvalue())
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        zf.extractall(target_dir / _tv_safe_name(Path(zip_file.name).stem))
+                except Exception as exc:
+                    return [], f"Erro ao extrair ZIP do shapefile: {exc}"
+        else:
+            for item in uploaded_files:
+                safe_name = _tv_safe_name(Path(item.name).stem) + Path(item.name).suffix.lower()
+                (target_dir / safe_name).write_bytes(item.getvalue())
+
+        vector_paths = []
+        for shp_path in sorted(target_dir.rglob("*.shp")):
+            folder_files = {p.suffix.lower() for p in shp_path.parent.iterdir() if p.is_file()}
+            missing = [ext for ext in (".shp", ".shx", ".dbf", ".prj") if ext not in folder_files]
+            if missing:
+                return [], "Shapefile incompleto. Envie o .zip contendo .shp, .shx, .dbf e .prj."
+            vector_paths.append(shp_path)
+        vector_paths.extend(sorted([p for p in target_dir.rglob("*") if p.suffix.lower() in (".geojson", ".json")]))
+        if not vector_paths:
+            return [], "Nenhum arquivo vetorial válido encontrado. Envie .shp completo, .geojson, .json ou .zip."
+        return vector_paths, None
+    except Exception as exc:
+        return [], f"Erro ao preparar camada vetorial: {exc}"
+
+def _gridmark_group_vector_uploads(uploaded_files) -> list:
+    groups = []
+    if not uploaded_files:
+        return groups
+    zip_files = [item for item in uploaded_files if Path(item.name).suffix.lower() == ".zip"]
+    direct_vectors = [item for item in uploaded_files if Path(item.name).suffix.lower() in (".geojson", ".json")]
+    shape_parts = [item for item in uploaded_files if Path(item.name).suffix.lower() in (".shp", ".shx", ".dbf", ".prj", ".cpg")]
+    for item in zip_files:
+        groups.append([item])
+    for item in direct_vectors:
+        groups.append([item])
+    by_stem = {}
+    for item in shape_parts:
+        by_stem.setdefault(Path(item.name).stem.lower(), []).append(item)
+    for items in by_stem.values():
+        groups.append(items)
+    return groups
+
+@st.cache_data(show_spinner=False, max_entries=24)
+def _gridmark_load_gdf_cached(path_text: str):
+    return gpd.read_file(path_text)
+
+@st.cache_data(show_spinner=False, max_entries=48)
+def _gridmark_attrs_cached(path_text: str):
+    gdf = gpd.read_file(path_text)
+    attrs_df = gdf.drop(columns=["geometry"], errors="ignore").copy()
+    for col in attrs_df.columns:
+        attrs_df[col] = attrs_df[col].map(_gridmark_safe_json)
+    return attrs_df
+
+def _gridmark_read_vector(uploaded_files, layer_name: str = "") -> tuple:
+    if not HAS_GEOPANDAS:
+        return None, "Instale geopandas, shapely e pyproj para carregar camadas vetoriais."
+    vector_path, err = _gridmark_extract_vector_path(uploaded_files)
+    if err:
+        return None, err
+    try:
+        gdf = _gridmark_load_gdf_cached(str(vector_path))
+        if gdf is None or gdf.empty:
+            return None, "Camada vetorial sem feições."
+        if "geometry" not in gdf.columns:
+            return None, "Camada vetorial sem geometria."
+        gdf = gdf[gdf.geometry.notna()].copy()
+        try:
+            gdf = gdf[~gdf.geometry.is_empty].copy()
+        except Exception:
+            pass
+        if gdf.empty:
+            return None, "Camada vetorial sem geometrias válidas."
+        attrs_df = _gridmark_attrs_cached(str(vector_path))
+        color_index = len(st.session_state.get("gridmark_layers", [])) % len(GRIDMARK_VECTOR_COLORS)
+        payload = str(vector_path).encode("utf-8")
+        layer = {
+            "id": _gridmark_layer_id("vetor", str(vector_path.name), payload),
+            "name": layer_name.strip() or vector_path.stem,
+            "path": str(vector_path),
+            "source_signature": _gridmark_upload_signature(uploaded_files),
+            "visible": True,
+            "color": GRIDMARK_VECTOR_COLORS[color_index],
+            "opacity": 55,
+            "highlight": False,
+            "expanded": False,
+            "gdf": gdf,
+            "attrs_df": attrs_df,
+            "crs": str(gdf.crs) if getattr(gdf, "crs", None) else "",
+            "feature_count": int(len(gdf)),
+        }
+        return layer, None
+    except Exception as exc:
+        return None, f"Erro ao abrir camada vetorial: {exc}"
+
+def cachear_camada_vetorial(uploaded_files, layer_name: str = "") -> tuple:
+    if not HAS_GEOPANDAS:
+        return [], ["Instale geopandas, shapely e pyproj para carregar camadas vetoriais."]
+    paths, err = _gridmark_extract_vector_paths(uploaded_files)
+    if err:
+        return [], [err]
+    existing = {
+        str(layer.get("source_signature") or layer.get("path") or "")
+        for layer in st.session_state.get("gridmark_layers", [])
+    }
+    layers = []
+    errors = []
+    source_signature = _gridmark_upload_signature(uploaded_files)
+    for vector_path in paths:
+        path_signature = hashlib.sha256(str(vector_path).encode("utf-8", errors="ignore")).hexdigest()[:24]
+        if source_signature in existing or path_signature in existing or str(vector_path) in existing:
+            errors.append(f"{vector_path.name}: camada já importada, não foi duplicada.")
+            continue
+        try:
+            gdf = _gridmark_load_gdf_cached(str(vector_path))
+            if gdf is None or gdf.empty:
+                errors.append(f"{vector_path.name}: camada vetorial sem feições.")
+                continue
+            if "geometry" not in gdf.columns:
+                errors.append(f"{vector_path.name}: camada vetorial sem geometria.")
+                continue
+            gdf = gdf[gdf.geometry.notna()].copy()
+            try:
+                gdf = gdf[~gdf.geometry.is_empty].copy()
+            except Exception:
+                pass
+            if gdf.empty:
+                errors.append(f"{vector_path.name}: camada vetorial sem geometrias válidas.")
+                continue
+            attrs_df = _gridmark_attrs_cached(str(vector_path))
+            color_index = (len(st.session_state.get("gridmark_layers", [])) + len(layers)) % len(GRIDMARK_VECTOR_COLORS)
+            payload = str(vector_path).encode("utf-8")
+            display_name = layer_name.strip() if layer_name.strip() and len(paths) == 1 else vector_path.stem
+            layers.append({
+                "id": _gridmark_layer_id("vetor", str(vector_path.name), payload),
+                "name": display_name,
+                "path": str(vector_path),
+                "source_signature": source_signature if len(paths) == 1 else path_signature,
+                "visible": True,
+                "color": GRIDMARK_VECTOR_COLORS[color_index],
+                "opacity": 55,
+                "highlight": False,
+                "expanded": False,
+                "gdf": gdf,
+                "attrs_df": attrs_df,
+                "crs": str(gdf.crs) if getattr(gdf, "crs", None) else "",
+                "feature_count": int(len(gdf)),
+            })
+        except Exception as exc:
+            errors.append(f"{vector_path.name}: erro ao abrir geometria: {exc}")
+    return layers, errors
+
+def _gridmark_read_vectors(uploaded_files, layer_name: str = "", progress_container=None) -> tuple:
+    groups = _gridmark_group_vector_uploads(uploaded_files)
+    if not groups:
+        return [], ["Selecione uma camada vetorial para carregar."]
+    loaded_layers = []
+    errors = []
+    total = max(1, len(groups))
+    for idx, group in enumerate(groups, start=1):
+        base_pct = int(((idx - 1) / total) * 80)
+        render_loading_camadas(
+            min(95, base_pct + 15),
+            "Camada Vetorial:",
+            group[0].name,
+            "Lendo arquivo...",
+            progress_container,
+        )
+        layers, group_errors = cachear_camada_vetorial(group, layer_name if total == 1 else "")
+        errors.extend(group_errors)
+        if not layers:
+            continue
+        render_loading_camadas(
+            min(98, base_pct + 55),
+            "Camada Vetorial:",
+            f"{len(layers)} camada(s)",
+            "Carregando geometrias...",
+            progress_container,
+        )
+        loaded_layers.extend(layers)
+    if loaded_layers:
+        render_loading_camadas(100, "Preparando visualização:", f"{len(loaded_layers)} camada(s)", "Finalizando...", progress_container)
+    return loaded_layers, errors
+
+def _gridmark_reproject_gdf(gdf, raster: dict) -> tuple:
+    warnings_list = []
+    result = gdf
+    raster_crs_wkt = (raster or {}).get("crs_wkt")
+    if not raster_crs_wkt:
+        if getattr(gdf, "crs", None):
+            warnings_list.append("Raster sem CRS detectado. A camada vetorial será exibida por encaixe aproximado da extensão.")
+        return result, warnings_list
+    if not getattr(gdf, "crs", None):
+        warnings_list.append("Camada vetorial sem CRS. Não foi possível reprojetar automaticamente.")
+        return result, warnings_list
+    try:
+        from pyproj import CRS
+        raster_crs = CRS.from_wkt(raster_crs_wkt)
+        vector_crs = CRS.from_user_input(gdf.crs)
+        if vector_crs != raster_crs:
+            result = gdf.to_crs(raster_crs)
+            warnings_list.append("Camada vetorial reprojetada para o CRS da ortofoto.")
+    except Exception:
+        warnings_list.append("Não foi possível alinhar automaticamente as camadas. Verifique o sistema de coordenadas dos arquivos.")
+    return result, warnings_list
+
+def _gridmark_coord_transformer(gdf, raster: dict):
+    raster = raster or {}
+    transform_gdal = raster.get("transform_gdal")
+    width = max(1, int(raster.get("width") or 1400))
+    height = max(1, int(raster.get("height") or 800))
+    ratio = float(raster.get("ratio") or 1.0)
+    if transform_gdal:
+        try:
+            from affine import Affine as _Affine
+            inv_transform = ~_Affine.from_gdal(*transform_gdal)
+            def to_px(x, y):
+                col, row = inv_transform * (float(x), float(y))
+                return [round(col * ratio, 3), round(row * ratio, 3)]
+            return to_px, None
+        except Exception:
+            pass
+    try:
+        minx, miny, maxx, maxy = [float(v) for v in gdf.total_bounds]
+        dx = max(maxx - minx, 1e-9)
+        dy = max(maxy - miny, 1e-9)
+        def to_px_bbox(x, y):
+            px = (float(x) - minx) / dx * width
+            py = (maxy - float(y)) / dy * height
+            return [round(px, 3), round(py, 3)]
+        return to_px_bbox, "Camada desenhada por extensão aproximada porque o raster não possui georreferenciamento completo."
+    except Exception:
+        return None, "Não foi possível calcular o posicionamento da camada vetorial."
+
+def _gridmark_coords_to_pixels(coords, transformer, max_points: int = 900):
+    raw = list(coords or [])
+    if len(raw) > max_points:
+        step = max(1, int(len(raw) / max_points))
+        raw = raw[::step]
+    pts = []
+    for item in raw:
+        try:
+            x, y = item[:2]
+            pts.append(transformer(x, y))
+        except Exception:
+            continue
+    return pts
+
+def _gridmark_geometry_to_canvas(geom, transformer) -> dict:
+    payload = {"polygons": [], "lines": [], "points": []}
+    if geom is None:
+        return payload
+    geom_type = getattr(geom, "geom_type", "")
+    try:
+        if geom_type == "Polygon":
+            rings = [_gridmark_coords_to_pixels(geom.exterior.coords, transformer)]
+            for interior in geom.interiors:
+                rings.append(_gridmark_coords_to_pixels(interior.coords, transformer))
+            if rings and rings[0]:
+                payload["polygons"].append(rings)
+        elif geom_type == "MultiPolygon":
+            for part in geom.geoms:
+                part_payload = _gridmark_geometry_to_canvas(part, transformer)
+                payload["polygons"].extend(part_payload["polygons"])
+        elif geom_type == "LineString":
+            line = _gridmark_coords_to_pixels(geom.coords, transformer)
+            if line:
+                payload["lines"].append(line)
+        elif geom_type == "MultiLineString":
+            for part in geom.geoms:
+                line = _gridmark_coords_to_pixels(part.coords, transformer)
+                if line:
+                    payload["lines"].append(line)
+        elif geom_type == "Point":
+            payload["points"].append(transformer(geom.x, geom.y))
+        elif geom_type == "MultiPoint":
+            for part in geom.geoms:
+                payload["points"].append(transformer(part.x, part.y))
+        elif geom_type == "GeometryCollection":
+            for part in geom.geoms:
+                part_payload = _gridmark_geometry_to_canvas(part, transformer)
+                payload["polygons"].extend(part_payload["polygons"])
+                payload["lines"].extend(part_payload["lines"])
+                payload["points"].extend(part_payload["points"])
+    except Exception:
+        return payload
+    return payload
+
+def otimizar_renderizacao(gdf):
+    try:
+        if gdf is None or gdf.empty:
+            return gdf, []
+        warnings_list = []
+        feature_count = int(len(gdf))
+        minx, miny, maxx, maxy = [float(v) for v in gdf.total_bounds]
+        diag = max(((maxx - minx) ** 2 + (maxy - miny) ** 2) ** 0.5, 1e-9)
+        if feature_count >= 450:
+            tolerance = diag * 0.000035
+        elif feature_count >= 160:
+            tolerance = diag * 0.000018
+        else:
+            tolerance = 0
+        if tolerance > 0:
+            optimized = gdf.copy()
+            optimized["geometry"] = optimized.geometry.simplify(tolerance, preserve_topology=True)
+            warnings_list.append("Renderização otimizada com simplificação temporária para manter o visualizador fluido.")
+            return optimized, warnings_list
+    except Exception:
+        pass
+    return gdf, []
+
+def otimizar_camadas_grid_viewer(gdf):
+    return otimizar_renderizacao(gdf)
+
+def _gridmark_payload_bbox(geom_payload: dict):
+    xs = []
+    ys = []
+    for poly in geom_payload.get("polygons", []):
+        for ring in poly:
+            for pt in ring:
+                if len(pt) >= 2:
+                    xs.append(float(pt[0]))
+                    ys.append(float(pt[1]))
+    for line in geom_payload.get("lines", []):
+        for pt in line:
+            if len(pt) >= 2:
+                xs.append(float(pt[0]))
+                ys.append(float(pt[1]))
+    for pt in geom_payload.get("points", []):
+        if len(pt) >= 2:
+            xs.append(float(pt[0]))
+            ys.append(float(pt[1]))
+    if not xs or not ys:
+        return None
+    return [round(min(xs), 3), round(min(ys), 3), round(max(xs), 3), round(max(ys), 3)]
+
+def _gridmark_merge_bbox(current, new_bbox):
+    if not new_bbox:
+        return current
+    if not current:
+        return list(new_bbox)
+    return [
+        min(current[0], new_bbox[0]),
+        min(current[1], new_bbox[1]),
+        max(current[2], new_bbox[2]),
+        max(current[3], new_bbox[3]),
+    ]
+
+@st.cache_data(show_spinner=False, max_entries=48)
+def carregar_geojson_cacheado(path_text: str, raster_crs_wkt: str, transform_json: str, width: int, height: int, ratio: float):
+    warnings_list = []
+    try:
+        gdf = _gridmark_load_gdf_cached(path_text)
+        if gdf is None or gdf.empty:
+            return {"features": [], "bbox": None, "warnings": ["Camada sem feições para desenhar."]}
+        if "geometry" not in gdf.columns:
+            return {"features": [], "bbox": None, "warnings": ["Camada vetorial sem geometria."]}
+        gdf = gdf[gdf.geometry.notna()].copy()
+        try:
+            gdf = gdf[~gdf.geometry.is_empty].copy()
+        except Exception:
+            pass
+        attrs_df = gdf.drop(columns=["geometry"], errors="ignore").copy()
+        for col in attrs_df.columns:
+            attrs_df[col] = attrs_df[col].map(_gridmark_safe_json)
+        raster_meta = {
+            "crs_wkt": raster_crs_wkt or "",
+            "transform_gdal": json.loads(transform_json) if transform_json else None,
+            "width": int(width or 1400),
+            "height": int(height or 800),
+            "ratio": float(ratio or 1.0),
+        }
+        gdf_work, reproj_warnings = _gridmark_reproject_gdf(gdf, raster_meta)
+        warnings_list.extend(reproj_warnings)
+        transformer, transform_warning = _gridmark_coord_transformer(gdf_work, raster_meta)
+        if transform_warning:
+            warnings_list.append(transform_warning)
+        if transformer is None:
+            return {"features": [], "bbox": None, "warnings": warnings_list or ["Não foi possível posicionar a camada."]}
+        gdf_work, opt_warnings = otimizar_renderizacao(gdf_work)
+        warnings_list.extend(opt_warnings)
+        features = []
+        layer_bbox = None
+        for idx, row in gdf_work.iterrows():
+            geom_payload = _gridmark_geometry_to_canvas(row.geometry, transformer)
+            if not geom_payload["polygons"] and not geom_payload["lines"] and not geom_payload["points"]:
+                continue
+            bbox = _gridmark_payload_bbox(geom_payload)
+            layer_bbox = _gridmark_merge_bbox(layer_bbox, bbox)
+            attrs = {}
+            if idx in attrs_df.index:
+                attrs = {str(k): _gridmark_safe_json(v) for k, v in attrs_df.loc[idx].to_dict().items()}
+            features.append({
+                "index": int(idx) if isinstance(idx, (int, np.integer)) else str(idx),
+                "attrs": attrs,
+                "polygons": geom_payload["polygons"],
+                "lines": geom_payload["lines"],
+                "points": geom_payload["points"],
+                "bbox": bbox,
+            })
+        return {"features": features, "bbox": layer_bbox, "warnings": warnings_list}
+    except Exception as exc:
+        return {"features": [], "bbox": None, "warnings": [f"Erro ao abrir geometria: {exc}"]}
+
+def _gridmark_prepare_layer_for_viewer(layer: dict, raster: dict) -> tuple:
+    warnings_list = []
+    try:
+        path_text = str(layer.get("path") or "")
+        if path_text:
+            transform_json = json.dumps((raster or {}).get("transform_gdal") or [])
+            cached = carregar_geojson_cacheado(
+                path_text,
+                str((raster or {}).get("crs_wkt") or ""),
+                transform_json,
+                int((raster or {}).get("width") or 1400),
+                int((raster or {}).get("height") or 800),
+                float((raster or {}).get("ratio") or 1.0),
+            )
+            viewer_layer = {
+                "id": layer.get("id"),
+                "name": layer.get("name"),
+                "color": layer.get("color", "#00d4ff"),
+                "opacity": max(0, min(100, int(layer.get("opacity", 55)))) / 100,
+                "highlight": bool(layer.get("highlight", False)),
+                "bbox": cached.get("bbox"),
+                "features": cached.get("features", []),
+            }
+            return viewer_layer, cached.get("warnings", [])
+        gdf = layer.get("gdf")
+        if gdf is None or gdf.empty:
+            return None, ["Camada sem feições para desenhar."]
+        gdf_work, reproj_warnings = _gridmark_reproject_gdf(gdf, raster)
+        warnings_list.extend(reproj_warnings)
+        transformer, transform_warning = _gridmark_coord_transformer(gdf_work, raster)
+        if transform_warning:
+            warnings_list.append(transform_warning)
+        if transformer is None:
+            return None, warnings_list or ["Não foi possível posicionar a camada."]
+        gdf_work, opt_warnings = otimizar_renderizacao(gdf_work)
+        warnings_list.extend(opt_warnings)
+        attrs_df = layer.get("attrs_df")
+        features = []
+        layer_bbox = None
+        for idx, row in gdf_work.iterrows():
+            geom_payload = _gridmark_geometry_to_canvas(row.geometry, transformer)
+            if not geom_payload["polygons"] and not geom_payload["lines"] and not geom_payload["points"]:
+                continue
+            bbox = _gridmark_payload_bbox(geom_payload)
+            layer_bbox = _gridmark_merge_bbox(layer_bbox, bbox)
+            if attrs_df is not None and idx in attrs_df.index:
+                attrs = {str(k): _gridmark_safe_json(v) for k, v in attrs_df.loc[idx].to_dict().items()}
+            else:
+                attrs = {}
+            features.append({
+                "index": int(idx) if isinstance(idx, (int, np.integer)) else str(idx),
+                "attrs": attrs,
+                "polygons": geom_payload["polygons"],
+                "lines": geom_payload["lines"],
+                "points": geom_payload["points"],
+                "bbox": bbox,
+            })
+        viewer_layer = {
+            "id": layer.get("id"),
+            "name": layer.get("name"),
+            "color": layer.get("color", "#00d4ff"),
+            "opacity": max(0, min(100, int(layer.get("opacity", 55)))) / 100,
+            "highlight": bool(layer.get("highlight", False)),
+            "bbox": layer_bbox,
+            "features": features,
+        }
+        return viewer_layer, warnings_list
+    except Exception as exc:
+        return None, [f"Erro ao preparar camada para visualização: {exc}"]
+
+def _gridmark_render_viewer(raster: dict, layers: list) -> None:
+    raster_visible = bool(st.session_state.get("gridmark_raster_visible", True))
+    selected_layer_id = st.session_state.get("gridmark_selected_layer_id", "")
+    selected_feature_index = st.session_state.get("gridmark_selected_feature_index", None)
+    image_width = int((raster or {}).get("width") or 1400)
+    image_height = int((raster or {}).get("height") or 800)
+    viewer_layers = []
+    viewer_warnings = []
+    for layer in layers:
+        if not layer.get("visible", True):
+            continue
+        prepared, warnings_list = _gridmark_prepare_layer_for_viewer(layer, raster)
+        if warnings_list:
+            for warning in warnings_list:
+                if warning not in viewer_warnings:
+                    viewer_warnings.append(warning)
+        if prepared:
+            viewer_layers.append(prepared)
+    for warning in viewer_warnings[:4]:
+        st.warning(warning)
+    viewer_data = {
+        "raster": raster if (raster and raster_visible) else None,
+        "imageWidth": image_width,
+        "imageHeight": image_height,
+        "layers": viewer_layers,
+        "selectedLayerId": selected_layer_id,
+        "selectedFeatureIndex": selected_feature_index,
+        "zoomLayerId": st.session_state.get("gridmark_zoom_layer_id", ""),
+        "zoomSelected": bool(st.session_state.get("gridmark_zoom_selected", False)),
+    }
+    data_json = json.dumps(viewer_data, ensure_ascii=False).replace("</", "<\\/")
+    viewer_html = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* { box-sizing:border-box; }
+body { margin:0; background:#061526; font-family:'Segoe UI',sans-serif; overflow:hidden; }
+#qgisViewer {
+  width:100%; height:760px; position:relative; overflow:hidden; border-radius:12px;
+  border:1px solid rgba(0,212,255,.34);
+  background:
+    linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
+    radial-gradient(circle at 20% 10%, rgba(0,212,255,.13), transparent 32%),
+    #071525;
+  background-size:34px 34px,34px 34px,100% 100%,100% 100%;
+  box-shadow:0 18px 42px rgba(0,0,0,.46), inset 0 1px 0 rgba(255,255,255,.10);
+  cursor:grab;
+}
+#qgisViewer:active { cursor:grabbing; }
+#mapCanvas { width:100%; height:100%; display:block; }
+.qgisToolbar { position:absolute; top:12px; right:12px; display:flex; flex-direction:column; gap:6px; z-index:5; }
+.qgisBtn {
+  width:36px; height:36px; border-radius:9px; border:1px solid rgba(0,212,255,.42);
+  color:#fff; background:linear-gradient(145deg, rgba(5,30,58,.95), rgba(0,128,176,.62));
+  font-weight:900; cursor:pointer; box-shadow:0 8px 18px rgba(0,0,0,.42), 0 0 16px rgba(0,212,255,.20), inset 0 1px 0 rgba(255,255,255,.18);
+  transition:.22s ease;
+}
+.qgisBtn:hover { box-shadow:0 10px 24px rgba(0,0,0,.48), 0 0 24px rgba(0,212,255,.42); transform:translateY(-1px); }
+.qgisInfo {
+  position:absolute; left:12px; bottom:12px; width:min(390px, calc(100% - 86px)); max-height:240px; overflow:auto;
+  border-radius:12px; padding:12px 14px; z-index:6; color:#eafcff;
+  border:1px solid rgba(0,212,255,.34);
+  background:linear-gradient(145deg, rgba(3,18,38,.92), rgba(8,45,82,.78));
+  box-shadow:0 12px 26px rgba(0,0,0,.45), 0 0 22px rgba(0,212,255,.20), inset 0 1px 0 rgba(255,255,255,.10);
+  font-size:12px; line-height:1.35;
+}
+.qgisInfo b { color:#fff; text-shadow:0 0 10px rgba(0,212,255,.45); }
+.qgisInfo table { width:100%; border-collapse:collapse; margin-top:8px; }
+.qgisInfo td { border-bottom:1px solid rgba(255,255,255,.08); padding:4px 2px; vertical-align:top; }
+.qgisInfo td:first-child { color:#8feaff; font-weight:700; width:38%; }
+.qgisStatus {
+  position:absolute; left:12px; top:12px; z-index:6; color:#dffaff; font-size:12px; padding:8px 10px;
+  border-radius:10px; border:1px solid rgba(0,212,255,.28);
+  background:rgba(3,18,38,.72); box-shadow:0 8px 20px rgba(0,0,0,.32);
+}
+@keyframes qgisLoadingPulse {
+  0%,100% { transform:scale(1); filter:drop-shadow(0 0 10px rgba(0,212,255,.36)); }
+  50% { transform:scale(1.035); filter:drop-shadow(0 0 22px rgba(0,212,255,.68)); }
+}
+@keyframes qgisLoadingShine {
+  0% { transform:translateX(-140%); opacity:.18; }
+  55% { opacity:.78; }
+  100% { transform:translateX(140%); opacity:.22; }
+}
+.qgisLoadingOverlay {
+  position:absolute;
+  inset:0;
+  z-index:30;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:radial-gradient(circle at center, rgba(0,20,36,.50), rgba(0,0,0,.58));
+  backdrop-filter:blur(4px) saturate(130%);
+  -webkit-backdrop-filter:blur(4px) saturate(130%);
+  transition:opacity .30s ease, visibility .30s ease;
+}
+.qgisLoadingOverlay.is-hidden {
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+}
+.qgisLoadingCard {
+  width:min(420px, calc(100% - 42px));
+  border-radius:18px;
+  border:1px solid rgba(0,212,255,.48);
+  background:
+    linear-gradient(120deg, rgba(255,255,255,.14), transparent 30%),
+    radial-gradient(circle at top left, rgba(0,212,255,.24), transparent 44%),
+    linear-gradient(145deg, rgba(2,14,36,.98), rgba(12,57,98,.88), rgba(0,212,255,.18));
+  box-shadow:0 18px 40px rgba(0,0,0,.58), 0 0 34px rgba(0,212,255,.34), inset 0 1px 0 rgba(255,255,255,.22);
+  color:#fff;
+  text-align:center;
+  padding:22px 24px;
+}
+.qgisLoadingLogo .tmg-load-logo-img {
+  max-height:58px;
+  max-width:150px;
+  object-fit:contain;
+  animation:qgisLoadingPulse 1.8s ease-in-out infinite;
+}
+.qgisLoadingLogo .tmg-load-logo-fallback {
+  color:#fff;
+  font-size:1.35rem;
+  font-weight:900;
+  letter-spacing:2px;
+  text-shadow:0 0 18px rgba(0,212,255,.66);
+  animation:qgisLoadingPulse 1.8s ease-in-out infinite;
+}
+.qgisLoadingText {
+  margin-top:10px;
+  font-weight:900;
+  color:#fff;
+  letter-spacing:.8px;
+  text-shadow:0 2px 0 rgba(0,0,0,.86), 0 0 16px rgba(0,212,255,.52);
+}
+.qgisLoadingTrack {
+  position:relative;
+  height:18px;
+  margin-top:15px;
+  overflow:hidden;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.14);
+  background:linear-gradient(180deg,#04101f,#0b2540);
+  box-shadow:inset 0 3px 8px rgba(0,0,0,.58), 0 0 16px rgba(0,212,255,.18);
+}
+.qgisLoadingFill {
+  position:absolute;
+  inset:0 auto 0 0;
+  width:12%;
+  border-radius:999px;
+  background:linear-gradient(90deg,#42a5f5,#00d4ff,#5ff2b1);
+  box-shadow:0 0 20px rgba(0,212,255,.58), inset 0 1px 0 rgba(255,255,255,.35);
+  transition:width .30s ease;
+  overflow:hidden;
+}
+.qgisLoadingFill:after {
+  content:"";
+  position:absolute;
+  inset:0;
+  background:linear-gradient(90deg, transparent, rgba(255,255,255,.68), transparent);
+  animation:qgisLoadingShine 1.35s ease-in-out infinite;
+}
+.qgisLoadingPct {
+  margin-top:9px;
+  font-weight:900;
+  color:#ffffff;
+  text-shadow:0 0 14px rgba(0,212,255,.58);
+}
+.qgisLoadingStep {
+  margin-top:4px;
+  color:#d9fbff;
+  font-size:12px;
+  font-weight:700;
+  text-shadow:0 1px 0 rgba(0,0,0,.75);
+}
+</style>
+</head>
+<body>
+<div id="qgisViewer">
+  <canvas id="mapCanvas"></canvas>
+  __GRIDMARK_LOADING__
+  <div class="qgisStatus" id="mapStatus">QGIS-like viewer</div>
+  <div class="qgisToolbar">
+    <button class="qgisBtn" id="zoomIn" title="Aproximar">+</button>
+    <button class="qgisBtn" id="zoomOut" title="Afastar">−</button>
+    <button class="qgisBtn" id="fit" title="Ajustar à tela">⊡</button>
+    <button class="qgisBtn" id="oneToOne" title="Zoom 100%">1:1</button>
+    <button class="qgisBtn" id="center" title="Centralizar">◎</button>
+  </div>
+  <div class="qgisInfo" id="featureInfo"><b>Identificação de parcela</b><br>Clique em um polígono para ver ID, TIRO, DISPARO e demais atributos.</div>
+</div>
+<script type="application/json" id="viewerData">__VIEWER_DATA__</script>
+<script>
+const data = JSON.parse(document.getElementById('viewerData').textContent);
+const wrap = document.getElementById('qgisViewer');
+const canvas = document.getElementById('mapCanvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('mapStatus');
+const infoEl = document.getElementById('featureInfo');
+const loadingEl = document.getElementById('viewerLoading');
+const loadingFill = document.getElementById('viewerLoadingFill');
+const loadingPct = document.getElementById('viewerLoadingPct');
+const loadingStep = document.getElementById('viewerLoadingStep');
+const img = new Image();
+let scale = 1, ox = 0, oy = 0, dpr = window.devicePixelRatio || 1;
+let drag = false, sx = 0, sy = 0, sox = 0, soy = 0, moved = false;
+let localSelected = { layerId: data.selectedLayerId || '', index: data.selectedFeatureIndex };
+const imgW = Math.max(1, data.imageWidth || 1400);
+const imgH = Math.max(1, data.imageHeight || 800);
+let viewerLoadingProgress = 18;
+let viewerLoadingTimer = window.setInterval(() => {
+  if(!loadingEl || loadingEl.classList.contains('is-hidden')) return;
+  viewerLoadingProgress = Math.min(94, viewerLoadingProgress + 4);
+  setViewerLoading(viewerLoadingProgress, 'Preparando camadas selecionadas...');
+}, 180);
+function setViewerLoading(pct, step){
+  viewerLoadingProgress = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+  if(loadingFill) loadingFill.style.width = viewerLoadingProgress + '%';
+  if(loadingPct) loadingPct.textContent = viewerLoadingProgress + '%';
+  if(loadingStep && step) loadingStep.textContent = step;
+}
+function hideViewerLoading(){
+  setViewerLoading(100, 'Finalizando...');
+  window.setTimeout(() => {
+    if(loadingEl) loadingEl.classList.add('is-hidden');
+    if(viewerLoadingTimer) window.clearInterval(viewerLoadingTimer);
+  }, 280);
+}
+function esc(v){ return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function hexToRgba(hex, alpha){
+  let h = String(hex || '#00d4ff').replace('#','');
+  if(h.length === 3) h = h.split('').map(x => x + x).join('');
+  const n = parseInt(h, 16);
+  return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${alpha})`;
+}
+function resize(){
+  const r = wrap.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.floor(r.width * dpr));
+  canvas.height = Math.max(1, Math.floor(r.height * dpr));
+  canvas.style.width = r.width + 'px';
+  canvas.style.height = r.height + 'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  draw();
+}
+function fitView(){
+  const r = wrap.getBoundingClientRect();
+  scale = Math.min((r.width - 42) / imgW, (r.height - 42) / imgH);
+  if(!Number.isFinite(scale) || scale <= 0) scale = 1;
+  ox = (r.width - imgW * scale) / 2;
+  oy = (r.height - imgH * scale) / 2;
+  draw();
+}
+function centerView(){ const r = wrap.getBoundingClientRect(); ox = (r.width - imgW * scale) / 2; oy = (r.height - imgH * scale) / 2; draw(); }
+function zoomAt(factor, cx, cy){
+  const ix = (cx - ox) / scale, iy = (cy - oy) / scale;
+  scale = Math.max(0.02, Math.min(80, scale * factor));
+  ox = cx - ix * scale; oy = cy - iy * scale; draw();
+}
+function screenPoint(pt){ return [ox + pt[0] * scale, oy + pt[1] * scale]; }
+function drawRing(ring, closePath=true){
+  if(!ring || !ring.length) return;
+  const p0 = screenPoint(ring[0]); ctx.moveTo(p0[0], p0[1]);
+  for(let i=1;i<ring.length;i++){ const p = screenPoint(ring[i]); ctx.lineTo(p[0], p[1]); }
+  if(closePath) ctx.closePath();
+}
+function drawFeature(layer, feature){
+  const selected = String(localSelected.layerId) === String(layer.id) && String(localSelected.index) === String(feature.index);
+  ctx.save();
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.globalAlpha = selected ? 1 : Math.max(.08, Math.min(1, Number(layer.opacity ?? .55)));
+  ctx.strokeStyle = selected ? '#ffd21f' : layer.color;
+  ctx.fillStyle = selected ? 'rgba(255,210,31,.36)' : hexToRgba(layer.color, layer.highlight ? .24 : .13);
+  ctx.shadowColor = selected ? 'rgba(255,210,31,.92)' : hexToRgba(layer.color, layer.highlight ? .72 : .44);
+  ctx.shadowBlur = selected ? 20 : (layer.highlight ? 16 : 7);
+  ctx.lineWidth = selected ? 4.2 : (layer.highlight ? 3.0 : 1.7);
+  (feature.polygons || []).forEach(poly => {
+    ctx.beginPath();
+    (poly || []).forEach(ring => drawRing(ring, true));
+    ctx.fill('evenodd'); ctx.stroke();
+  });
+  (feature.lines || []).forEach(line => { ctx.beginPath(); drawRing(line, false); ctx.stroke(); });
+  (feature.points || []).forEach(pt => { const p = screenPoint(pt); ctx.beginPath(); ctx.arc(p[0], p[1], selected ? 6 : 4, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); });
+  ctx.restore();
+}
+function zoomToBounds(bbox, padding=56){
+  if(!bbox || bbox.length < 4) return;
+  const r = wrap.getBoundingClientRect();
+  const bw = Math.max(1, bbox[2] - bbox[0]);
+  const bh = Math.max(1, bbox[3] - bbox[1]);
+  const sx = (r.width - padding * 2) / bw;
+  const sy = (r.height - padding * 2) / bh;
+  scale = Math.max(0.02, Math.min(80, Math.min(sx, sy)));
+  ox = (r.width - bw * scale) / 2 - bbox[0] * scale;
+  oy = (r.height - bh * scale) / 2 - bbox[1] * scale;
+  draw();
+}
+function findLayerById(layerId){
+  return (data.layers || []).find(layer => String(layer.id) === String(layerId));
+}
+function findFeature(layer, index){
+  if(!layer) return null;
+  return (layer.features || []).find(f => String(f.index) === String(index));
+}
+function syncToPythonGridmark(layer, feature){
+  try {
+    const payload = JSON.stringify({layerId: layer.id, index: feature.index, attrs: feature.attrs || {}, layerName: layer.name});
+    window.localStorage.setItem('tmg_gridmark_selection_payload', payload);
+    const parentDoc = window.parent && window.parent.document;
+    if(parentDoc) {
+      const inputs = Array.from(parentDoc.querySelectorAll('input'));
+      const target = inputs.find(el => el.getAttribute('aria-label') === 'gridmark_selection_payload');
+      if(target) {
+        const setter = Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype, 'value').set;
+        setter.call(target, payload);
+        target.dispatchEvent(new Event('input', {bubbles:true}));
+        target.dispatchEvent(new Event('change', {bubbles:true}));
+      }
+    }
+  } catch(e) { console.log('Sincronização da seleção indisponível', e); }
+}
+function draw(){
+  const r = wrap.getBoundingClientRect();
+  ctx.clearRect(0,0,r.width,r.height);
+  if(data.raster && img.complete && img.naturalWidth){
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, ox, oy, imgW * scale, imgH * scale);
+  } else {
+    ctx.fillStyle = '#071525'; ctx.fillRect(0,0,r.width,r.height);
+  }
+  (data.layers || []).forEach(layer => (layer.features || []).forEach(feature => drawFeature(layer, feature)));
+  statusEl.innerHTML = `${data.raster ? esc(data.raster.name) : 'Sem raster'} · Zoom ${Math.round(scale * 100)}% · ${data.layers.length} camada(s) vetorial(is)`;
+}
+function pointInRing(x,y,ring){
+  let inside = false;
+  for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+    const xi=ring[i][0], yi=ring[i][1], xj=ring[j][0], yj=ring[j][1];
+    const intersect = ((yi>y)!==(yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi+1e-12)+xi);
+    if(intersect) inside = !inside;
+  }
+  return inside;
+}
+function distToSegment(px,py,a,b){
+  const x=a[0], y=a[1], dx=b[0]-x, dy=b[1]-y;
+  if(dx===0 && dy===0) return Math.hypot(px-x, py-y);
+  let t=((px-x)*dx+(py-y)*dy)/(dx*dx+dy*dy); t=Math.max(0,Math.min(1,t));
+  return Math.hypot(px-(x+t*dx), py-(y+t*dy));
+}
+function containsFeature(feature,x,y){
+  for(const poly of (feature.polygons || [])){
+    if(!poly || !poly.length) continue;
+    if(pointInRing(x,y,poly[0])){
+      let inHole = false;
+      for(let i=1;i<poly.length;i++) if(pointInRing(x,y,poly[i])) inHole = true;
+      if(!inHole) return true;
+    }
+  }
+  for(const line of (feature.lines || [])) for(let i=1;i<line.length;i++) if(distToSegment(x,y,line[i-1],line[i]) < 8/scale) return true;
+  for(const pt of (feature.points || [])) if(Math.hypot(x-pt[0], y-pt[1]) < 8/scale) return true;
+  return false;
+}
+function showFeature(layer, feature, notify=true){
+  localSelected = {layerId: layer.id, index: feature.index};
+  const attrs = feature.attrs || {};
+  let rows = Object.keys(attrs).map(k => `<tr><td>${esc(k)}</td><td>${esc(attrs[k])}</td></tr>`).join('');
+  if(!rows) rows = '<tr><td>Atributos</td><td>Sem atributos tabulares</td></tr>';
+  infoEl.innerHTML = `<b>${esc(layer.name)}</b><br>Feição/Parcela: ${esc(feature.index)}<table>${rows}</table>`;
+  if(notify) syncToPythonGridmark(layer, feature);
+  draw();
+}
+function identify(clientX, clientY){
+  const x = (clientX - ox) / scale, y = (clientY - oy) / scale;
+  for(let li=(data.layers || []).length-1; li>=0; li--){
+    const layer = data.layers[li], feats = layer.features || [];
+    for(let fi=feats.length-1; fi>=0; fi--) if(containsFeature(feats[fi], x, y)){ showFeature(layer, feats[fi]); return; }
+  }
+  infoEl.innerHTML = '<b>Identificação de parcela</b><br>Nenhuma parcela encontrada neste ponto.';
+}
+wrap.addEventListener('mousedown', e => { drag = true; moved = false; sx = e.clientX; sy = e.clientY; sox = ox; soy = oy; });
+window.addEventListener('mousemove', e => {
+  if(!drag) return;
+  const dx = e.clientX - sx, dy = e.clientY - sy;
+  if(Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+  ox = sox + dx; oy = soy + dy; draw();
+});
+window.addEventListener('mouseup', e => {
+  if(!drag) return;
+  drag = false;
+  if(!moved){ const r = wrap.getBoundingClientRect(); identify(e.clientX - r.left, e.clientY - r.top); }
+});
+wrap.addEventListener('wheel', e => { e.preventDefault(); const r = wrap.getBoundingClientRect(); zoomAt(e.deltaY < 0 ? 1.18 : 1/1.18, e.clientX - r.left, e.clientY - r.top); }, {passive:false});
+document.getElementById('zoomIn').onclick = () => zoomAt(1.25, wrap.clientWidth/2, wrap.clientHeight/2);
+document.getElementById('zoomOut').onclick = () => zoomAt(1/1.25, wrap.clientWidth/2, wrap.clientHeight/2);
+document.getElementById('fit').onclick = fitView;
+document.getElementById('center').onclick = centerView;
+document.getElementById('oneToOne').onclick = () => { scale = 1; centerView(); };
+window.addEventListener('resize', resize);
+function applyInitialFocus(){
+  const zoomLayer = findLayerById(data.zoomLayerId);
+  if(zoomLayer && zoomLayer.bbox) zoomToBounds(zoomLayer.bbox, 72);
+  if(localSelected.layerId !== '' && localSelected.index !== null && localSelected.index !== undefined){
+    const layer = findLayerById(localSelected.layerId);
+    const found = findFeature(layer, localSelected.index);
+    if(found){
+      showFeature(layer, found, false);
+      if(data.zoomSelected && found.bbox) zoomToBounds(found.bbox, 96);
+    }
+  }
+}
+if(data.raster && data.raster.data_url){
+  img.onload = () => {
+    setViewerLoading(62, 'Carregando ortofoto...');
+    resize();
+    fitView();
+    setViewerLoading(84, 'Preparando camadas selecionadas...');
+    setTimeout(() => { applyInitialFocus(); hideViewerLoading(); }, 160);
+  };
+  img.onerror = () => {
+    resize();
+    fitView();
+    setViewerLoading(100, 'Erro ao carregar raster. Visualizador liberado.');
+    setTimeout(hideViewerLoading, 500);
+  };
+  img.src = data.raster.data_url;
+} else {
+  setViewerLoading(70, 'Preparando visualizador...');
+  resize();
+  fitView();
+  setTimeout(() => { applyInitialFocus(); hideViewerLoading(); }, 220);
+}
+</script>
+</body>
+</html>
+"""
+    loading_html = render_loading_visualizador_grid(18, "Carregando visualizador...", "Preparando camadas selecionadas...")
+    viewer_html = viewer_html.replace("__VIEWER_DATA__", data_json).replace("__GRIDMARK_LOADING__", loading_html)
+    components.html(viewer_html, height=780, scrolling=False)
+    st.session_state["gridmark_zoom_layer_id"] = ""
+    st.session_state["gridmark_zoom_selected"] = False
+
+def _gridmark_layer_label(layer: dict, idx: int) -> str:
+    return f"{layer.get('name', 'Camada')} - {layer.get('feature_count', 0)} feições"
+
+def alternar_visibilidade_camada(layer_id: str, visible: bool) -> None:
+    layer = _gridmark_find_layer(layer_id)
+    if layer is not None:
+        layer["visible"] = bool(visible)
+        atualizar_visualizador_sem_recarregar_tudo(layer_id)
+
+def abrir_opcoes_camada(layer_id: str) -> None:
+    layer = _gridmark_find_layer(layer_id)
+    if layer is not None:
+        layer["expanded"] = True
+
+def atualizar_visualizador_sem_recarregar_tudo(layer_id: str = "") -> None:
+    atualizar_apenas_camada_modificada(layer_id)
+
+def _gridmark_set_table_layer(layer_id: str) -> None:
+    st.session_state["gridmark_selected_layer_id"] = str(layer_id or "")
+    st.session_state["gridmark_show_table"] = True
+
+def render_item_camada_vetorial(layer: dict, idx: int, total_layers: int):
+    move_action = None
+    remove_this = False
+    expanded_default = bool(layer.get("expanded", False))
+    icon = "☑" if layer.get("visible", True) else "☐"
+    label = f"{icon} {_gridmark_layer_label(layer, idx)}"
+    with st.expander(label, expanded=expanded_default):
+        layer["expanded"] = True
+        st.caption(f"CRS: {layer.get('crs') or 'não informado'} · Caminho: {Path(str(layer.get('path', ''))).name}")
+        visible = st.checkbox(
+            "☑ Mostrar/Ocultar no mapa",
+            value=bool(layer.get("visible", True)),
+            key=f"gridmark_visible_{layer['id']}",
+        )
+        if visible != bool(layer.get("visible", True)):
+            alternar_visibilidade_camada(layer["id"], visible)
+        layer["color"] = st.color_picker(
+            "🎨 Alterar cor",
+            value=layer.get("color", GRIDMARK_VECTOR_COLORS[idx % len(GRIDMARK_VECTOR_COLORS)]),
+            key=f"gridmark_color_{layer['id']}",
+        )
+        transparency_options = [0, 25, 50, 75, 100]
+        current_transparency = int(layer.get("transparency", max(0, min(100, 100 - int(layer.get("opacity", 55))))))
+        current_transparency = min(transparency_options, key=lambda item: abs(item - current_transparency))
+        layer["transparency"] = st.select_slider(
+            "Transparência",
+            options=transparency_options,
+            value=current_transparency,
+            format_func=lambda value: f"{value}%",
+            key=f"gridmark_transparency_{layer['id']}",
+        )
+        layer["opacity"] = max(0, min(100, 100 - int(layer.get("transparency", 50))))
+        layer["highlight"] = st.checkbox(
+            "⭐ Destacar somente essa camada",
+            value=bool(layer.get("highlight", False)),
+            key=f"gridmark_highlight_{layer['id']}",
+        )
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            if st.button("Tabela", key=f"gridmark_table_{layer['id']}", use_container_width=True):
+                _gridmark_set_table_layer(layer["id"])
+        with c2:
+            if st.button("🔍", key=f"gridmark_zoom_layer_{layer['id']}", use_container_width=True):
+                st.session_state["gridmark_zoom_layer_id"] = layer["id"]
+                atualizar_visualizador_sem_recarregar_tudo(layer["id"])
+                app_rerun()
+        with c3:
+            if st.button("⬆", key=f"gridmark_up_{layer['id']}", disabled=idx == 0, use_container_width=True):
+                move_action = (idx, idx - 1)
+        with c4:
+            if st.button("⬇", key=f"gridmark_down_{layer['id']}", disabled=idx == total_layers - 1, use_container_width=True):
+                move_action = (idx, idx + 1)
+        with c5:
+            if st.button("🗑", key=f"gridmark_remove_{layer['id']}", use_container_width=True):
+                remove_this = True
+    return move_action, remove_this
+
+def render_painel_camadas_expansivel() -> None:
+    st.markdown("<div class='qgis-panel-title'>CAMADAS</div>", unsafe_allow_html=True)
+    raster = st.session_state.get("gridmark_raster")
+    if raster:
+        st.session_state["gridmark_raster_visible"] = st.checkbox(
+            f"Raster: {raster.get('name', 'Ortofoto')}",
+            value=bool(st.session_state.get("gridmark_raster_visible", True)),
+            key="gridmark_raster_visibility",
+        )
+        st.caption(f"{raster.get('width')}×{raster.get('height')} px preview · CRS: {'sim' if raster.get('crs_wkt') else 'não detectado'}")
+        if st.button("Remover raster", key="gridmark_remove_raster", use_container_width=True):
+            st.session_state["gridmark_raster"] = None
+            st.session_state["gridmark_raster_visible"] = True
+            app_rerun()
+    else:
+        st.info("Nenhuma camada raster carregada.")
+    layers = st.session_state.get("gridmark_layers", [])
+    if not layers:
+        st.info("Nenhuma camada vetorial carregada.")
+        return
+    if st.button("Mostrar todas as camadas juntas", key="gridmark_show_all_layers_btn", use_container_width=True):
+        for layer in layers:
+            layer["visible"] = True
+        st.session_state["gridmark_show_all_layers"] = True
+        atualizar_visualizador_sem_recarregar_tudo()
+    table_options = [layer["id"] for layer in layers]
+    current_layer_id = st.session_state.get("gridmark_selected_layer_id") if st.session_state.get("gridmark_selected_layer_id") in table_options else table_options[0]
+    chosen_table_layer = st.selectbox(
+        "Camada para tabela de atributos",
+        table_options,
+        index=table_options.index(current_layer_id),
+        format_func=lambda layer_id: next((item.get("name", layer_id) for item in layers if item.get("id") == layer_id), layer_id),
+        key="gridmark_layers_panel_table_layer",
+    )
+    if chosen_table_layer != st.session_state.get("gridmark_selected_layer_id"):
+        st.session_state["gridmark_selected_layer_id"] = chosen_table_layer
+    remove_idx = None
+    move_action = None
+    for idx, layer in enumerate(layers):
+        action, remove_this = render_item_camada_vetorial(layer, idx, len(layers))
+        if action:
+            move_action = action
+        if remove_this:
+            remove_idx = idx
+    if move_action:
+        src, dst = move_action
+        layers[src], layers[dst] = layers[dst], layers[src]
+        app_rerun()
+    if remove_idx is not None:
+        removed = layers.pop(remove_idx)
+        if st.session_state.get("gridmark_selected_layer_id") == removed.get("id"):
+            st.session_state["gridmark_selected_layer_id"] = ""
+            st.session_state["gridmark_selected_feature_index"] = None
+            st.session_state["gridmark_selected_feature_attrs"] = {}
+            st.session_state["gridmark_selection_payload"] = ""
+            st.session_state["gridmark_last_selection_payload"] = ""
+        app_rerun()
+
+def _gridmark_render_layers_panel() -> None:
+    render_painel_camadas_expansivel()
+
+def _gridmark_find_layer(layer_id: str):
+    return next((item for item in st.session_state.get("gridmark_layers", []) if str(item.get("id")) == str(layer_id)), None)
+
+def _gridmark_find_feature_index(layer: dict, value):
+    attrs_df = (layer or {}).get("attrs_df")
+    if attrs_df is None:
+        return value
+    for idx in attrs_df.index:
+        if str(idx) == str(value):
+            return idx
+    return value
+
+def selecionar_parcela_por_id(layer_id: str, feature_index, attrs: dict | None = None, zoom: bool = True) -> None:
+    layer = _gridmark_find_layer(layer_id)
+    resolved_index = _gridmark_find_feature_index(layer, feature_index)
+    st.session_state["gridmark_selected_layer_id"] = str(layer_id or "")
+    st.session_state["gridmark_selected_feature_index"] = int(resolved_index) if isinstance(resolved_index, (int, np.integer)) else str(resolved_index)
+    if attrs is None and layer is not None:
+        attrs_df = layer.get("attrs_df")
+        if attrs_df is not None and resolved_index in attrs_df.index:
+            attrs = {str(k): _gridmark_safe_json(v) for k, v in attrs_df.loc[resolved_index].to_dict().items()}
+    st.session_state["gridmark_selected_feature_attrs"] = attrs or {}
+    st.session_state["gridmark_zoom_selected"] = bool(zoom)
+
+def destacar_parcela_amarela(layer_id: str, feature_index) -> None:
+    selecionar_parcela_por_id(layer_id, feature_index, zoom=True)
+
+def sincronizar_tabela_mapa() -> None:
+    payload = st.session_state.get("gridmark_selection_payload") or ""
+    if not payload or payload == st.session_state.get("gridmark_last_selection_payload"):
+        return
+    st.session_state["gridmark_last_selection_payload"] = payload
+    try:
+        data = json.loads(payload)
+        layer_id = data.get("layerId", "")
+        feature_index = data.get("index", None)
+        if layer_id and feature_index is not None:
+            selecionar_parcela_por_id(layer_id, feature_index, data.get("attrs", {}), zoom=False)
+    except Exception:
+        pass
+
+def render_tabela_neon_grid(df: pd.DataFrame, key: str, height: int = 340):
+    try:
+        return st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            height=height,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=key,
+        )
+    except TypeError:
+        st.dataframe(df, use_container_width=True, hide_index=True, height=height)
+        return None
+
+def render_dados_parcela_neon(attrs: dict, titulo: str = "Dados da parcela selecionada") -> None:
+    rows = []
+    for key, value in (attrs or {}).items():
+        rows.append(
+            f"<div class='gridmark-parcela-row'><span>{html.escape(str(key))}</span><strong>{html.escape(str(_gridmark_safe_json(value)))}</strong></div>"
+        )
+    if not rows:
+        rows.append("<div class='gridmark-parcela-empty'>Sem atributos para exibir.</div>")
+    st.markdown(
+        f"""
+        <div class='gridmark-parcela-card'>
+            <div class='gridmark-parcela-title'>{html.escape(str(titulo))}</div>
+            {''.join(rows)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def render_dropdown_neon() -> None:
+    st.markdown("", unsafe_allow_html=True)
+
+def render_tabela_atributos_neon() -> None:
+    layers = st.session_state.get("gridmark_layers", [])
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        if st.button("Abrir Tabela de Atributos", key="gridmark_open_table", use_container_width=True):
+            st.session_state["gridmark_show_table"] = True
+    with c2:
+        if st.session_state.get("gridmark_show_table") and st.button("Fechar Tabela de Atributos", key="gridmark_close_table"):
+            st.session_state["gridmark_show_table"] = False
+    if not st.session_state.get("gridmark_show_table"):
+        return
+    if not layers:
+        st.info("Carregue uma camada vetorial para abrir a tabela de atributos.")
+        return
+    options = [layer["id"] for layer in layers]
+    current_layer_id = st.session_state.get("gridmark_selected_layer_id") or options[0]
+    if current_layer_id not in options:
+        current_layer_id = options[0]
+    selected_layer_id = st.selectbox(
+        "Camada da tabela",
+        options,
+        index=options.index(current_layer_id),
+        format_func=lambda lid: next((l.get("name", lid) for l in layers if l.get("id") == lid), lid),
+        key="gridmark_table_layer_select",
+    )
+    layer = next((item for item in layers if item.get("id") == selected_layer_id), None)
+    if not layer:
+        return
+    attrs_df = layer.get("attrs_df")
+    if attrs_df is None or attrs_df.empty:
+        st.info("Esta camada não possui atributos tabulares.")
+        return
+    attrs_display = attrs_df.copy()
+    attrs_display.insert(0, "__indice_mapa__", [str(idx) for idx in attrs_display.index])
+    st.markdown("<div class='gridmark-attrs-title'>Tabela de Atributos</div>", unsafe_allow_html=True)
+    selected_from_table = None
+    selection_event = render_tabela_neon_grid(attrs_display, key=f"gridmark_attr_df_{selected_layer_id}", height=340)
+    try:
+        selected_rows = getattr(getattr(selection_event, "selection", {}), "rows", None)
+        if selected_rows is None and isinstance(getattr(selection_event, "selection", None), dict):
+            selected_rows = selection_event.selection.get("rows", [])
+        if selected_rows:
+            selected_from_table = attrs_display.iloc[int(selected_rows[0])]["__indice_mapa__"]
+    except Exception:
+        pass
+    indices = list(attrs_df.index)
+    if indices:
+        def _fmt(idx):
+            row = attrs_df.loc[idx]
+            preferred = ""
+            for col in ("ID", "Id", "id", "PARCELA", "Parcela", "parcela", "TIRO", "DISPARO", "QUADRA"):
+                if col in attrs_df.columns and str(row.get(col, "")).strip():
+                    preferred = f" · {col}: {row.get(col)}"
+                    break
+            return f"Feição {idx}{preferred}"
+        if selected_from_table is not None:
+            if (
+                str(st.session_state.get("gridmark_selected_layer_id", "")) != str(selected_layer_id)
+                or str(st.session_state.get("gridmark_selected_feature_index", "")) != str(selected_from_table)
+            ):
+                destacar_parcela_amarela(selected_layer_id, selected_from_table)
+                app_rerun()
+        current_selected_idx = None
+        if str(st.session_state.get("gridmark_selected_layer_id", "")) == str(selected_layer_id):
+            current_selected_idx = _gridmark_find_feature_index(layer, st.session_state.get("gridmark_selected_feature_index"))
+        default_pos = indices.index(current_selected_idx) if current_selected_idx in indices else 0
+        selected_idx = st.selectbox(
+            "Clique/Selecione o ID da parcela para destacar em amarelo no mapa",
+            indices,
+            index=default_pos,
+            format_func=_fmt,
+            key=f"gridmark_feature_select_{selected_layer_id}",
+        )
+        if st.button("Destacar ID selecionado no mapa", key=f"gridmark_highlight_selected_{selected_layer_id}", use_container_width=True):
+            destacar_parcela_amarela(selected_layer_id, selected_idx)
+            app_rerun()
+        display_idx = current_selected_idx if current_selected_idx in attrs_df.index else selected_idx
+        selected_attrs = attrs_df.loc[display_idx].to_dict()
+        render_dados_parcela_neon({str(k): _gridmark_safe_json(v) for k, v in selected_attrs.items()})
+
+def _gridmark_render_attribute_table() -> None:
+    render_tabela_atributos_neon()
+
+def render_lista_camadas() -> None:
+    _gridmark_render_layers_panel()
+
+def render_visualizador_qgis_like(raster: dict, layers: list) -> None:
+    _gridmark_render_viewer(raster, layers)
+
+def render_grid_simultaneo(raster: dict, layers: list) -> None:
+    render_visualizador_qgis_like(raster, layers)
+
+def atualizar_visualizacao() -> None:
+    st.session_state["gridmark_refresh_token"] = datetime.now().isoformat(timespec="microseconds")
+
+def render_multicamadas() -> None:
+    render_lista_camadas()
+
+def _gridmark_render_css() -> None:
+    st.markdown("""
+    <style>
+    .qgis-like-card {
+        border:1px solid rgba(0,212,255,.28);
+        background:linear-gradient(145deg, rgba(5,19,40,.92), rgba(8,37,68,.78));
+        box-shadow:0 14px 32px rgba(0,0,0,.36), 0 0 24px rgba(0,212,255,.14), inset 0 1px 0 rgba(255,255,255,.08);
+        border-radius:12px;
+        padding:14px;
+        margin-bottom:14px;
+    }
+    .qgis-panel-title {
+        color:#ffffff;
+        font-weight:900;
+        letter-spacing:1px;
+        text-transform:uppercase;
+        text-shadow:0 2px 0 rgba(0,0,0,.85), 0 0 16px rgba(0,212,255,.45);
+        margin:4px 0 10px 0;
+    }
+    .qgis-help-text {
+        color:#c9f8ff;
+        font-size:.88rem;
+        line-height:1.45;
+        text-shadow:0 1px 0 rgba(0,0,0,.8);
+    }
+    div[data-testid="stTextInput"]:has(input[aria-label="gridmark_selection_payload"]) {
+        display:none !important;
+    }
+    .gridmark-attrs-title {
+        margin:12px 0 8px 0;
+        color:#ffffff;
+        font-weight:900;
+        letter-spacing:1.2px;
+        text-transform:uppercase;
+        text-shadow:0 2px 0 rgba(0,0,0,.86), 0 0 18px rgba(0,212,255,.50);
+    }
+    div[data-testid="stDataFrame"] {
+        border:1px solid rgba(0,212,255,.30) !important;
+        border-radius:14px !important;
+        overflow:hidden !important;
+        background:
+            linear-gradient(145deg, rgba(5,19,40,.94), rgba(8,37,68,.82)),
+            radial-gradient(circle at top left, rgba(0,212,255,.16), transparent 34%) !important;
+        box-shadow:
+            0 14px 32px rgba(0,0,0,.36),
+            0 0 24px rgba(0,212,255,.16),
+            inset 0 1px 0 rgba(255,255,255,.10) !important;
+    }
+    div[data-testid="stDataFrame"] * {
+        color:#ffffff !important;
+    }
+    div[data-testid="stDataFrame"] [role="columnheader"] {
+        background:linear-gradient(145deg, rgba(2,14,36,.98), rgba(0,112,166,.58)) !important;
+        color:#ffffff !important;
+        font-weight:900 !important;
+        text-shadow:0 1px 0 rgba(0,0,0,.84), 0 0 12px rgba(0,212,255,.44) !important;
+    }
+    div[data-testid="stDataFrame"] [role="row"]:hover {
+        filter:brightness(1.18);
+        box-shadow:inset 0 0 0 999px rgba(0,212,255,.08);
+    }
+    div[data-testid="stDataFrame"] [aria-selected="true"],
+    div[data-testid="stDataFrame"] [data-selected="true"] {
+        background:linear-gradient(90deg, rgba(0,212,255,.30), rgba(95,242,177,.18)) !important;
+        box-shadow:inset 0 0 0 1px rgba(0,212,255,.58), 0 0 16px rgba(0,212,255,.22) !important;
+    }
+    div[data-testid="stDataFrame"] ::-webkit-scrollbar {
+        width:10px;
+        height:10px;
+    }
+    div[data-testid="stDataFrame"] ::-webkit-scrollbar-track {
+        background:#071525;
+        border-radius:999px;
+    }
+    div[data-testid="stDataFrame"] ::-webkit-scrollbar-thumb {
+        background:linear-gradient(180deg,#00d4ff,#42a5f5);
+        border-radius:999px;
+        border:2px solid #071525;
+    }
+    div[data-testid="stSelectbox"],
+    div[data-testid="stTextInput"],
+    div[data-testid="stCheckbox"],
+    div[data-testid="stColorPicker"],
+    div[data-testid="stSlider"],
+    div[data-testid="stFileUploader"] {
+        color:#ffffff !important;
+    }
+    div[data-testid="stSelectbox"] > div,
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stFileUploader"] section,
+    div[data-testid="stSlider"] {
+        border-radius:12px !important;
+        border:1px solid rgba(0,212,255,.30) !important;
+        background:linear-gradient(145deg, rgba(3,18,38,.92), rgba(8,45,82,.74)) !important;
+        box-shadow:0 8px 22px rgba(0,0,0,.30), 0 0 18px rgba(0,212,255,.12), inset 0 1px 0 rgba(255,255,255,.10) !important;
+        color:#ffffff !important;
+        transition:all .30s ease !important;
+    }
+    div[data-testid="stSelectbox"] > div:hover,
+    div[data-testid="stTextInput"] input:hover,
+    div[data-testid="stFileUploader"] section:hover {
+        border-color:rgba(0,212,255,.56) !important;
+        box-shadow:0 10px 26px rgba(0,0,0,.34), 0 0 24px rgba(0,212,255,.24), inset 0 1px 0 rgba(255,255,255,.16) !important;
+    }
+    .gridmark-parcela-card {
+        margin-top:12px;
+        padding:16px;
+        border-radius:16px;
+        border:1px solid rgba(0,212,255,.34);
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.10), transparent 30%),
+            radial-gradient(circle at top left, rgba(0,212,255,.18), transparent 40%),
+            linear-gradient(145deg, rgba(2,14,36,.96), rgba(12,57,98,.78));
+        box-shadow:0 14px 32px rgba(0,0,0,.38), 0 0 24px rgba(0,212,255,.18), inset 0 1px 0 rgba(255,255,255,.12);
+        color:#ffffff;
+    }
+    .gridmark-parcela-title {
+        color:#ffffff;
+        font-weight:900;
+        text-transform:uppercase;
+        letter-spacing:1px;
+        margin-bottom:10px;
+        text-shadow:0 2px 0 rgba(0,0,0,.86), 0 0 16px rgba(0,212,255,.45);
+    }
+    .gridmark-parcela-row {
+        display:grid;
+        grid-template-columns:minmax(120px,.38fr) 1fr;
+        gap:10px;
+        padding:8px 0;
+        border-bottom:1px solid rgba(255,255,255,.08);
+        color:#ffffff;
+    }
+    .gridmark-parcela-row span {
+        color:#8feaff;
+        font-weight:800;
+        text-shadow:0 0 10px rgba(0,212,255,.28);
+    }
+    .gridmark-parcela-row strong {
+        color:#ffffff;
+        font-weight:900;
+        text-shadow:0 1px 0 rgba(0,0,0,.72);
+        word-break:break-word;
+    }
+    .gridmark-parcela-empty {
+        color:#d9fbff;
+        font-weight:700;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+def aplicar_tema_grid_analise() -> None:
+    _gridmark_render_css()
+
+def render_analise_marcacao_grid() -> None:
+    manter_estado_visualizador_grid()
+    aplicar_tema_grid_analise()
+    render_dropdown_neon()
+    st.text_input("gridmark_selection_payload", key="gridmark_selection_payload", label_visibility="hidden")
+    sincronizar_tabela_mapa()
+    st.subheader("🗺️ Análise de Marcação de Grid")
+    st.markdown(
+        "<div class='qgis-like-card qgis-help-text'>Visualizador isolado estilo QGIS para carregar ortofoto raster, sobrepor shapefiles/GeoJSON, ligar e desligar camadas, identificar parcelas e abrir tabela de atributos.</div>",
+        unsafe_allow_html=True,
+    )
+    left_col, map_col = st.columns([0.28, 0.72], gap="large")
+    with left_col:
+        st.markdown("<div class='qgis-panel-title'>Adicionar camadas</div>", unsafe_allow_html=True)
+        raster_file = st.file_uploader(
+            "Adicionar Camada Raster",
+            type=["tif", "tiff", "png", "jpg", "jpeg"],
+            key="gridmark_raster_uploader",
+            help="GeoTIFF, TIFF, PNG ou JPG.",
+        )
+        if st.button("Adicionar Camada Raster", key="gridmark_add_raster", use_container_width=True):
+            loading_slot = st.empty()
+            render_loading_camadas(12, "Carregando camada...", raster_file.name if raster_file else "", "Lendo arquivo...", loading_slot)
+            render_loading_camadas(38, "Raster:", raster_file.name if raster_file else "", "Processando ortofoto...", loading_slot)
+            raster, err = _gridmark_read_raster(raster_file)
+            if err:
+                loading_slot.empty()
+                st.error(err)
+            else:
+                render_loading_camadas(82, "Raster:", raster.get("name", ""), "Gerando visualização...", loading_slot)
+                st.session_state["gridmark_raster"] = raster
+                st.session_state["gridmark_raster_visible"] = True
+                render_loading_camadas(100, "Preparando visualização:", raster.get("name", ""), "Finalizando...", loading_slot)
+                st.success(f"Raster carregado: {raster.get('name')}")
+        vector_files = st.file_uploader(
+            "Adicionar Camada Vetorial",
+            type=["zip", "shp", "shx", "dbf", "prj", "cpg", "geojson", "json"],
+            accept_multiple_files=True,
+            key="gridmark_vector_uploader",
+            help="Envie um .zip completo do shapefile ou selecione .shp, .shx, .dbf e .prj juntos.",
+        )
+        vector_name = st.text_input("Nome da camada vetorial", value="", key="gridmark_vector_name")
+        if st.button("Adicionar Camada Vetorial", key="gridmark_add_vector", use_container_width=True):
+            loading_slot = st.empty()
+            render_loading_camadas(8, "Camada Vetorial:", "múltiplos grids" if vector_files and len(vector_files) > 1 else "", "Lendo arquivo...", loading_slot)
+            layers_loaded, errors = _gridmark_read_vectors(vector_files, vector_name, loading_slot)
+            if errors:
+                for err in errors:
+                    if "já importada" in str(err):
+                        st.info(err)
+                    else:
+                        st.error(err)
+            if layers_loaded:
+                st.session_state["gridmark_layers"].extend(layers_loaded)
+                st.success(f"{len(layers_loaded)} camada(s) vetorial(is) carregada(s).")
+            else:
+                loading_slot.empty()
+        st.markdown("---")
+        render_lista_camadas()
+        if st.button("Limpar somente esta análise", key="gridmark_clear_all", use_container_width=True):
+            _gridmark_limpar_analise()
+            app_rerun()
+    with map_col:
+        raster = st.session_state.get("gridmark_raster")
+        layers = st.session_state.get("gridmark_layers", [])
+        if not raster:
+            st.info("Adicione uma camada raster para iniciar o visualizador.")
+        render_grid_simultaneo(raster, layers)
+        st.markdown("---")
+        _gridmark_render_attribute_table()
 
 
 # ==========================================
@@ -7397,11 +11737,14 @@ with st.sidebar:
                 ir_para('Parceiros')
     else:
         if show_culture_modules:
-            if _auth_menu_allowed("menu_checklist", current_user) and st.button("📋 Checklist Notas", key="btn_check"):
+            if _auth_menu_allowed("menu_checklist", current_user) and st.button("📋 Notas Rápidas", key="btn_check"):
                 ir_para('Checklist')
 
             if _auth_menu_allowed("menu_grid", current_user) and st.button("📊 Marcador de Grid", key="btn_grid"):
                 ir_para('Grid')
+
+            if st.button("🗺️ Análise de Marcação de Grid", key="btn_analise_marcacao_grid"):
+                ir_para('AnaliseMarcacaoGrid')
 
             if _auth_menu_allowed("menu_upload", current_user) and st.button("📤 Upload de Imagens", key="btn_upload"):
                 ir_para('Upload')
@@ -7504,7 +11847,7 @@ with main_container:
         chk_bytes, chk_name = _uploaded_ortho_bytes(chk_file)
 
         if chk_bytes:
-            with st.spinner("Carregando ortofoto..."):
+            with st.container():
                 # Atualizado Unpack para o spatial_meta
                 chk_b64, chk_dims, chk_err, chk_spatial = processar_ortofoto(chk_bytes, chk_name)
 
@@ -8514,7 +12857,7 @@ btnExport.onclick = async () => {{
     Author:'TMG Sistema de Análise',
     CreatedDate:new Date()
   }};
-  XLSX.utils.book_append_sheet(wb, ws, 'Checklist Notas');
+  XLSX.utils.book_append_sheet(wb, ws, 'Notas Rápidas');
   XLSX.writeFile(wb, safeName+'.xlsx', {{bookType:'xlsx',cellStyles:true}});
 }};
 
@@ -8701,7 +13044,7 @@ updateGridSelect();
                 app_rerun()
 
         if orto_file or grid_prefill_available:
-            with st.spinner("Carregando ortofoto de alta resolução... (Isso pode levar alguns segundos)"):
+            with st.container():
                 if orto_file:
                     file_bytes, orto_nome_exibicao = _uploaded_ortho_bytes(orto_file)
                 else:
@@ -9501,6 +13844,12 @@ window.addEventListener('resize', resize);
             """, unsafe_allow_html=True)
 
     # ==========================================
+    # ANALISE DE MARCACAO DE GRID
+    # ==========================================
+    elif st.session_state.pagina_ativa == 'AnaliseMarcacaoGrid':
+        render_analise_marcacao_grid()
+
+    # ==========================================
     # UPLOAD COM SISTEMA DE TRANSFERÊNCIA INTELIGENTE[cite: 1]
     # ==========================================
     elif st.session_state.pagina_ativa == 'Upload':
@@ -9515,6 +13864,7 @@ window.addEventListener('resize', resize);
         )
 
         if uploaded_files:
+            render_tmg_loading_bar(100, f"{len(uploaded_files)} imagem(ns) recebida(s) para processamento.")
             st.success(f"{len(uploaded_files)} arquivos prontos para processamento.")
 
             # Funcionalidade Original que existia[cite: 1]
@@ -9544,21 +13894,29 @@ window.addEventListener('resize', resize);
             st.markdown("<br>", unsafe_allow_html=True)
 
             if st.button(f"Transferir para {destino_escolhido}", type="primary"):
+                load_box = st.empty()
+                update_tmg_loading(load_box, 10, f"Preparando transferência de {len(uploaded_files)} arquivo(s)...")
                 with st.spinner(f"Estabelecendo conexão e transferindo {len(uploaded_files)} arquivos para {destino_escolhido}..."):
                     import time
                     time.sleep(2.5) # Simulação mock do envio / status API
+                update_tmg_loading(load_box, 55, "Transferência em andamento...")
                 
                 if "Pasta local" in destino_escolhido:
                     destino_local = _resolve_system_path(caminho_envio)
                     destino_local.mkdir(parents=True, exist_ok=True)
+                    total_files = max(1, len(uploaded_files))
+                    done_files = 0
                     for arquivo in uploaded_files:
                         try:
                             arquivo.seek(0)
                         except Exception:
                             pass
                         (destino_local / Path(arquivo.name).name).write_bytes(arquivo.read())
+                        done_files += 1
+                        update_tmg_loading(load_box, 55 + int((done_files / total_files) * 35), f"Salvando arquivo: {Path(arquivo.name).name}")
                     caminho_envio = str(destino_local)
 
+                update_tmg_loading(load_box, 100, "Carregamento concluído com sucesso.")
                 st.success(f"✅ Transferência concluída com sucesso!")
                 st.markdown(f"**Status:** {len(uploaded_files)} imagens salvas na pasta configurada: `{caminho_envio}`")
                 st.balloons()
@@ -9575,7 +13933,8 @@ window.addEventListener('resize', resize);
 
             _temas_disponiveis = {
                 "padrao": "🔵 Padrão do Sistema  —  Dark com cor do tema",
-                "tmg_azul": "🔵 TMG Azul  —  Azul escuro · Cinza · Branco"
+                "tmg_azul": "🔵 TMG Azul  —  Azul escuro · Cinza · Branco",
+                "tmg_premium_neon_3d": "💎 TMG Premium Neon 3D  —  Azul/ciano neon · títulos e ícones 3D"
             }
             _tema_atual = SYSTEM_CONFIG.get("tema", "padrao")
             _tema_nomes = list(_temas_disponiveis.keys())
@@ -9614,9 +13973,13 @@ window.addEventListener('resize', resize);
             )
 
             if nova_logo:
+                load_box = st.empty()
+                update_tmg_loading(load_box, 45, f"Carregando logo: {Path(nova_logo.name).name}")
                 img = Image.open(nova_logo)
+                update_tmg_loading(load_box, 82, "Salvando logo do sistema...")
                 img.save(str(LOGO_PATH), format="PNG")
                 st.session_state.logo_sistema = img
+                update_tmg_loading(load_box, 100, "Carregamento concluído com sucesso.")
 
                 st.success(f"✅ Logo atualizada e salva em: `{LOGO_PATH}`")
                 app_rerun()
@@ -9663,11 +14026,11 @@ window.addEventListener('resize', resize);
         sugestoes = {
             "Pasta atual": str(atual),
             "Padrão do sistema": str(_resolve_system_path("tmg_data")),
-            "Documentos": str(Path.home() / "Documents" / "TMG_Banco_Dados"),
-            "Área de trabalho": str(Path.home() / "Desktop" / "TMG_Banco_Dados")
+            "Dados do pacote": str(APP_ROOT / "tmg_data"),
+            "Exports do pacote": str(APP_ROOT / "tmg_data" / "exports")
         }
         if os.name == "nt":
-            sugestoes["Disco C"] = "C:/TMG/Banco_Dados_Sistema"
+            sugestoes["Backup interno"] = str(APP_ROOT / "tmg_data" / "backups")
 
         s1, s2 = st.columns([1, 2])
         with s1:
@@ -9735,7 +14098,7 @@ window.addEventListener('resize', resize);
 
         phenotyping_buttons = [
             ("phenotyping_contagem", "🔢 Contagem", "Contagem", "btn_viz_contagem"),
-            ("phenotyping_maturacao", "🍇 Maturação", "Maturação", "btn_viz_maturacao"),
+            ("phenotyping_maturacao", "🌱 Maturação", "Maturação", "btn_viz_maturacao"),
             ("phenotyping_pendoamento", "🌾 Pendoamento", "Pendoamento", "btn_viz_pendoamento"),
             ("phenotyping_qualidade", "✅ Qualidade de Parcelas", "Qualidade", "btn_viz_qualidade"),
         ]
@@ -9775,7 +14138,7 @@ window.addEventListener('resize', resize);
             cnt_bytes, cnt_name = _uploaded_ortho_bytes(cnt_file)
 
             if cnt_bytes:
-                with st.spinner("Carregando ortofoto..."):
+                with st.container():
                     cnt_b64, cnt_dims, cnt_err, cnt_spatial = processar_ortofoto(cnt_bytes, cnt_name)
 
                 if cnt_err:
@@ -10860,7 +15223,7 @@ new ResizeObserver(() => drawAll()).observe(vc);
         elif st.session_state.visualizador_sub == "Maturação":
             st.markdown("""
             <div style='background:#1e1e1e;border:1px solid #333;border-radius:15px;padding:30px;text-align:center;'>
-                <div style='font-size:3rem;margin-bottom:12px;'>🍇</div>
+                <div style='font-size:3rem;margin-bottom:12px;'>🌱</div>
                 <div style='color:#ff8c00;font-weight:700;font-size:1.2rem;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;'>
                     Maturação
                 </div>
@@ -10876,7 +15239,7 @@ new ResizeObserver(() => drawAll()).observe(vc);
             pend_bytes, pend_name = _uploaded_ortho_bytes(pend_file)
 
             if pend_bytes:
-                with st.spinner("Carregando ortofoto para pendoamento..."):
+                with st.container():
                     pend_b64, pend_dims, pend_err, pend_spatial = processar_ortofoto(pend_bytes, pend_name)
 
                 if pend_err:
@@ -11007,7 +15370,7 @@ new ResizeObserver(() => drawAll()).observe(vc);
     <button class="cnt-btn blue" id="btnSelect2">Selecionar Parcelas</button>
     <div class="qual-sep"></div>
     <div class="section">Análise</div>
-    <button class="cnt-btn orange" id="btnAnalyze18000">🌾 Análise de Pendoamento</button>
+    <button class="cnt-btn orange" id="btnAnalyze18000">📐 Análise de Pendoamento</button>
     <button class="cnt-btn green" id="btnAnalyzeSelected">🌾 Análise Selecionadas</button>
     <button class="cnt-btn" id="btnExportCSV">💾 Exportar CSV</button>
     <button class="cnt-btn danger" id="btnClearResults">Limpar Resultados</button>
@@ -11062,9 +15425,9 @@ let draggingPoint=-1, drag=false, lx=0, ly=0;
 let sc=1, ox=0, oy=0, imgW=0, imgH=0;
 const MIN_SC=0.05, MAX_SC=40;
 const PEND_STEP=1;
-const PEND_MIN_AREA=12;
+const PEND_MIN_AREA=8; // AJUSTE PENDOAMENTO: aceita pendões menores dentro da parcela do grid
 const PEND_CRITICO=20;
-const PEND_SCORE_THRESHOLD=4.15;
+const PEND_SCORE_THRESHOLD=3.82; // AJUSTE PENDOAMENTO: sensibilidade maior para contar pendões reais dentro do grid
 const PEND_PERCENT_LIMIT=50;
 const TRAIN_KEY='tmg_pendao_ia_' + IMAGE_NAME;
 let trainingSamples={pos:[],neg:[]};
@@ -11434,15 +15797,15 @@ function analyzeCell(r,c) {
       const validShape =
         areaPx>=minAreaPx &&
         areaPx<=maxAreaPx &&
-        density>=0.11 &&
-        elongation<=8.5 &&
-        widthPx<=Math.max(18, w*0.18) &&
-        heightPx<=Math.max(18, h*0.18) &&
-        meanScore>=PEND_SCORE_THRESHOLD+0.05 &&
-        meanYellow>=9 &&
-        meanExg<58 &&
-        meanChroma>=14 &&
-        coreRatio>=0.12 &&
+        density>=0.08 &&
+        elongation<=10.0 &&
+        widthPx<=Math.max(22, w*0.22) &&
+        heightPx<=Math.max(22, h*0.24) &&
+        meanScore>=PEND_SCORE_THRESHOLD-0.03 &&
+        meanYellow>=7 &&
+        meanExg<66 &&
+        meanChroma>=10 &&
+        coreRatio>=0.08 &&
         pointInPolygon(cx,cy,poly);
 
       if(validShape) {
@@ -11840,46 +16203,84 @@ new ResizeObserver(()=>drawAll()).observe(vc);
             meta_dtp = ""
             st.caption("Depois de anexar, use o resumo lateral do visualizador para clicar e trocar entre as ortofotos carregadas. O teto de pendões trava a primeira data em que a parcela atingiu o valor configurado.")
 
-            with st.expander("🌾 Treino YOLO de pendoamento", expanded=False):
+            st.markdown(
+                """
+                <style>
+                div[data-testid="stTextInput"]:has(input[aria-label="pend_yolo_payload"]) {
+                    display: none !important;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.text_input("pend_yolo_payload", key="pend_yolo_payload", label_visibility="hidden")
+
+            with st.expander("🌾 Amostras manuais YOLO de pendoamento", expanded=False):
+                capture_ok, capture_endpoint = iniciar_servidor_captura_yolo_pendoamento()
                 yolo_counts = contar_amostras_treinamento_yolo()
                 st.caption(
-                    f"A estrutura do YOLO é criada automaticamente em {YOLO_TRAIN_ROOT}. "
-                    "Depois de anexar as ortofotos, abra o treino por clique para selecionar os pendões e salvar as amostras."
+                    f"As mini imagens clicadas no visualizador são salvas automaticamente em {YOLO_TRAIN_ROOT} "
+                    "e entram como histórico permanente para o botão Aplicar Treino."
                 )
+                st.code(str(YOLO_TRAIN_ROOT), language="text")
+                if capture_ok:
+                    st.success("Salvamento automático por clique ativo.")
+                else:
+                    st.warning(capture_endpoint)
+                pasta_digitada = st.text_input(
+                    "Pasta para salvar mini fotos e dados YOLO",
+                    value=str(YOLO_TRAIN_ROOT),
+                    key="pend_yolo_training_dir_input",
+                    help="Use esta pasta para guardar images, labels, crops, JSON de características e histórico.",
+                )
+                pc1, pc2, pc3 = st.columns(3)
+                with pc1:
+                    if st.button("Selecionar pasta de treino", key="pend_yolo_select_folder", use_container_width=True):
+                        selected_folder = selecionar_pasta_treinamento_yolo_dialogo()
+                        if selected_folder:
+                            configurar_pasta_treinamento_yolo(selected_folder)
+                            garantir_estrutura_treinamento_yolo()
+                            st.session_state["pend_yolo_training_dir_input"] = str(YOLO_TRAIN_ROOT)
+                            st.session_state["pend_yolo_last_summary"] = f"Pasta de treinamento definida: {YOLO_TRAIN_ROOT}"
+                            app_rerun()
+                        else:
+                            st.info("Seleção de pasta cancelada ou indisponível neste ambiente.")
+                with pc2:
+                    if st.button("Salvar pasta informada", key="pend_yolo_save_folder", use_container_width=True):
+                        configurar_pasta_treinamento_yolo(pasta_digitada)
+                        garantir_estrutura_treinamento_yolo()
+                        st.session_state["pend_yolo_training_dir_input"] = str(YOLO_TRAIN_ROOT)
+                        st.session_state["pend_yolo_last_summary"] = f"Pasta de treinamento definida: {YOLO_TRAIN_ROOT}"
+                        app_rerun()
+                with pc3:
+                    if st.button("Usar pasta do programa", key="pend_yolo_default_folder", use_container_width=True):
+                        configurar_pasta_treinamento_yolo(PENDAO_YOLO_DEFAULT_ROOT)
+                        garantir_estrutura_treinamento_yolo()
+                        st.session_state["pend_yolo_training_dir_input"] = str(YOLO_TRAIN_ROOT)
+                        st.session_state["pend_yolo_last_summary"] = f"Pasta de treinamento definida: {YOLO_TRAIN_ROOT}"
+                        app_rerun()
+                yolo_counts = contar_amostras_treinamento_yolo()
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Imagens treino", yolo_counts["images_train"])
                 m2.metric("Imagens validação", yolo_counts["images_val"])
                 m3.metric("Labels", yolo_counts["total_labels"])
-                yolo_col1, yolo_col2, yolo_col3 = st.columns(3)
-                with yolo_col1:
-                    if st.button("Salvar treino / gerar data.yaml", key="pend_yolo_yaml"):
-                        garantir_estrutura_treinamento_yolo()
-                        st.success(f"data.yaml pronto em {YOLO_TRAIN_ROOT / 'data.yaml'}")
-                with yolo_col2:
-                    if st.button("Treinar modelo YOLO", key="pend_yolo_train"):
-                        ok, msg = treinar_yolo_pendoamento()
-                        (st.success if ok else st.warning)(msg)
-                with yolo_col3:
-                    if st.button("Abrir pasta de treinamento", key="pend_yolo_open_folder"):
-                        garantir_estrutura_treinamento_yolo()
-                        try:
-                            if os.name == "nt":
-                                os.startfile(str(YOLO_TRAIN_ROOT))
-                            else:
-                                subprocess.Popen(["xdg-open", str(YOLO_TRAIN_ROOT)])
-                            st.success("Pasta de treinamento aberta.")
-                        except Exception as exc:
-                            st.info(f"Pasta: {YOLO_TRAIN_ROOT} ({exc})")
+                if st.button("Abrir pasta de treinamento", key="pend_yolo_open_folder"):
+                    garantir_estrutura_treinamento_yolo()
+                    try:
+                        if os.name == "nt":
+                            os.startfile(str(YOLO_TRAIN_ROOT))
+                        else:
+                            subprocess.Popen(["xdg-open", str(YOLO_TRAIN_ROOT)])
+                        st.success("Pasta de treinamento aberta.")
+                    except Exception as exc:
+                        st.info(f"Pasta: {YOLO_TRAIN_ROOT} ({exc})")
                 if YOLO_BEST_MODEL_PATH.exists():
                     st.success(f"Modelo treinado ativo: {YOLO_BEST_MODEL_PATH}")
                 else:
-                    st.info("Quando o treino terminar, o best.pt será copiado para modelos_yolo/pendao_milho_best.pt e usado automaticamente na análise.")
-                if YOLO_TRAIN_LOG_PATH.exists():
-                    try:
-                        log_text = YOLO_TRAIN_LOG_PATH.read_text(encoding="utf-8", errors="ignore")[-5000:]
-                        st.text_area("Log do treino YOLO", value=log_text, height=130, key="pend_yolo_log", disabled=True)
-                    except Exception:
-                        pass
+                    st.info("Nenhum best.pt customizado local foi encontrado. A análise usa o YOLO já disponível no ambiente, OpenCV e as mini imagens manuais como referência.")
+                last_manual_msg = st.session_state.get("pend_yolo_last_summary", "")
+                if last_manual_msg:
+                    st.success(last_manual_msg)
 
             cron_files = _resettable_ortho_uploader(
                 "📷 Anexar ortofotos para o seletor do visualizador (até 10)",
@@ -11922,6 +16323,171 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                         "date": cron_date.isoformat()
                     })
 
+                ordered_entries_for_training = sorted(cron_entries, key=lambda it: (it["date"], it["idx"]))
+                if "pend_yolo_saved_sample_tokens" not in st.session_state:
+                    st.session_state["pend_yolo_saved_sample_tokens"] = set()
+
+                def _salvar_payload_amostra_treino(sample_payload: dict):
+                    active_idx = int(sample_payload.get("idx", 0))
+                    entry = ordered_entries_for_training[active_idx] if 0 <= active_idx < len(ordered_entries_for_training) else None
+                    payload_name = str(sample_payload.get("name", ""))
+                    payload_date = str(sample_payload.get("date", ""))
+                    if not entry or (payload_name and entry.get("name") != payload_name) or (payload_date and entry.get("date") != payload_date):
+                        entry = next(
+                            (
+                                item for item in ordered_entries_for_training
+                                if (not payload_name or item.get("name") == payload_name)
+                                and (not payload_date or item.get("date") == payload_date)
+                            ),
+                            entry,
+                        )
+                    if not entry:
+                        raise ValueError("ortofoto de treino não encontrada")
+                    preview_w = max(1.0, float(sample_payload.get("preview_width") or sample_payload.get("width") or 1))
+                    preview_h = max(1.0, float(sample_payload.get("preview_height") or sample_payload.get("height") or 1))
+                    orig_w = max(1.0, float(sample_payload.get("orig_width") or preview_w))
+                    orig_h = max(1.0, float(sample_payload.get("orig_height") or preview_h))
+                    click_x = float(sample_payload.get("x", 0))
+                    click_y = float(sample_payload.get("y", 0))
+                    orig_x = click_x * orig_w / preview_w
+                    orig_y = click_y * orig_h / preview_h
+                    crop_size = int(sample_payload.get("crop_size") or PENDAO_AVANCADO_PARAMS.get("manual_crop_size_default", 96))
+                    return salvar_amostra_treinamento_yolo(
+                        entry["raw"],
+                        orig_x,
+                        orig_y,
+                        "pendao_confirmado",
+                        crop_size,
+                        entry["name"],
+                        entry["date"],
+                    )
+
+                pend_yolo_payload_query = ""
+                try:
+                    query_values = st.query_params.get_all("pend_yolo_payload")
+                    pend_yolo_payload_query = query_values[-1] if query_values else ""
+                except Exception:
+                    try:
+                        legacy_query = st.experimental_get_query_params()
+                        query_values = legacy_query.get("pend_yolo_payload", [])
+                        pend_yolo_payload_query = query_values[-1] if query_values else ""
+                    except Exception:
+                        pend_yolo_payload_query = ""
+                pend_yolo_payload = pend_yolo_payload_query or st.session_state.get("pend_yolo_payload", "")
+                if pend_yolo_payload:
+                    try:
+                        payload = json.loads(pend_yolo_payload)
+                    except Exception:
+                        payload = {}
+                    token = str(payload.get("token", ""))
+                    if token and token != st.session_state.get("pend_yolo_last_payload_token"):
+                        st.session_state["pend_yolo_last_payload_token"] = token
+                        action = str(payload.get("action", "")).lower()
+                        if action == "sample":
+                            try:
+                                sample_token = str(payload.get("token", ""))
+                                saved_tokens = st.session_state["pend_yolo_saved_sample_tokens"]
+                                if sample_token and sample_token in saved_tokens:
+                                    raise ValueError("amostra já gravada")
+                                meta = _salvar_payload_amostra_treino(payload)
+                                if sample_token:
+                                    saved_tokens.add(sample_token)
+                                st.session_state["pend_yolo_browser_train_active"] = True
+                                st.session_state["pend_yolo_apply_training"] = True
+                                st.session_state["pend_yolo_last_summary"] = (
+                                    f"Mini imagem salva: {Path(meta['image']).name}. "
+                                    f"Pasta: {YOLO_TRAIN_ROOT}. O histórico já está disponível para Aplicar Treino."
+                                )
+                                try:
+                                    preparar_deteccoes_pendoamento_hibrido.clear()
+                                    carregar_referencias_treino_yolo.clear()
+                                except Exception:
+                                    pass
+                                st.success(st.session_state["pend_yolo_last_summary"])
+                            except Exception as exc:
+                                st.warning(f"Não foi possível salvar a mini imagem YOLO: {exc}")
+                        elif action == "apply_training":
+                            st.session_state["pend_yolo_apply_training"] = True
+                            yolo_counts_now = contar_amostras_treinamento_yolo()
+                            refs_now = _arquivos_referencia_treinamento_yolo(limit=100000)
+                            feature_files_now = [
+                                path
+                                for base in _bases_treinamento_yolo(include_legacy=True)
+                                if base.exists()
+                                for path in base.glob("**/crops/*/*.json")
+                            ]
+                            st.session_state["pend_yolo_last_summary"] = (
+                                f"Treino YOLO aplicado. Mini imagens disponíveis: {yolo_counts_now['total_images']}. "
+                                f"Referências lidas: {len(refs_now)}. Arquivos de características: {len(feature_files_now)}. "
+                                "As referências foram recarregadas para reforçar a próxima Análise de Pendoamento."
+                            )
+                            try:
+                                preparar_deteccoes_pendoamento_hibrido.clear()
+                                carregar_referencias_treino_yolo.clear()
+                            except Exception:
+                                pass
+                            st.success(st.session_state["pend_yolo_last_summary"])
+                        elif action == "delete_sample":
+                            try:
+                                ok, msg = excluir_amostra_treinamento_yolo(
+                                    sample_id=str(payload.get("sample_id", "")),
+                                    crop_file=str(payload.get("file", "")),
+                                    source_name=str(payload.get("name", "")),
+                                    source_date=str(payload.get("date", "")),
+                                )
+                                yolo_counts_now = contar_amostras_treinamento_yolo()
+                                st.session_state["pend_yolo_apply_training"] = bool(yolo_counts_now.get("total_images", 0))
+                                st.session_state["pend_yolo_last_summary"] = (
+                                    f"{msg} Mini imagens disponíveis: {yolo_counts_now['total_images']}. "
+                                    f"Pasta: {YOLO_TRAIN_ROOT}."
+                                )
+                                try:
+                                    preparar_deteccoes_pendoamento_hibrido.clear()
+                                    carregar_referencias_treino_yolo.clear()
+                                except Exception:
+                                    pass
+                                if ok:
+                                    st.success(st.session_state["pend_yolo_last_summary"])
+                                else:
+                                    st.warning(st.session_state["pend_yolo_last_summary"])
+                            except Exception as exc:
+                                st.warning(f"Não foi possível excluir a amostra YOLO: {exc}")
+                        elif action == "stop":
+                            saved_in_stop = 0
+                            stop_errors = []
+                            saved_tokens = st.session_state["pend_yolo_saved_sample_tokens"]
+                            samples_to_save = payload.get("samples", [])
+                            if isinstance(samples_to_save, list):
+                                for sample_payload in samples_to_save:
+                                    if not isinstance(sample_payload, dict):
+                                        continue
+                                    sample_token = str(sample_payload.get("token", ""))
+                                    if sample_token and sample_token in saved_tokens:
+                                        continue
+                                    try:
+                                        _salvar_payload_amostra_treino(sample_payload)
+                                        if sample_token:
+                                            saved_tokens.add(sample_token)
+                                        saved_in_stop += 1
+                                    except Exception as batch_exc:
+                                        stop_errors.append(str(batch_exc))
+                            st.session_state["pend_yolo_browser_train_active"] = False
+                            st.session_state["pend_yolo_apply_training"] = True
+                            yolo_counts_now = contar_amostras_treinamento_yolo()
+                            st.session_state["pend_yolo_last_summary"] = (
+                                f"Treinamento YOLO encerrado. Novas mini imagens salvas agora: {saved_in_stop}. "
+                                f"Mini imagens disponíveis: {yolo_counts_now['total_images']}. "
+                                f"Pasta: {YOLO_TRAIN_ROOT}. As imagens e características ficam disponíveis para Aplicar Treino."
+                            )
+                            if stop_errors:
+                                st.session_state["pend_yolo_last_summary"] += f" Avisos: {len(stop_errors)} amostra(s) não foram salvas."
+                            try:
+                                preparar_deteccoes_pendoamento_hibrido.clear()
+                                carregar_referencias_treino_yolo.clear()
+                            except Exception:
+                                pass
+                            st.success(st.session_state["pend_yolo_last_summary"])
+
                 ordem_preview = sorted(cron_entries, key=lambda it: (it["date"], it["idx"]))
                 resumo_cards = []
                 for slot_idx in range(10):
@@ -11953,8 +16519,13 @@ new ResizeObserver(()=>drawAll()).observe(vc);
 
                 cron_orthos = []
                 cron_errors = []
-                with st.spinner("Preparando ortofotos cronológicas para o visualizador de pendoamento..."):
-                    for item in cron_entries:
+                yolo_counts_for_viewer = contar_amostras_treinamento_yolo()
+                if "pend_yolo_apply_training" not in st.session_state:
+                    st.session_state["pend_yolo_apply_training"] = bool(yolo_counts_for_viewer.get("total_images", 0))
+                apply_training_enabled = bool(st.session_state.get("pend_yolo_apply_training", False))
+                with st.container():
+                    total_cron_entries = max(1, len(cron_entries))
+                    for idx_cron, item in enumerate(cron_entries, start=1):
                         cron_name = item["name"]
                         try:
                             raw = item["raw"]
@@ -11963,17 +16534,36 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                                 cron_errors.append(f"{cron_name}: {err}")
                                 continue
                             try:
-                                pendao_result = preparar_deteccoes_pendoamento_hibrido(raw, cron_name, tuple(dims), assinatura_modelo_yolo_pendao())
+                                detector_signature = f"{assinatura_modelo_yolo_pendao()}|{assinatura_referencias_treino_yolo()}|apply:{int(apply_training_enabled)}"
+                                pendao_result = preparar_deteccoes_pendoamento_hibrido(raw, cron_name, tuple(dims), detector_signature, apply_training_enabled)
                                 pendao_detections = pendao_result.get("detections", [])
+                                pendao_training_detections = pendao_result.get("training_detections", [])
                                 pendao_status = pendao_result.get("status", "")
-                                pendao_mode = pendao_result.get("mode", "OpenCV fallback")
-                                if pendao_status and any(token in pendao_status.lower() for token in ("não instalado", "nao instalado", "falhou")):
+                                pendao_mode = pendao_result.get("mode", "OpenCV parametrizado TMG")
+                                pendao_counts = pendao_result.get("counts", {})
+                                pendao_training_status = pendao_result.get("training_status", "")
+                                pendao_training_counts = pendao_result.get("training_counts", {})
+                                pendao_backend_ready = bool(pendao_result.get("backend_ready", True))
+                                if pendao_status and any(token in pendao_status.lower() for token in ("não instalado", "nao instalado", "falhou", "instale opencv-python")):
                                     cron_errors.append(f"{cron_name}: {pendao_status}")
                             except Exception as det_exc:
                                 pendao_detections = []
-                                pendao_status = f"YOLO/OpenCV indisponível ({det_exc}). Verifique: pip install -U ultralytics"
-                                pendao_mode = "OpenCV fallback"
+                                pendao_training_detections = []
+                                pendao_status = f"OpenCV indisponível ({det_exc}). Instale opencv-python."
+                                pendao_mode = "OpenCV indisponível"
+                                pendao_counts = {}
+                                pendao_training_status = ""
+                                pendao_training_counts = {}
+                                pendao_backend_ready = False
                                 cron_errors.append(f"{cron_name}: {pendao_status}")
+                            orig_width = int(spatial.get("orig_width", dims[0]) or dims[0]) if spatial else int(dims[0])
+                            orig_height = int(spatial.get("orig_height", dims[1]) or dims[1]) if spatial else int(dims[1])
+                            training_marks = marcas_treinamento_yolo_preview(
+                                cron_name,
+                                item["date"],
+                                tuple(dims),
+                                (orig_width, orig_height),
+                            )
                             cron_orthos.append({
                                 "order": int(item["idx"]),
                                 "name": cron_name,
@@ -11982,10 +16572,16 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                                 "width": int(dims[0]),
                                 "height": int(dims[1]),
                                 "advanced_detections": pendao_detections,
+                                "training_detections": pendao_training_detections,
                                 "detector_status": pendao_status,
                                 "detector_mode": pendao_mode,
-                                "orig_width": int(spatial.get("orig_width", dims[0]) or dims[0]) if spatial else int(dims[0]),
-                                "orig_height": int(spatial.get("orig_height", dims[1]) or dims[1]) if spatial else int(dims[1]),
+                                "detector_counts": pendao_counts,
+                                "training_status": pendao_training_status,
+                                "training_counts": pendao_training_counts,
+                                "backend_ready": pendao_backend_ready,
+                                "training_marks": training_marks,
+                                "orig_width": orig_width,
+                                "orig_height": orig_height,
                             })
                         except Exception as exc:
                             cron_errors.append(f"{cron_name}: {exc}")
@@ -11996,128 +16592,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                 cron_orthos = sorted(cron_orthos, key=lambda it: (it["date"], it["order"]))
 
                 if cron_orthos:
-                    with st.expander("🎯 Treinar YOLO por clique na ortofoto", expanded=False):
-                        garantir_estrutura_treinamento_yolo()
-                        st.caption(
-                            f"Pasta automática do treino: {YOLO_TRAIN_ROOT}. "
-                            "Clique nos pendões na imagem abaixo; cada clique salva o recorte e o label YOLO automaticamente."
-                        )
-                        train_entries = sorted(cron_entries, key=lambda it: (it["date"], it["idx"]))
-                        train_labels = [
-                            f"{idx + 1} - {entry['name']} ({entry['date']})"
-                            for idx, entry in enumerate(train_entries)
-                        ]
-                        train_col_a, train_col_b, train_col_c = st.columns([2, 1, 1])
-                        with train_col_a:
-                            train_idx = st.selectbox(
-                                "Ortofoto para treinar",
-                                options=list(range(len(train_entries))),
-                                format_func=lambda i: train_labels[i],
-                                key="pend_yolo_auto_ortho",
-                            )
-                        with train_col_b:
-                            train_sample_type = st.selectbox(
-                                "Tipo",
-                                options=["pendao_confirmado", "pendao_faltante", "falso_positivo"],
-                                format_func=lambda value: {
-                                    "pendao_confirmado": "Pendão confirmado",
-                                    "pendao_faltante": "Pendão faltante",
-                                    "falso_positivo": "Falso positivo",
-                                }.get(value, value),
-                                key="pend_yolo_auto_tipo",
-                            )
-                        with train_col_c:
-                            train_crop_size = st.number_input(
-                                "Recorte",
-                                min_value=48,
-                                max_value=256,
-                                value=128,
-                                step=16,
-                                key="pend_yolo_auto_crop",
-                            )
-
-                        selected_train_entry = train_entries[int(train_idx)]
-                        if not HAS_STREAMLIT_IMAGE_COORDINATES:
-                            st.warning("Instale a dependência para clique na imagem: pip install streamlit-image-coordinates")
-                        else:
-                            try:
-                                preview_img, original_dims, scale = preparar_preview_treino_yolo(
-                                    selected_train_entry["raw"],
-                                    selected_train_entry["name"],
-                                    selected_train_entry["date"],
-                                )
-                                st.caption(
-                                    "Modo treino ativo: clique exatamente no centro do pendão. "
-                                    "X azul = amostra positiva/faltante salva; X rosa = falso positivo."
-                                )
-                                click = streamlit_image_coordinates(
-                                    preview_img,
-                                    key=f"pend_yolo_auto_click_{selected_train_entry['idx']}_{selected_train_entry['date']}_{train_sample_type}",
-                                    width=preview_img.size[0],
-                                )
-                                if click and "x" in click and "y" in click:
-                                    orig_x = float(click["x"]) / max(scale[0], 1e-9)
-                                    orig_y = float(click["y"]) / max(scale[1], 1e-9)
-                                    token = (
-                                        f"{selected_train_entry['idx']}|{train_sample_type}|{int(train_crop_size)}|"
-                                        f"{int(round(orig_x))}|{int(round(orig_y))}"
-                                    )
-                                    if st.session_state.get("pend_yolo_last_click_token") != token:
-                                        meta = salvar_amostra_treinamento_yolo(
-                                            selected_train_entry["raw"],
-                                            orig_x,
-                                            orig_y,
-                                            train_sample_type,
-                                            int(train_crop_size),
-                                            selected_train_entry["name"],
-                                            selected_train_entry["date"],
-                                        )
-                                        st.session_state["pend_yolo_last_click_token"] = token
-                                        try:
-                                            preparar_deteccoes_pendoamento_hibrido.clear()
-                                        except Exception:
-                                            pass
-                                        st.success(
-                                            "Amostra salva para treino YOLO: "
-                                            f"{Path(meta['image']).name} ({meta['split']})."
-                                        )
-                                        st.rerun()
-                            except Exception as exc:
-                                st.warning(f"Não foi possível preparar o treino por clique: {exc}")
-
-                        yolo_counts_auto = contar_amostras_treinamento_yolo()
-                        ma, mb, mc, md = st.columns(4)
-                        ma.metric("Treino", yolo_counts_auto["images_train"])
-                        mb.metric("Validação", yolo_counts_auto["images_val"])
-                        mc.metric("Labels", yolo_counts_auto["total_labels"])
-                        md.metric("Amostras", yolo_counts_auto["total_images"])
-                        act_a, act_b, act_c = st.columns(3)
-                        with act_a:
-                            if st.button("Salvar treino / atualizar data.yaml", key="pend_yolo_auto_save"):
-                                garantir_estrutura_treinamento_yolo()
-                                st.success(f"Treino salvo e data.yaml atualizado em {YOLO_TRAIN_ROOT / 'data.yaml'}")
-                        with act_b:
-                            if st.button("Treinar modelo YOLO agora", key="pend_yolo_auto_train"):
-                                ok, msg = treinar_yolo_pendoamento()
-                                (st.success if ok else st.warning)(msg)
-                        with act_c:
-                            if st.button("Abrir pasta do treino", key="pend_yolo_auto_open"):
-                                try:
-                                    if os.name == "nt":
-                                        os.startfile(str(YOLO_TRAIN_ROOT))
-                                    else:
-                                        subprocess.Popen(["xdg-open", str(YOLO_TRAIN_ROOT)])
-                                    st.success("Pasta de treinamento aberta.")
-                                except Exception as exc:
-                                    st.info(f"Pasta: {YOLO_TRAIN_ROOT} ({exc})")
-                        if YOLO_BEST_MODEL_PATH.exists():
-                            st.success(
-                                "Modelo treinado ativo. O botão Análise de Pendoamento usará este best.pt automaticamente: "
-                                f"{YOLO_BEST_MODEL_PATH}"
-                            )
-                        else:
-                            st.info("Ainda não existe best.pt treinado. A análise continua usando YOLO-World/OpenCV até o treino gerar o modelo.")
-
+                    capture_ok, capture_endpoint = iniciar_servidor_captura_yolo_pendoamento()
                     cron_config = {
                         "nomeAnalise": cron_nome_analise,
                         "rows": int(cron_rows),
@@ -12150,6 +16625,20 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                         }
                     }
 
+                    cron_train_state = {
+                        "active": bool(st.session_state.get("pend_yolo_browser_train_active", False)),
+                        "apply_training": bool(apply_training_enabled),
+                        "folder": str(YOLO_TRAIN_ROOT),
+                        "total_images": int(yolo_counts_for_viewer.get("total_images", 0)),
+                        "images_train": int(yolo_counts_for_viewer.get("images_train", 0)),
+                        "images_val": int(yolo_counts_for_viewer.get("images_val", 0)),
+                        "total_labels": int(yolo_counts_for_viewer.get("total_labels", 0)),
+                        "crop_default": int(PENDAO_AVANCADO_PARAMS.get("manual_crop_size_default", 128)),
+                        "last_summary": st.session_state.get("pend_yolo_last_summary", ""),
+                        "capture_endpoint": capture_endpoint if capture_ok else "",
+                        "capture_ready": bool(capture_ok),
+                    }
+
                     cron_html = r"""
 <!DOCTYPE html>
 <html>
@@ -12179,7 +16668,10 @@ new ResizeObserver(()=>drawAll()).observe(vc);
   .cron-side::-webkit-scrollbar { width:6px; }
   .cron-side::-webkit-scrollbar-track { background:#141414; }
   .cron-side::-webkit-scrollbar-thumb { background:#ff8c00; border-radius:6px; }
-  .title { color:#ff8c00; font-size:12px; font-weight:900; letter-spacing:1.3px; text-align:center; text-transform:uppercase; margin-bottom:8px; }
+  .title {
+    color:#ffffff; font-size:12px; font-weight:900; letter-spacing:1.3px; text-align:center; text-transform:uppercase; margin-bottom:8px;
+    text-shadow:0 2px 0 #020e24, 0 6px 14px rgba(0,0,0,.78), 0 0 14px rgba(0,229,255,.54), 0 0 26px rgba(0,255,157,.20);
+  }
   .subtle { color:#777; font-size:10px; line-height:1.35; }
   .row { display:flex; gap:6px; align-items:center; justify-content:space-between; margin:5px 0; color:#bbb; font-size:10px; }
   .row span:first-child { max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -12232,15 +16724,49 @@ new ResizeObserver(()=>drawAll()).observe(vc);
   .review-line { display:grid; grid-template-columns:1fr 58px; gap:5px; align-items:center; margin:3px 0; color:#aaa; font-size:10px; }
   .review-line input { width:58px; text-align:center; }
   .progress {
-    height:7px; background:#171717; border:1px solid #333; border-radius:999px; overflow:hidden; margin:5px 0;
+    height:10px;
+    background:__DEPLOY_TRACK_BACKGROUND__;
+    border:1px solid __DEPLOY_TRACK_BORDER__;
+    border-radius:999px;
+    overflow:hidden;
+    margin:6px 0;
+    box-shadow:__DEPLOY_TRACK_SHADOW__;
   }
-  .progress div { height:100%; width:0%; background:linear-gradient(90deg,#ff8c00,#ffd166); transition:width .2s; }
+  .progress div {
+    height:100%;
+    width:0%;
+    background:__DEPLOY_FILL_ACTIVE__;
+    border-radius:999px;
+    box-shadow:__DEPLOY_FILL_SHADOW__;
+    transition:width .24s ease;
+    position:relative;
+    overflow:hidden;
+  }
+  .progress div:after {
+    content:"";
+    position:absolute;
+    inset:0;
+    background:linear-gradient(120deg,transparent 0%,rgba(255,255,255,.42) 44%,transparent 74%);
+    transform:translateX(-100%);
+    animation:deployBarShine 1.45s ease-in-out infinite;
+  }
+  @keyframes deployBarShine {
+    0% { transform:translateX(-100%); }
+    100% { transform:translateX(180%); }
+  }
   .legend { display:flex; flex-wrap:wrap; gap:5px; color:#888; font-size:9px; margin-top:5px; }
   .leg { display:flex; align-items:center; gap:3px; }
   .sw { width:10px; height:10px; border-radius:2px; border:1px solid rgba(255,255,255,.25); }
   .train-box { border:1px solid #24384c; background:rgba(20,34,48,.45); border-radius:8px; padding:8px; margin:6px 0; }
   .train-box .row span:first-child { max-width:125px; }
   .train-status { border:1px solid #26384a; background:#0b1118; border-radius:6px; color:#8fbde8; font-size:9px; padding:6px; min-height:34px; line-height:1.35; margin-top:5px; }
+  .parcel-table-wrap { display:none; border:1px solid #26384a; background:#0b1118; border-radius:8px; padding:7px; margin:7px 0; }
+  .parcel-table-title { color:#ffffff; font-size:10px; font-weight:900; margin-bottom:5px; text-transform:uppercase; letter-spacing:.7px; text-shadow:0 2px 0 #020e24,0 0 12px rgba(0,229,255,.42); }
+  .parcel-table-scroll { max-height:170px; overflow:auto; border:1px solid #1d2d3e; border-radius:6px; }
+  .parcel-table { width:100%; border-collapse:collapse; font-size:9px; color:#ddd; }
+  .parcel-table th { position:sticky; top:0; background:#111d2c; color:#75b7ff; padding:4px 3px; border-bottom:1px solid #26384a; }
+  .parcel-table td { padding:3px; border-bottom:1px solid rgba(255,255,255,.06); text-align:center; }
+  .parcel-total { color:#5ff2b1; font-size:10px; font-weight:800; margin-top:5px; }
   #btnReviewMode, #btnExportCSV, #btnExportResumo, #btnExportCompleto, #btnExportImagem,
   .stats, #statFirstDate, .legend, #reviewPanel { display:none !important; }
 </style>
@@ -12277,28 +16803,25 @@ new ResizeObserver(()=>drawAll()).observe(vc);
 
     <div class="sep"></div>
     <button class="btn orange" id="btnMarkGrid">⊞ Marcar Grid</button>
-    <button class="btn green" id="btnAnalyzeChrono">🌾 Análise de Pendoamento</button>
+    <button class="btn green" id="btnAnalyzeChrono">📐 Análise de Pendoamento</button>
     <button class="btn blue" id="btnReviewMode">✎ Revisar Parcela</button>
     <button class="btn" id="btnFitChrono">⤢ Ajustar à tela</button>
     <button class="btn red" id="btnClearChrono">Limpar seletor</button>
     <div class="train-box">
-      <button class="btn blue" id="btnTrainYolo">🎯 Treinar YOLO</button>
-      <div class="row"><span>Tipo de amostra</span><select id="trainSampleType">
-        <option value="pendao_confirmado">Pendão confirmado</option>
-        <option value="pendao_faltante">Pendão faltante</option>
-        <option value="falso_positivo">Falso positivo</option>
-      </select></div>
-      <div class="row"><span>Tamanho recorte</span><input id="trainCropSize" type="number" min="48" max="256" step="16" value="128" style="width:78px;text-align:center;"></div>
+      <button class="btn blue" id="btnTrainYolo">Treinar YOLO</button>
+      <button class="btn green" id="btnApplyTrainingYolo">Aplicar Treino</button>
+      <button class="btn orange" id="btnDeleteTrainMark">Excluir Marcação de Treinamento</button>
+      <div class="row"><span>Tamanho recorte</span><input id="trainCropSize" type="number" min="48" max="256" step="16" value="96" style="width:78px;text-align:center;"></div>
       <div class="row"><span>Amostras salvas</span><b id="trainSampleCount" style="color:#75b7ff;">0</b></div>
-      <button class="btn" id="btnPickTrainDir">Abrir pasta de treinamento</button>
-      <button class="btn" id="btnGenerateYaml">Gerar data.yaml</button>
-      <button class="btn" id="btnDownloadDataset">Baixar dataset YOLO</button>
-      <button class="btn green" id="btnTrainModelYolo">Treinar modelo YOLO</button>
-      <button class="btn red" id="btnStopTrainMode">Parar modo treino</button>
+      <button class="btn red" id="btnStopTrainMode">Encerrar Treinamento YOLO</button>
       <div class="train-status" id="trainStatus">Modo treino parado. Clique em Treinar YOLO e depois clique sobre os pendões.</div>
     </div>
     <div class="progress"><div id="cronProgress"></div></div>
     <div class="subtle" id="cronStatus">Selecione a ortofoto no resumo, marque o grid e execute a análise. O teto configurado define o travamento.</div>
+    <div class="parcel-table-wrap" id="parcelTableWrap">
+      <div class="parcel-table-title">Contagem por parcela</div>
+      <div id="parcelTable"></div>
+    </div>
 
     <div class="sep"></div>
     <div class="stats">
@@ -12318,6 +16841,8 @@ new ResizeObserver(()=>drawAll()).observe(vc);
     <div class="review" id="reviewPanel"></div>
 
     <div class="sep"></div>
+    <button class="btn orange" id="btnExportParcelCSV">Exportar CSV Parcelas</button>
+    <button class="btn orange" id="btnExportParcelXLSX">Exportar Excel Parcelas</button>
     <button class="btn orange" id="btnExportXLSX">Exportar Excel</button>
     <button class="btn orange" id="btnExportCSV" style="display:none;">Exportar CSV</button>
     <button class="btn" id="btnExportResumo" style="display:none;">Exportar resumo final</button>
@@ -12329,6 +16854,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
 <script>
 const ORTHOS = __CRON_ORTHOS__;
 const CONFIG = __CRON_CONFIG__;
+const TRAIN_STATE = __TRAIN_STATE__;
 const viewer = document.getElementById('cronViewer');
 const canvas = document.getElementById('cronCanvas');
 const ctx = canvas.getContext('2d');
@@ -12353,19 +16879,20 @@ const btnPrevDate = document.getElementById('btnPrevDate');
 const btnNextDate = document.getElementById('btnNextDate');
 const btnExportCSV = document.getElementById('btnExportCSV');
 const btnExportXLSX = document.getElementById('btnExportXLSX');
+const btnExportParcelCSV = document.getElementById('btnExportParcelCSV');
+const btnExportParcelXLSX = document.getElementById('btnExportParcelXLSX');
 const btnExportResumo = document.getElementById('btnExportResumo');
 const btnExportCompleto = document.getElementById('btnExportCompleto');
 const btnExportImagem = document.getElementById('btnExportImagem');
 const btnTrainYolo = document.getElementById('btnTrainYolo');
-const trainSampleType = document.getElementById('trainSampleType');
+const btnApplyTrainingYolo = document.getElementById('btnApplyTrainingYolo');
+const btnDeleteTrainMark = document.getElementById('btnDeleteTrainMark');
 const trainCropSize = document.getElementById('trainCropSize');
 const trainSampleCount = document.getElementById('trainSampleCount');
-const btnPickTrainDir = document.getElementById('btnPickTrainDir');
-const btnGenerateYaml = document.getElementById('btnGenerateYaml');
-const btnDownloadDataset = document.getElementById('btnDownloadDataset');
-const btnTrainModelYolo = document.getElementById('btnTrainModelYolo');
 const btnStopTrainMode = document.getElementById('btnStopTrainMode');
 const trainStatus = document.getElementById('trainStatus');
+const parcelTableWrap = document.getElementById('parcelTableWrap');
+const parcelTable = document.getElementById('parcelTable');
 
 let images = [];
 let loaded = 0;
@@ -12378,16 +16905,27 @@ let selectedParcel = null;
 let resultsByParcel = {};
 let finalRows = [];
 let fullRows = [];
+let parcelCountRows = [];
 let manualReviews = {};
-let trainYoloMode = false;
-let trainingDirHandle = null;
+let trainYoloMode = Boolean(TRAIN_STATE && TRAIN_STATE.active);
+let deleteTrainingMode = false;
+let applyYoloTraining = Boolean(TRAIN_STATE && TRAIN_STATE.apply_training);
 let yoloSamples = [];
 let yoloTrainMarks = [];
+let showTrainingMarks = Boolean(trainYoloMode);
+let pendingTrainingRefresh = false;
 const tempCanvas = document.createElement('canvas');
 const tempCtx = tempCanvas.getContext('2d', { willReadFrequently:true });
 let tempPrepared = -1;
+const VIEWER_STATE_KEY = 'tmg_pendoamento_estado_' + hashString(JSON.stringify(ORTHOS.map(o => [o.name, o.date, o.width, o.height])));
 
 function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+function hashString(value){
+  let h = 0;
+  const s = String(value || '');
+  for(let i=0; i<s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return Math.abs(h).toString(36);
+}
 function imgW(idx=activeIdx){ return ORTHOS[idx]?.width || images[idx]?.width || 1; }
 function imgH(idx=activeIdx){ return ORTHOS[idx]?.height || images[idx]?.height || 1; }
 function cellLabel(r,c){ return 'D' + (r + 1) + ' T' + (c + 1); }
@@ -12398,7 +16936,7 @@ function quoteCSV(v){
 }
 
 function trainDataYaml(){
-  return 'path: dados_treinamento_yolo/pendao_milho\ntrain: images/train\nval: images/val\nnames:\n  0: pendao\n';
+  return 'path: dados_treinamento_yolo/pendoes\ntrain: images/train\nval: images/val\nnames:\n  0: pendao\n';
 }
 
 function sanitizeName(value){
@@ -12409,84 +16947,233 @@ function canvasToBlob(cv, type='image/jpeg', quality=0.94){
   return new Promise(resolve => cv.toBlob(resolve, type, quality));
 }
 
+function captureCropDataUrl(pt, size){
+  if(!images[activeIdx] || !images[activeIdx].complete) return '';
+  const cv = document.createElement('canvas');
+  cv.width = size;
+  cv.height = size;
+  const cctx = cv.getContext('2d');
+  cctx.fillStyle = '#000';
+  cctx.fillRect(0,0,size,size);
+  const sx = Math.round(pt.x - size / 2);
+  const sy = Math.round(pt.y - size / 2);
+  const srcX = Math.max(0, sx);
+  const srcY = Math.max(0, sy);
+  const srcRight = Math.min(imgW(activeIdx), sx + size);
+  const srcBottom = Math.min(imgH(activeIdx), sy + size);
+  const sw = Math.max(0, srcRight - srcX);
+  const sh = Math.max(0, srcBottom - srcY);
+  if(sw <= 0 || sh <= 0) return '';
+  cctx.drawImage(images[activeIdx], srcX, srcY, sw, sh, srcX - sx, srcY - sy, sw, sh);
+  return cv.toDataURL('image/png');
+}
+
 async function getDirHandle(root, parts){
-  let dir = root;
-  for(const part of parts){
-    dir = await dir.getDirectoryHandle(part, {create:true});
-  }
-  return dir;
+  return null;
 }
 
 async function writeTrainingFile(parts, filename, content){
-  if(!trainingDirHandle) return false;
-  const dir = await getDirHandle(trainingDirHandle, ['dados_treinamento_yolo','pendao_milho', ...parts]);
-  const file = await dir.getFileHandle(filename, {create:true});
-  const writable = await file.createWritable();
-  await writable.write(content);
-  await writable.close();
   return true;
 }
 
 async function generateYamlToTrainingDir(){
-  if(!trainingDirHandle) return false;
-  const dir = await getDirHandle(trainingDirHandle, ['dados_treinamento_yolo','pendao_milho']);
-  const file = await dir.getFileHandle('data.yaml', {create:true});
-  const writable = await file.createWritable();
-  await writable.write(trainDataYaml());
-  await writable.close();
-  return true;
+  return false;
 }
 
 function autoYoloBboxFromCrop(cropCtx, size){
-  const data = cropCtx.getImageData(0,0,size,size).data;
-  let minX=size, minY=size, maxX=-1, maxY=-1, count=0;
-  const center=size/2;
-  for(let y=0; y<size; y++){
-    for(let x=0; x<size; x++){
-      const i=(y*size+x)*4;
-      const r=data[i], g=data[i+1], b=data[i+2];
-      const score=tasselScore(r,g,b);
-      const exg=2*g-r-b;
-      const yell=((r+g)*0.5)-b;
-      const dist=Math.hypot(x-center,y-center);
-      const candidate=(score>=3.45 || (yell>=16 && exg<62 && Math.max(r,g,b)>88)) && dist<=size*0.43;
-      if(candidate){
-        if(x<minX) minX=x; if(x>maxX) maxX=x;
-        if(y<minY) minY=y; if(y>maxY) maxY=y;
-        count++;
-      }
-    }
-  }
-  if(count < 8 || maxX < minX || maxY < minY){
-    return {xc:0.5,yc:0.5,w:0.45,h:0.45,auto:false};
-  }
-  const pad=Math.max(3, Math.round(size*0.04));
-  minX=clamp(minX-pad,0,size-1); minY=clamp(minY-pad,0,size-1);
-  maxX=clamp(maxX+pad,0,size-1); maxY=clamp(maxY+pad,0,size-1);
-  const w=Math.max(4,maxX-minX+1), h=Math.max(4,maxY-minY+1);
-  return {
-    xc:clamp((minX+w/2)/size,0.02,0.98),
-    yc:clamp((minY+h/2)/size,0.02,0.98),
-    w:clamp(w/size,0.08,0.92),
-    h:clamp(h/size,0.08,0.92),
-    auto:true
-  };
+  return {xc:0.5,yc:0.5,w:0.45,h:0.45,auto:false};
 }
 
 async function pickTrainingDirectory(){
-  if(!window.showDirectoryPicker){
-    trainStatus.textContent = 'Seu navegador não permite salvar direto em pasta. Use Baixar dataset YOLO.';
-    return false;
+  trainStatus.textContent = 'O salvamento agora é automático pelo Streamlit na pasta configurada.';
+  return false;
+}
+
+function currentTrainingTotal(){
+  return Number(TRAIN_STATE?.total_images || 0) + yoloSamples.length;
+}
+
+async function postTrainingPayloadDirect(payload){
+  const endpoint = TRAIN_STATE?.capture_endpoint || '';
+  if(!endpoint) return {ok:false, error:'endpoint indisponível'};
+  try{
+    const response = await fetch(endpoint, {
+      method:'POST',
+      mode:'cors',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+    if(!response.ok) return {ok:false, error:data.error || data.message || ('HTTP ' + response.status)};
+    return data;
+  }catch(e){
+    return {ok:false, error:String(e && e.message ? e.message : e)};
+  }
+}
+
+function sendTrainingPayload(payload){
+  persistViewerState();
+  const data = JSON.stringify(payload);
+  let deliveredByInput = false;
+  try{
+    window.localStorage.setItem('tmg_pend_yolo_payload', data);
+    const parentDoc = window.parent && window.parent.document;
+    if(parentDoc){
+      const inputs = Array.from(parentDoc.querySelectorAll('input'));
+      const target = inputs.find(el => el.getAttribute('aria-label') === 'pend_yolo_payload' || el.name === 'pend_yolo_payload');
+      if(target){
+        const setter = Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype, 'value').set;
+        target.focus();
+        setter.call(target, data);
+        target.dispatchEvent(new InputEvent('input', {bubbles:true, data, inputType:'insertText'}));
+        target.dispatchEvent(new Event('change', {bubbles:true}));
+        target.blur();
+        deliveredByInput = true;
+      }
+    }
+  }catch(e){
+    console.warn('Falha ao enviar amostra YOLO para o Streamlit', e);
   }
   try{
-    trainingDirHandle = await window.showDirectoryPicker({mode:'readwrite'});
-    await generateYamlToTrainingDir();
-    trainStatus.textContent = 'Pasta conectada. Os cliques serão salvos em dados_treinamento_yolo/pendao_milho.';
+    const parentWin = window.parent || window;
+    const url = new URL(parentWin.location.href);
+    url.searchParams.set('pend_yolo_payload', data);
+    parentWin.location.assign(url.toString());
     return true;
   }catch(e){
-    trainStatus.textContent = 'Seleção de pasta cancelada.';
+    console.warn('Falha ao enviar payload YOLO por URL', e);
+  }
+  return deliveredByInput;
+}
+
+function requestTrainingRefreshAndApply(){
+  persistViewerState();
+  try{ window.localStorage.setItem(VIEWER_STATE_KEY + '_auto_apply', '1'); }catch(e){}
+  sendTrainingPayload({action:'apply_training', token:'apply_' + Date.now(), total_images:currentTrainingTotal()});
+}
+
+function updateTrainPanelStatus(message){
+  trainSampleCount.textContent = String(currentTrainingTotal());
+  if(message) trainStatus.textContent = message;
+}
+
+function persistViewerState(){
+  try{
+    const payload = {
+      version:1,
+      savedAt:Date.now(),
+      activeIdx,
+      gridRatios,
+      resultsByParcel,
+      manualReviews,
+      rows:Number(CONFIG.rows || 1),
+      cols:Number(CONFIG.cols || 1)
+    };
+    window.localStorage.setItem(VIEWER_STATE_KEY, JSON.stringify(payload));
+  }catch(e){
+    console.warn('Não foi possível salvar estado do visualizador de pendoamento', e);
+  }
+}
+
+function restoreViewerState(){
+  try{
+    const raw = window.localStorage.getItem(VIEWER_STATE_KEY);
+    if(!raw) return false;
+    const payload = JSON.parse(raw);
+    if(!payload || payload.version !== 1) return false;
+    if(Number(payload.rows || 1) !== Number(CONFIG.rows || 1) || Number(payload.cols || 1) !== Number(CONFIG.cols || 1)) return false;
+    if(Array.isArray(payload.gridRatios)) gridRatios = payload.gridRatios.filter(p => Number.isFinite(Number(p.x)) && Number.isFinite(Number(p.y))).slice(0,4);
+    if(payload.resultsByParcel && typeof payload.resultsByParcel === 'object') resultsByParcel = payload.resultsByParcel;
+    if(payload.manualReviews && typeof payload.manualReviews === 'object') manualReviews = payload.manualReviews;
+    activeIdx = clamp(Number(payload.activeIdx || 0), 0, Math.max(0, ORTHOS.length - 1));
+    if(dateSelect) dateSelect.value = String(activeIdx);
+    if(gridRatios.length || Object.keys(resultsByParcel).length){
+      statusEl.textContent = 'Grid e resultado restaurados. Continue o treino ou aplique o treino salvo.';
+    }
+    return true;
+  }catch(e){
+    console.warn('Não foi possível restaurar estado do visualizador de pendoamento', e);
     return false;
   }
+}
+
+function activeTrainingMarks(){
+  const stored = Array.isArray(ORTHOS[activeIdx]?.training_marks) ? ORTHOS[activeIdx].training_marks.map(m => ({...m, idx:activeIdx, stored:true})) : [];
+  const local = yoloTrainMarks.filter(m => m.idx === activeIdx).map(m => ({...m, stored:false}));
+  return [...stored, ...local];
+}
+
+function nearestTrainingMark(pt){
+  let best = null;
+  let bestDist = Infinity;
+  for(const mark of activeTrainingMarks()){
+    const dx = pt.x - Number(mark.x || 0);
+    const dy = pt.y - Number(mark.y || 0);
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    const radius = Math.max(18 / Math.max(scale, 0.0001), Number(mark.size || 128) * 0.45);
+    if(dist <= radius && dist < bestDist){
+      best = mark;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+function removeLocalTrainingMark(mark){
+  if(mark.stored){
+    const marks = Array.isArray(ORTHOS[activeIdx]?.training_marks) ? ORTHOS[activeIdx].training_marks : [];
+    ORTHOS[activeIdx].training_marks = marks.filter(item => {
+      if(mark.id && item.id === mark.id) return false;
+      if(mark.file && item.file === mark.file) return false;
+      return Math.abs(Number(item.x || 0) - Number(mark.x || 0)) > 0.5 || Math.abs(Number(item.y || 0) - Number(mark.y || 0)) > 0.5;
+    });
+    if(TRAIN_STATE) TRAIN_STATE.total_images = Math.max(0, Number(TRAIN_STATE.total_images || 0) - 1);
+  } else {
+    yoloTrainMarks = yoloTrainMarks.filter(item => item !== mark && item.token !== mark.token);
+    yoloSamples = yoloSamples.filter(item => item.token !== mark.token);
+    if(mark.saved_direct){
+      postTrainingPayloadDirect({
+        action:'delete_sample',
+        sample_id:mark.id || '',
+        file:mark.file || '',
+        name:ORTHOS[activeIdx]?.name || mark.source_name || '',
+        date:ORTHOS[activeIdx]?.date || mark.source_date || ''
+      }).then(resp => {
+        if(resp.ok){
+          if(TRAIN_STATE) TRAIN_STATE.total_images = Math.max(0, Number(resp.total_images || 0));
+          pendingTrainingRefresh = true;
+          updateTrainPanelStatus('Amostra removida da pasta de treinamento. Aplicar Treino atualizará a recontagem.');
+        } else {
+          updateTrainPanelStatus('Marcação removida do visualizador, mas não foi possível apagar arquivo: ' + (resp.error || resp.message || 'erro'));
+        }
+      });
+    }
+  }
+}
+
+function deleteTrainingSampleAt(pt){
+  const mark = nearestTrainingMark(pt);
+  if(!mark){
+    trainStatus.textContent = 'Nenhuma marcação de treinamento encontrada perto do clique.';
+    return;
+  }
+  if(!confirm('Excluir esta amostra de treinamento?')) return;
+  removeLocalTrainingMark(mark);
+  const ortho = ORTHOS[activeIdx] || {};
+  if(mark.stored){
+    sendTrainingPayload({
+      action:'delete_sample',
+      token:'delete_' + Date.now() + '_' + (mark.id || mark.file || ''),
+      sample_id:mark.id || '',
+      file:mark.file || '',
+      name:ortho.name || mark.source_name || '',
+      date:ortho.date || mark.source_date || ''
+    });
+    updateTrainPanelStatus('Amostra removida do visualizador. Apagando arquivos vinculados na pasta YOLO...');
+  } else {
+    updateTrainPanelStatus('Marcação local removida antes da gravação definitiva.');
+  }
+  drawAll();
 }
 
 async function saveYoloTrainingSample(pt){
@@ -12495,98 +17182,62 @@ async function saveYoloTrainingSample(pt){
     return;
   }
   const size = clamp(parseInt(trainCropSize.value || 128), 48, 256);
-  const type = trainSampleType.value || 'pendao_confirmado';
-  const split = ((yoloSamples.length + 1) % 5 === 0) ? 'val' : 'train';
-  const positive = type !== 'falso_positivo';
-  const crop = document.createElement('canvas');
-  crop.width = size; crop.height = size;
-  const cctx = crop.getContext('2d', {willReadFrequently:true});
-  cctx.fillStyle = '#111';
-  cctx.fillRect(0,0,size,size);
-  const sx = Math.round(pt.x - size/2);
-  const sy = Math.round(pt.y - size/2);
-  const srcX = clamp(sx, 0, imgW(activeIdx));
-  const srcY = clamp(sy, 0, imgH(activeIdx));
-  const srcX2 = clamp(sx + size, 0, imgW(activeIdx));
-  const srcY2 = clamp(sy + size, 0, imgH(activeIdx));
-  const sw = Math.max(1, srcX2-srcX);
-  const sh = Math.max(1, srcY2-srcY);
-  const dx = srcX - sx;
-  const dy = srcY - sy;
-  cctx.drawImage(images[activeIdx], srcX, srcY, sw, sh, dx, dy, sw, sh);
-  const bbox = positive ? autoYoloBboxFromCrop(cctx, size) : {xc:0.5,yc:0.5,w:0,h:0,auto:false};
-  const now = new Date();
-  const stamp = now.toISOString().replace(/[-:.TZ]/g,'').slice(0,14);
-  const baseName = sanitizeName('pendao_' + stamp + '_o' + (activeIdx+1) + '_x' + Math.round(pt.x) + '_y' + Math.round(pt.y) + '_' + type);
-  const imgName = baseName + '.jpg';
-  const labelName = baseName + '.txt';
-  const blob = await canvasToBlob(crop, 'image/jpeg', 0.95);
-  const labelText = positive
-    ? `0 ${bbox.xc.toFixed(6)} ${bbox.yc.toFixed(6)} ${bbox.w.toFixed(6)} ${bbox.h.toFixed(6)}\n`
-    : '';
-  const origW = Number(ORTHOS[activeIdx]?.orig_width || imgW(activeIdx));
-  const origH = Number(ORTHOS[activeIdx]?.orig_height || imgH(activeIdx));
-  const meta = {
-    file: imgName,
-    type,
-    split,
-    preview_x: Number(pt.x.toFixed(2)),
-    preview_y: Number(pt.y.toFixed(2)),
-    original_x: Number((pt.x * origW / imgW(activeIdx)).toFixed(2)),
-    original_y: Number((pt.y * origH / imgH(activeIdx)).toFixed(2)),
-    crop_size: size,
-    bbox_auto: bbox.auto,
-    ortho: ORTHOS[activeIdx]?.name || '',
-    date: ORTHOS[activeIdx]?.date || ''
+  const ortho = ORTHOS[activeIdx] || {};
+  const token = Date.now() + '_' + activeIdx + '_' + Math.round(pt.x) + '_' + Math.round(pt.y);
+  const sample = {
+    token,
+    idx:activeIdx,
+    name:ortho.name || '',
+    date:ortho.date || '',
+    x:Number(pt.x.toFixed(2)),
+    y:Number(pt.y.toFixed(2)),
+    preview_width:imgW(activeIdx),
+    preview_height:imgH(activeIdx),
+    orig_width:Number(ortho.orig_width || imgW(activeIdx)),
+    orig_height:Number(ortho.orig_height || imgH(activeIdx)),
+    crop_size:size
   };
-  yoloSamples.push({imgName,labelName,blob,labelText,type,split,meta});
-  yoloTrainMarks.push({x:pt.x,y:pt.y,size,type,idx:activeIdx});
-  trainSampleCount.textContent = String(yoloSamples.length);
-  try{
-    if(trainingDirHandle){
-      await writeTrainingFile(['images', split], imgName, blob);
-      await writeTrainingFile(['labels', split], labelName, labelText);
-      await writeTrainingFile(['crops', type], imgName, blob);
-      await writeTrainingFile(['crops', type], baseName + '.json', JSON.stringify(meta, null, 2));
-      await generateYamlToTrainingDir();
-      trainStatus.textContent = 'Amostra de pendão salva para treinamento YOLO.';
-    } else {
-      trainStatus.textContent = 'Amostra guardada no navegador. Use Baixar dataset YOLO ou Abrir pasta de treinamento.';
-    }
-  }catch(e){
-    trainStatus.textContent = 'Amostra criada, mas falhou ao salvar na pasta: ' + e.message;
-  }
+  yoloSamples.push(sample);
+  const localMark = {x:pt.x,y:pt.y,size,type:'pendao_confirmado',idx:activeIdx,token};
+  yoloTrainMarks.push(localMark);
+  showTrainingMarks = true;
+  updateTrainPanelStatus('Capturando mini foto. Salvando crop, label e características na pasta de treinamento...');
   drawAll();
+  const cropDataUrl = captureCropDataUrl(pt, size);
+  if(cropDataUrl && TRAIN_STATE?.capture_ready){
+    const origX = sample.x * sample.orig_width / sample.preview_width;
+    const origY = sample.y * sample.orig_height / sample.preview_height;
+    const response = await postTrainingPayloadDirect({
+      action:'sample',
+      token,
+      name:sample.name,
+      date:sample.date,
+      x:sample.x,
+      y:sample.y,
+      orig_x:origX,
+      orig_y:origY,
+      crop_size:size,
+      crop_data_url:cropDataUrl
+    });
+    if(response && response.ok){
+      yoloSamples = yoloSamples.filter(item => item.token !== token);
+      localMark.saved_direct = true;
+      localMark.id = response.id || '';
+      localMark.file = response.file || '';
+      localMark.crop = response.crop || '';
+      if(TRAIN_STATE) TRAIN_STATE.total_images = Number(response.total_images || currentTrainingTotal());
+      pendingTrainingRefresh = true;
+      updateTrainPanelStatus('Mini foto salva automaticamente: ' + (response.file || 'amostra') + '. Pasta: ' + (response.folder || TRAIN_STATE?.folder || 'treino YOLO') + '.');
+      drawAll();
+      return;
+    }
+    updateTrainPanelStatus('Salvamento direto falhou (' + (response.error || response.message || 'erro') + '). Tentando salvar pelo Streamlit...');
+  }
+  sendTrainingPayload({action:'sample', ...sample});
 }
 
 async function downloadYoloDataset(){
-  if(!yoloSamples.length){
-    alert('Nenhuma amostra salva nesta sessão.');
-    return;
-  }
-  if(typeof JSZip === 'undefined'){
-    await loadScriptOnce('https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js');
-  }
-  if(typeof JSZip === 'undefined'){
-    alert('Não foi possível carregar o gerador ZIP. Use Abrir pasta de treinamento.');
-    return;
-  }
-  const zip = new JSZip();
-  const root = zip.folder('dados_treinamento_yolo').folder('pendao_milho');
-  root.file('data.yaml', trainDataYaml());
-  for(const s of yoloSamples){
-    const arrayBuffer = await s.blob.arrayBuffer();
-    root.folder('images').folder(s.split).file(s.imgName, arrayBuffer);
-    root.folder('labels').folder(s.split).file(s.labelName, s.labelText);
-    root.folder('crops').folder(s.type).file(s.imgName, arrayBuffer);
-    root.folder('crops').folder(s.type).file(s.imgName.replace(/\.jpg$/i,'.json'), JSON.stringify(s.meta, null, 2));
-  }
-  const content = await zip.generateAsync({type:'blob'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(content);
-  a.download = 'dados_treinamento_yolo_pendao_milho.zip';
-  a.click();
-  trainStatus.textContent = 'Dataset YOLO baixado em ZIP.';
+  trainStatus.textContent = 'As mini imagens já são salvas automaticamente pelo Streamlit na pasta de treinamento.';
 }
 
 function applyViewerConfig(clearResults=false){
@@ -12694,14 +17345,62 @@ function orthoStats(idx){
   return {total, hit, partial, review};
 }
 
+function buildActiveParcelRows(){
+  const R = Math.max(1, parseInt(CONFIG.rows || 1));
+  const C = Math.max(1, parseInt(CONFIG.cols || 1));
+  const meta = CONFIG.metadata || {};
+  const quadra = meta.QUADRA || CONFIG.nomeAnalise || 'Pendoamento';
+  const rows = [];
+  for(let r=0; r<R; r++){
+    for(let c=0; c<C; c++){
+      const label = cellLabel(r,c);
+      const rec = resultsByParcel[label] || {};
+      const manual = manualReviews[label] || {};
+      const count = manual.counts && manual.counts[activeIdx] !== undefined
+        ? Number(manual.counts[activeIdx] || 0)
+        : Number((rec.counts || [])[activeIdx] || 0);
+      rows.push({
+        Quadra: quadra,
+        Parcela: label,
+        Linha: r + 1,
+        Coluna: c + 1,
+        Quantidade_Pendoes: count
+      });
+    }
+  }
+  return rows;
+}
+
+function renderParcelCountTable(){
+  if(!Object.keys(resultsByParcel).length){
+    parcelCountRows = [];
+    parcelTableWrap.style.display = 'none';
+    parcelTable.innerHTML = '';
+    return;
+  }
+  parcelCountRows = buildActiveParcelRows();
+  const total = parcelCountRows.reduce((sum,row) => sum + Number(row.Quantidade_Pendoes || 0), 0);
+  parcelTableWrap.style.display = 'block';
+  parcelTable.innerHTML =
+    '<div class="parcel-table-scroll"><table class="parcel-table">' +
+    '<thead><tr><th>Parcela</th><th>Linha</th><th>Coluna</th><th>Pendões</th></tr></thead><tbody>' +
+    parcelCountRows.map(row =>
+      '<tr><td>' + safeHtml(row.Parcela) + '</td><td>' + row.Linha + '</td><td>' + row.Coluna + '</td><td><b>' + row.Quantidade_Pendoes + '</b></td></tr>'
+    ).join('') +
+    '</tbody></table></div>' +
+    '<div class="parcel-total">Total geral: ' + total + ' pendões</div>';
+}
+
 function renderOrthoSummary(){
   dateList.innerHTML = '';
   const active = ORTHOS[activeIdx] || {};
   const activeStats = orthoStats(activeIdx);
+  const activeDet = active.detector_counts || {};
   activeOrthoSummary.innerHTML =
     'Visualizando: <b style="color:#ffb347">' + (activeIdx + 1) + ' · ' + safeHtml(active.name || '') + '</b><br>' +
     'Data: ' + safeHtml(active.date || '--') + ' · Pendões: ' + activeStats.total + ' · Atingidas: ' + activeStats.hit +
     '<br>Detector: ' + safeHtml(active.detector_mode || 'OpenCV fallback') +
+    ' · YOLO ' + Number(activeDet.yolo || 0) + ' · OpenCV ' + Number(activeDet.opencv || 0) + ' · Refinado ' + Number(activeDet.refinado || 0) +
     '<br><span style="color:#777">Ortofotos carregadas: ' + ORTHOS.length + '/10</span>';
   for(let idx=0; idx<10; idx++){
     const o = ORTHOS[idx];
@@ -12711,7 +17410,10 @@ function renderOrthoSummary(){
       item.className = 'date-item' + (idx === activeIdx ? ' active' : '');
       item.innerHTML =
         '<div class="date-head"><span>#' + String(idx + 1).padStart(2,'0') + ' · ' + safeHtml(o.date) + '</span><span class="date-name">' + safeHtml(o.name) + '</span></div>' +
-        '<div class="date-meta">Clique aqui para visualizar esta ortofoto no painel único.<br>Detector: ' + safeHtml(o.detector_mode || 'OpenCV fallback') + '</div>' +
+        '<div class="date-meta">Clique aqui para visualizar esta ortofoto no painel único.<br>Detector: ' + safeHtml(o.detector_mode || 'OpenCV fallback') +
+        ' · YOLO ' + Number((o.detector_counts || {}).yolo || 0) +
+        ' · OpenCV ' + Number((o.detector_counts || {}).opencv || 0) +
+        ' · Refinado ' + Number((o.detector_counts || {}).refinado || 0) + '</div>' +
         '<div class="date-mini">' +
           '<span><b>' + stats.total + '</b>pendões</span>' +
           '<span><b>' + stats.hit + '</b>atingiu</span>' +
@@ -12726,6 +17428,7 @@ function renderOrthoSummary(){
     }
     dateList.appendChild(item);
   }
+  renderParcelCountTable();
 }
 
 function setActiveDate(idx){
@@ -12902,7 +17605,7 @@ function tasselScore(r,g,b){
 function scoreThreshold(){
   const sensitivity = clamp(Number(CONFIG.sensibilidade || 60), 1, 100);
   const tolerance = clamp(Number(CONFIG.tolerancia || 55), 0, 100);
-  return clamp(4.28 - (sensitivity - 50) / 150 - (tolerance - 50) / 240, 4.05, 4.75);
+  return clamp(3.92 - (sensitivity - 50) / 135 - (tolerance - 50) / 220, 3.55, 4.45); // AJUSTE PENDOAMENTO: limiar mais sensível dentro das parcelas
 }
 
 function mergeNearbyTassels(marks,w,h){
@@ -12940,9 +17643,10 @@ function prepareTemp(idx){
 
 function analyzeCellFromAdvancedDetections(idx,r,c){
   const source = ORTHOS[idx] && Array.isArray(ORTHOS[idx].advanced_detections) ? ORTHOS[idx].advanced_detections : null;
-  if(!source || !source.length) return null;
+  const backendReady = Boolean(ORTHOS[idx] && ORTHOS[idx].backend_ready);
   const poly = cellPoly(r,c,idx);
   if(!poly) return {count:0, marks:[], confidence:0};
+  if(!source || !source.length) return null; // AJUSTE PENDOAMENTO: sem detecções prévias, usa fallback OpenCV no grid em vez de zerar a parcela
   const marks = [];
   let confidenceSum = 0;
   for(const det of source){
@@ -12976,7 +17680,9 @@ function analyzeCellFromAdvancedDetections(idx,r,c){
 
 function analyzeCellInImage(idx,r,c){
   const advanced = analyzeCellFromAdvancedDetections(idx,r,c);
-  if(advanced) return advanced;
+  // AJUSTE PENDOAMENTO: usa detecção prévia apenas quando ela encontrou pendões na parcela.
+  // Se vier zerada, continua para o OpenCV do navegador e tenta contar dentro do polígono do grid.
+  if(advanced && advanced.count > 0) return advanced;
   prepareTemp(idx);
   const poly = cellPoly(r,c,idx);
   if(!poly) return {count:0, marks:[], confidence:0};
@@ -13025,7 +17731,7 @@ function analyzeCellInImage(idx,r,c){
 
   const scoreMean = scoreCount ? scoreSumAll / scoreCount : 0;
   const scoreVar = scoreCount ? Math.max(0, scoreSqAll / scoreCount - scoreMean*scoreMean) : 0;
-  const localTh = clamp(Math.max(th, scoreMean + Math.sqrt(scoreVar) * 0.95), th, th + 1.15);
+  const localTh = clamp(Math.max(th - 0.22, scoreMean + Math.sqrt(scoreVar) * 0.55), th - 0.35, th + 0.80); // AJUSTE PENDOAMENTO: limiar local menos rígido para pendões pequenos
   for(let mi=0; mi<mask.length; mi++){
     if(inside[mi] && scores[mi]>=localTh){
       mask[mi]=1;
@@ -13067,7 +17773,7 @@ function analyzeCellInImage(idx,r,c){
     }
   }
 
-  const minArea = Math.max(1, Number(CONFIG.areaMin || 18));
+  const minArea = Math.max(1, Number(CONFIG.areaMin || 10)); // AJUSTE PENDOAMENTO: pendões menores
   const maxAreaCfg = Math.max(minArea+1, Number(CONFIG.areaMax || 900));
   const maxArea = Math.min(maxAreaCfg, Math.max(minArea+1, w*h*0.026));
   const visited = new Uint8Array(gw*gh);
@@ -13113,16 +17819,16 @@ function analyzeCellInImage(idx,r,c){
       const valid =
         area>=minArea &&
         area<=maxArea &&
-        density>=0.11 &&
-        elongation<=8.5 &&
-        widthPx<=Math.max(16, w*0.18) &&
-        heightPx<=Math.max(16, h*0.22) &&
-        meanScore>=localTh+0.03 &&
-        meanYellow>=10 &&
-        meanExg<54 &&
-        meanChroma>=14 &&
-        coreRatio>=0.12 &&
-        paleRatio>=0.20 &&
+        density>=0.08 &&
+        elongation<=10.0 &&
+        widthPx<=Math.max(20, w*0.22) &&
+        heightPx<=Math.max(20, h*0.26) &&
+        meanScore>=localTh-0.04 &&
+        meanYellow>=7 &&
+        meanExg<66 &&
+        meanChroma>=10 &&
+        coreRatio>=0.08 &&
+        paleRatio>=0.12 &&
         pointInPolygon(cx,cy,poly);
       if(valid){
         marks.push({x:cx,y:cy,area:area,score:meanScore});
@@ -13232,15 +17938,154 @@ function rebuildRows(){
   renderOrthoSummary();
 }
 
+function sourceBucket(mark){
+  const src = String(mark?.source || '').toLowerCase();
+  if(src.includes('aplicar treino') || src.includes('treino')) return 'refinado';
+  if(src.includes('yolo')) return 'yolo';
+  if(src.includes('refinamento') || src.includes('refer')) return 'refinado';
+  return 'opencv';
+}
+
+function analysisSourceTotals(){
+  const totals = {yolo:0, opencv:0, refinado:0};
+  for(const label of Object.keys(resultsByParcel)){
+    const rec = resultsByParcel[label] || {};
+    const marksByDate = rec.marksByDate || [];
+    for(const marks of marksByDate){
+      for(const mark of marks || []){
+        totals[sourceBucket(mark)] += 1;
+      }
+    }
+  }
+  return totals;
+}
+
+function treinoDistanceThreshold(idx){
+  return clamp(Math.min(imgW(idx), imgH(idx)) * 0.012, 15, 30);
+}
+
+function existingTrainingDuplicate(idx, x, y, distance){
+  for(const label of Object.keys(resultsByParcel)){
+    const rec = resultsByParcel[label] || {};
+    const marks = rec.marksByDate ? (rec.marksByDate[idx] || []) : [];
+    for(const mark of marks){
+      const dx = Number(mark.x || 0) - x;
+      const dy = Number(mark.y || 0) - y;
+      if(Math.sqrt(dx*dx + dy*dy) <= distance) return true;
+    }
+  }
+  return false;
+}
+
+function ensureParcelRecord(label, r, c){
+  if(!resultsByParcel[label]){
+    resultsByParcel[label] = {
+      row:r+1,
+      col:c+1,
+      counts:ORTHOS.map(()=>0),
+      percents:ORTHOS.map(()=>0),
+      marksByDate:ORTHOS.map(()=>[]),
+      confidence:1
+    };
+  }
+  if(!Array.isArray(resultsByParcel[label].marksByDate)) resultsByParcel[label].marksByDate = ORTHOS.map(()=>[]);
+  if(!Array.isArray(resultsByParcel[label].counts)) resultsByParcel[label].counts = ORTHOS.map(()=>0);
+  return resultsByParcel[label];
+}
+
+function aplicarTreinoContinuoPendoamento(){
+  if(!ORTHOS.length){ alert('Importe uma ortofoto antes de aplicar o treino.'); return; }
+  if(gridRatios.length < 4){ alert('Defina e salve a grade antes de executar a análise de pendoamento.'); return; }
+  if(!Object.keys(resultsByParcel).length){ alert('Execute Análise de Pendoamento antes de aplicar o treino.'); return; }
+  const totalImages = Number(TRAIN_STATE?.total_images || 0);
+  const available = ORTHOS.reduce((sum, o) => sum + (Array.isArray(o.training_detections) ? o.training_detections.length : 0), 0);
+  if(totalImages <= 0 && available <= 0){
+    trainStatus.textContent = 'Sem mini imagens salvas. Clique em Treinar YOLO e marque pendões faltantes primeiro.';
+    return;
+  }
+  if(available <= 0){
+    trainStatus.textContent = 'Aplicar Treino não encontrou candidatos pré-carregados. Aguarde salvar as mini imagens e reabra o visualizador se necessário.';
+    return;
+  }
+  applyYoloTraining = true;
+  if(TRAIN_STATE) TRAIN_STATE.apply_training = true;
+  btnApplyTrainingYolo.classList.add('active');
+  showTrainingMarks = false;
+  yoloTrainMarks = [];
+  progressBar.style.width = '8%';
+  statusEl.textContent = 'Aplicando treino. Buscando padrões e analisando pendões semelhantes...';
+  trainStatus.textContent = 'Aplicando treino. Lendo histórico, mini imagens e características salvas na pasta.';
+  let added = 0;
+  let skipped = 0;
+  let outside = 0;
+  for(let i=0; i<ORTHOS.length; i++){
+    const detections = Array.isArray(ORTHOS[i].training_detections) ? ORTHOS[i].training_detections : [];
+    const dist = treinoDistanceThreshold(i);
+    for(const det of detections){
+      const x = Number(det.x);
+      const y = Number(det.y);
+      if(!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      let foundCell = null;
+      const R = Math.max(1, parseInt(CONFIG.rows || 1));
+      const C = Math.max(1, parseInt(CONFIG.cols || 1));
+      for(let r=0; r<R && !foundCell; r++){
+        for(let c=0; c<C; c++){
+          const poly = cellPoly(r,c,i);
+          if(poly && pointInPolygon(x,y,poly)){
+            foundCell = {r,c,label:cellLabel(r,c)};
+            break;
+          }
+        }
+      }
+      if(!foundCell){ outside++; continue; }
+      if(existingTrainingDuplicate(i, x, y, dist)){ skipped++; continue; }
+      const rec = ensureParcelRecord(foundCell.label, foundCell.r, foundCell.c);
+      const mark = {
+        x,
+        y,
+        score:Number(det.score || 0),
+        size:clamp(Number(det.size || 8), 6, 20),
+        area:Math.max(1, Number(det.area || det.size || 8)),
+        tipo:det.tipo || 'treino_continuo',
+        confianca:det.confianca || 'media',
+        source:'Aplicar Treino',
+        training_source:det.training_source || det.source || '',
+        yolo_conf:Number(det.yolo_conf || 0),
+        reference:det.reference || '',
+        template_score:Number(det.template_score || 0),
+        yellow_ratio:Number(det.yellow_ratio || 0),
+        texture_ratio:Number(det.texture_ratio || 0),
+        clear_ratio:Number(det.clear_ratio || 0),
+        green_ratio:Number(det.green_ratio || 0)
+      };
+      rec.marksByDate[i].push(mark);
+      rec.counts[i] = rec.marksByDate[i].length;
+      rec.confidence = Math.min(Number(rec.confidence || 1), 0.82);
+      added++;
+    }
+    progressBar.style.width = Math.round(((i + 1) / Math.max(1, ORTHOS.length)) * 100) + '%';
+  }
+  rebuildRows();
+  renderParcelCountTable();
+  persistViewerState();
+  const duplicateMsg = skipped ? ('Duplicidades ignoradas: ' + skipped + '.') : 'Nenhuma duplicidade encontrada.';
+  trainStatus.textContent =
+    'Novos pendões encontrados: ' + added + '. Atualizando parcelas. Recontagem concluída. ' + duplicateMsg;
+  statusEl.textContent =
+    'Recontagem concluída. Total final atualizado com Aplicar Treino: +' + added +
+    ' pendões · fora do grid ignorados: ' + outside + ' · ' + duplicateMsg;
+  drawAll();
+}
+
 function runChronologicalAnalysis(){
-  if(gridRatios.length < 4){ alert('Marque os 4 pontos do grid fixo primeiro.'); return; }
+  if(gridRatios.length < 4){ alert('Defina e salve a grade antes de executar a análise de pendoamento.'); return; }
   if(loaded < ORTHOS.length){ alert('Aguarde as ortofotos terminarem de carregar.'); return; }
   const R = Math.max(1, parseInt(CONFIG.rows || 1));
   const C = Math.max(1, parseInt(CONFIG.cols || 1));
   resultsByParcel = {};
   const preCount = ORTHOS.reduce((sum,o) => sum + (Array.isArray(o.advanced_detections) ? o.advanced_detections.length : 0), 0);
-  const modes = [...new Set(ORTHOS.map(o => o.detector_mode || 'OpenCV fallback'))].join(' + ');
-  statusEl.textContent = 'Analisando pendoamento com pipeline híbrido YOLO/OpenCV em ' + ORTHOS.length + ' ortofotos' + (preCount ? ' (' + preCount + ' centros pré-detectados · ' + modes + ').' : ' e fallback local.') ;
+  const modes = [...new Set(ORTHOS.map(o => o.detector_mode || 'OpenCV parametrizado TMG'))].join(' + ');
+  statusEl.textContent = 'Analisando pendoamento com OpenCV parametrizado dentro das parcelas do grid em ' + ORTHOS.length + ' ortofotos' + (preCount ? ' (' + preCount + ' centros pré-detectados · ' + modes + ').' : '.') ;
   progressBar.style.width = '0%';
   setTimeout(() => {
     let done = 0;
@@ -13271,7 +18116,15 @@ function runChronologicalAnalysis(){
     }
     progressBar.style.width = '100%';
     rebuildRows();
-    statusEl.textContent = 'Análise concluída. Parcelas processadas: ' + finalRows.length + '.';
+    renderParcelCountTable();
+    const sourceTotals = analysisSourceTotals();
+    const totalGeral = sourceTotals.yolo + sourceTotals.opencv + sourceTotals.refinado;
+    statusEl.textContent =
+      'Análise concluída. Total geral de pendões: ' + totalGeral +
+      ' · OpenCV: ' + sourceTotals.opencv +
+      ' · dentro do grid' +
+      ' · parcelas processadas: ' + finalRows.length + '.';
+    persistViewerState();
     drawAll();
     renderReviewPanel();
   }, 50);
@@ -13314,6 +18167,7 @@ function renderReviewPanel(){
     };
     rebuildRows();
     renderReviewPanel();
+    persistViewerState();
     drawAll();
     statusEl.textContent = 'Revisão salva para ' + label + '.';
   };
@@ -13385,9 +18239,11 @@ function drawMarks(idx=activeIdx){
     for(const m of marks){
       ctx.save();
       const s = clamp(Number(m.size || 7), 6, 20) / scale;
-      ctx.strokeStyle='#ff2020';
+      const src = String(m.source || '').toLowerCase();
+      const color = (src.includes('aplicar treino') || src.includes('treino')) ? '#2d8cff' : (src.includes('yolo') ? '#ff8c00' : (src.includes('refinamento') || src.includes('refer') ? '#2d8cff' : '#ff2020'));
+      ctx.strokeStyle=color;
       ctx.lineWidth=2/scale;
-      ctx.shadowColor='rgba(255,0,0,.65)';
+      ctx.shadowColor=color + 'aa';
       ctx.shadowBlur=5/scale;
       ctx.beginPath(); ctx.moveTo(m.x-s,m.y-s); ctx.lineTo(m.x+s,m.y+s); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(m.x-s,m.y+s); ctx.lineTo(m.x+s,m.y-s); ctx.stroke();
@@ -13397,13 +18253,14 @@ function drawMarks(idx=activeIdx){
 }
 
 function drawTrainingMarks(){
-  for(const mark of yoloTrainMarks){
+  if(!showTrainingMarks && !trainYoloMode && !deleteTrainingMode) return;
+  for(const mark of activeTrainingMarks()){
     if(mark.idx !== activeIdx) continue;
     ctx.save();
     const s = clamp(Number(mark.size || 128), 48, 256) / 2;
-    ctx.strokeStyle = mark.type === 'falso_positivo' ? '#ff55ff' : '#208cff';
+    ctx.strokeStyle = '#b45cff';
     ctx.lineWidth = 2.2 / scale;
-    ctx.shadowColor = 'rgba(32,140,255,.75)';
+    ctx.shadowColor = 'rgba(180,92,255,.78)';
     ctx.shadowBlur = 7 / scale;
     ctx.strokeRect(mark.x - s, mark.y - s, s * 2, s * 2);
     const xSize = clamp(s * 0.16, 6, 18) / scale;
@@ -13458,6 +18315,30 @@ function exportRows(rows, filename){
   a.href = URL.createObjectURL(blob);
   a.download = filename;
   a.click();
+}
+
+function exportParcelCSV(){
+  if(!Object.keys(resultsByParcel).length){ alert('Execute a análise antes de exportar.'); return; }
+  exportRows(buildActiveParcelRows(), 'pendoamento_parcelas.csv');
+}
+
+async function exportParcelExcel(){
+  if(!Object.keys(resultsByParcel).length){ alert('Execute a análise antes de exportar.'); return; }
+  if(typeof XLSX === 'undefined' && !(await ensureChronoExcel())){ alert('Biblioteca Excel não carregou. Tente novamente.'); return; }
+  if(!(await ensureChronoExcel())){ alert('Biblioteca de estilos do Excel não carregou. Tente novamente.'); return; }
+  const headers = ['Quadra','Parcela','Linha','Coluna','Quantidade_Pendoes'];
+  const rows = buildActiveParcelRows().map(row => {
+    const ordered = {};
+    headers.forEach(h => ordered[h] = row[h] ?? '');
+    return ordered;
+  });
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(rows, {header: headers});
+  ws['!autofilter'] = {ref: ws['!ref']};
+  ws['!freeze'] = {xSplit:0,ySplit:1};
+  ws['!cols'] = [{wch:18},{wch:14},{wch:10},{wch:10},{wch:20}];
+  XLSX.utils.book_append_sheet(wb, ws, 'Pendoamento');
+  XLSX.writeFile(wb, 'pendoamento_parcelas.xlsx');
 }
 
 function applyTemporalSheetStyle(ws){
@@ -13578,7 +18459,9 @@ function exportImage(){
       const marks = resultsByParcel[label].marksByDate ? (resultsByParcel[label].marksByDate[activeIdx] || []) : [];
       for(const m of marks){
         const s=7;
-        octx.strokeStyle='#ff2020'; octx.lineWidth=2;
+        const src = String(m.source || '').toLowerCase();
+        octx.strokeStyle = (src.includes('aplicar treino') || src.includes('treino')) ? '#2d8cff' : (src.includes('yolo') ? '#ff8c00' : (src.includes('refinamento') || src.includes('refer') ? '#2d8cff' : '#ff2020'));
+        octx.lineWidth=2;
         octx.beginPath(); octx.moveTo(m.x-s,m.y-s); octx.lineTo(m.x+s,m.y+s); octx.stroke();
         octx.beginPath(); octx.moveTo(m.x-s,m.y+s); octx.lineTo(m.x+s,m.y-s); octx.stroke();
       }
@@ -13605,6 +18488,14 @@ viewer.addEventListener('wheel', e => {
 
 viewer.addEventListener('mousedown', e => {
   const pt = screenToImg(e.clientX,e.clientY);
+  if(deleteTrainingMode){
+    if(pt.x < 0 || pt.y < 0 || pt.x > imgW(activeIdx) || pt.y > imgH(activeIdx)){
+      trainStatus.textContent = 'Clique sobre um X roxo dentro da ortofoto para excluir a amostra.';
+      return;
+    }
+    deleteTrainingSampleAt(pt);
+    return;
+  }
   if(trainYoloMode){
     if(pt.x < 0 || pt.y < 0 || pt.x > imgW(activeIdx) || pt.y > imgH(activeIdx)){
       trainStatus.textContent = 'Clique dentro da ortofoto para salvar a amostra.';
@@ -13632,6 +18523,7 @@ viewer.addEventListener('mousedown', e => {
     }
     resultsByParcel = {}; finalRows = []; fullRows = [];
     rebuildRows();
+    persistViewerState();
     drawAll();
     return;
   }
@@ -13673,8 +18565,14 @@ viewer.addEventListener('mousemove', e => {
     drawAll();
   }
 });
-viewer.addEventListener('mouseup', () => { dragging=false; gridDragPoint=-1; viewer.style.cursor='grab'; });
-viewer.addEventListener('mouseleave', () => { dragging=false; gridDragPoint=-1; viewer.style.cursor='grab'; });
+viewer.addEventListener('mouseup', () => {
+  if(gridDragPoint >= 0) persistViewerState();
+  dragging=false; gridDragPoint=-1; viewer.style.cursor='grab';
+});
+viewer.addEventListener('mouseleave', () => {
+  if(gridDragPoint >= 0) persistViewerState();
+  dragging=false; gridDragPoint=-1; viewer.style.cursor='grab';
+});
 
 btnMarkGrid.onclick = () => {
   markGridMode = !markGridMode;
@@ -13683,7 +18581,7 @@ btnMarkGrid.onclick = () => {
   btnReviewMode.classList.remove('active');
   if(markGridMode){
     gridRatios = [];
-    resultsByParcel = {}; finalRows = []; fullRows = [];
+    resultsByParcel = {}; finalRows = []; fullRows = []; parcelCountRows = [];
     rebuildRows();
     statusEl.textContent = 'Marque as 4 extremidades do grid na ortofoto.';
   }
@@ -13701,7 +18599,8 @@ btnAnalyzeChrono.onclick = runChronologicalAnalysis;
 btnFitChrono.onclick = fitView;
 btnClearChrono.onclick = () => {
   if(!confirm('Limpar grid, resultados e revisões deste seletor?')) return;
-  gridRatios=[]; selectedParcel=null; resultsByParcel={}; finalRows=[]; fullRows=[]; manualReviews={};
+  gridRatios=[]; selectedParcel=null; resultsByParcel={}; finalRows=[]; fullRows=[]; parcelCountRows=[]; manualReviews={};
+  try{ window.localStorage.removeItem(VIEWER_STATE_KEY); }catch(e){}
   progressBar.style.width='0%'; statusEl.textContent='Seletor limpo.';
   rebuildRows(); renderReviewPanel(); drawAll();
 };
@@ -13709,45 +18608,88 @@ btnPrevDate.onclick = () => setActiveDate(activeIdx - 1);
 btnNextDate.onclick = () => setActiveDate(activeIdx + 1);
 dateSelect.onchange = () => setActiveDate(Number(dateSelect.value));
 btnExportCSV.onclick = () => exportRows(finalRows, 'analise_cronologica_pendoamento.csv');
+btnExportParcelCSV.onclick = exportParcelCSV;
+btnExportParcelXLSX.onclick = exportParcelExcel;
 btnExportXLSX.onclick = exportExcel;
 btnExportResumo.onclick = exportResumo;
 btnExportCompleto.onclick = () => exportRows(fullRows, 'dados_completos_por_ortofoto.csv');
 btnExportImagem.onclick = exportImage;
 btnTrainYolo.onclick = () => {
   trainYoloMode = !trainYoloMode;
+  deleteTrainingMode = false;
+  showTrainingMarks = trainYoloMode || showTrainingMarks;
   markGridMode = false;
   reviewMode = false;
   btnTrainYolo.classList.toggle('active', trainYoloMode);
+  btnDeleteTrainMark.classList.remove('active');
   btnMarkGrid.classList.remove('active');
   btnReviewMode.classList.remove('active');
   trainStatus.textContent = trainYoloMode
-    ? 'Modo treino ativo: clique no pendão para salvar crop e label YOLO.'
+    ? 'Modo Treinar YOLO ativado. Clique exatamente sobre cada pendão faltante. Cada clique salva mini foto, label e características em ' + (TRAIN_STATE?.folder || 'dados_treinamento_yolo/pendoes') + '.'
     : 'Modo treino parado.';
+  drawAll();
+};
+btnApplyTrainingYolo.onclick = () => {
+  if(yoloSamples.length > 0){
+    trainStatus.textContent = 'Existem ' + yoloSamples.length + ' amostra(s) sendo salvas. Aguarde a confirmação ou clique em Encerrar Treinamento YOLO.';
+    return;
+  }
+  if(pendingTrainingRefresh){
+    trainStatus.textContent = 'Aplicando treino: recarregando referências salvas na pasta antes da recontagem...';
+    requestTrainingRefreshAndApply();
+    return;
+  }
+  aplicarTreinoContinuoPendoamento();
+};
+btnDeleteTrainMark.onclick = () => {
+  deleteTrainingMode = !deleteTrainingMode;
+  trainYoloMode = false;
+  showTrainingMarks = deleteTrainingMode || showTrainingMarks;
+  markGridMode = false;
+  reviewMode = false;
+  btnDeleteTrainMark.classList.toggle('active', deleteTrainingMode);
+  btnTrainYolo.classList.remove('active');
+  btnMarkGrid.classList.remove('active');
+  btnReviewMode.classList.remove('active');
+  trainStatus.textContent = deleteTrainingMode
+    ? 'Modo exclusão ativo: clique sobre o X roxo da amostra que deseja remover.'
+    : 'Modo exclusão parado.';
   drawAll();
 };
 btnStopTrainMode.onclick = () => {
   trainYoloMode = false;
+  deleteTrainingMode = false;
   btnTrainYolo.classList.remove('active');
-  trainStatus.textContent = 'Modo treino parado.';
+  btnDeleteTrainMark.classList.remove('active');
+  const pendingSamples = yoloSamples.map(sample => ({...sample}));
+  const total = currentTrainingTotal();
+  trainStatus.textContent = 'Encerrando treinamento YOLO. Conferindo ' + pendingSamples.length + ' mini imagem(ns), labels e características na pasta: ' + (TRAIN_STATE?.folder || 'dados_treinamento_yolo/pendoes') + '.';
+  sendTrainingPayload({action:'stop', token:'stop_' + Date.now(), total_images:total, samples:pendingSamples});
   drawAll();
-};
-btnPickTrainDir.onclick = pickTrainingDirectory;
-btnGenerateYaml.onclick = async () => {
-  if(!trainingDirHandle && !(await pickTrainingDirectory())) return;
-  try{
-    await generateYamlToTrainingDir();
-    trainStatus.textContent = 'data.yaml gerado na pasta de treinamento.';
-  }catch(e){
-    trainStatus.textContent = 'Falha ao gerar data.yaml: ' + e.message;
-  }
-};
-btnDownloadDataset.onclick = downloadYoloDataset;
-btnTrainModelYolo.onclick = () => {
-  trainStatus.textContent = 'Para treinar de verdade, salve as amostras na pasta e clique no botão Streamlit "Treinar modelo YOLO" abaixo/acima do visualizador.';
 };
 
 setupViewerConfigInputs();
 setupDates();
+restoreViewerState();
+try{
+  if(window.localStorage.getItem(VIEWER_STATE_KEY + '_auto_apply') === '1'){
+    window.localStorage.removeItem(VIEWER_STATE_KEY + '_auto_apply');
+    setTimeout(() => {
+      if(Object.keys(resultsByParcel).length && gridRatios.length >= 4){
+        aplicarTreinoContinuoPendoamento();
+      }
+    }, 450);
+  }
+}catch(e){}
+trainCropSize.value = TRAIN_STATE?.crop_default || trainCropSize.value || 128;
+btnTrainYolo.classList.toggle('active', trainYoloMode);
+btnApplyTrainingYolo.classList.toggle('active', applyYoloTraining);
+btnDeleteTrainMark.classList.remove('active');
+updateTrainPanelStatus(
+  trainYoloMode
+    ? 'Modo Treinar YOLO ativado. Clique exatamente sobre cada pendão faltante; cada clique salva mini foto e características.'
+    : (TRAIN_STATE?.last_summary || 'Modo treino parado. Clique em Treinar YOLO, marque os pendões faltantes e depois use Aplicar Treino.')
+);
 loadImages();
 rebuildRows();
 new ResizeObserver(() => drawAll()).observe(viewer);
@@ -13759,6 +18701,12 @@ new ResizeObserver(() => drawAll()).observe(viewer);
                         cron_html
                         .replace("__CRON_ORTHOS__", json.dumps(cron_orthos, ensure_ascii=False))
                         .replace("__CRON_CONFIG__", json.dumps(cron_config, ensure_ascii=False))
+                        .replace("__TRAIN_STATE__", json.dumps(cron_train_state, ensure_ascii=False))
+                        .replace("__DEPLOY_TRACK_BACKGROUND__", DEPLOY_BAR_THEME.get("track_background", "linear-gradient(180deg,#020e24,#061525)"))
+                        .replace("__DEPLOY_TRACK_BORDER__", DEPLOY_BAR_THEME.get("track_border", "rgba(0,229,255,.42)"))
+                        .replace("__DEPLOY_TRACK_SHADOW__", DEPLOY_BAR_THEME.get("track_shadow", "inset 0 3px 8px rgba(0,0,0,.68), 0 8px 18px rgba(0,0,0,.30), 0 0 14px rgba(0,229,255,.18)"))
+                        .replace("__DEPLOY_FILL_ACTIVE__", DEPLOY_BAR_THEME.get("fill_active", "linear-gradient(90deg,#00e5ff 0%,#0E3A70 48%,#00ff9d 100%)"))
+                        .replace("__DEPLOY_FILL_SHADOW__", DEPLOY_BAR_THEME.get("fill_shadow", "inset 0 1px 0 rgba(255,255,255,.46), 0 0 16px rgba(0,229,255,.56), 0 0 22px rgba(0,255,157,.22)"))
                     )
                     components.html(cron_html, height=870, scrolling=False)
             else:
@@ -13802,7 +18750,7 @@ new ResizeObserver(() => drawAll()).observe(viewer);
             qual_bytes, qual_name = _uploaded_ortho_bytes(qual_file)
 
             if qual_bytes:
-                with st.spinner("Carregando ortofoto..."):
+                with st.container():
                     qual_b64, qual_dims, qual_err, qual_spatial = processar_ortofoto(qual_bytes, qual_name)
 
                 if qual_err:
@@ -16052,6 +21000,421 @@ new ResizeObserver(()=>drawAll()).observe(vc);
     # FIM NOVO - VISUALIZADOR DE RESULTADOS
 
 _render_partner_mention_notifications()
+
+st.markdown("""
+<style>
+html body .main-header,
+html body .menu-3d-title,
+html body .cultura-title,
+html body .login-title,
+html body .cfg-panel-title,
+html body .vd-login-title,
+html body .vd-section-title,
+html body .partner-excel-title,
+html body .partner-toolbox-title,
+html body .partner-window-title,
+html body .partner-card-title,
+html body .partner-hero-title,
+html body .assessment-panel-title,
+html body div[data-testid="stMarkdownContainer"] h1,
+html body div[data-testid="stMarkdownContainer"] h2,
+html body div[data-testid="stMarkdownContainer"] h3,
+html body div[data-testid="stMarkdownContainer"] h4 {
+    -webkit-text-fill-color:#ffffff !important;
+    color:#ffffff !important;
+    text-shadow:
+        0 2px 0 rgba(0,0,0,.92),
+        0 6px 14px rgba(0,0,0,.62),
+        0 0 16px rgba(0,229,255,.50),
+        0 0 30px rgba(0,255,157,.18) !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown(f"""
+<style id="tmg-global-neon-components-final">
+html body div[data-testid="stTextInput"] [data-baseweb="input"],
+html body div[data-testid="stNumberInput"] [data-baseweb="input"],
+html body div[data-testid="stDateInput"] [data-baseweb="input"],
+html body div[data-testid="stTimeInput"] [data-baseweb="input"],
+html body div[data-testid="stTextArea"] textarea,
+html body div[data-testid="stSelectbox"] [data-baseweb="select"],
+html body div[data-testid="stMultiSelect"] [data-baseweb="select"] {{
+    min-height:34px !important;
+    border-radius:8px !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .72) !important;
+    background:
+        linear-gradient(120deg, rgba(255,255,255,.11), transparent 30%),
+        linear-gradient(145deg, rgba(2,14,36,.98), rgba(18,62,100,.86), rgba({THEME_PRIMARY_RGB}, .20)) !important;
+    box-shadow:
+        0 10px 24px rgba(0,0,0,.40),
+        0 0 20px rgba({THEME_PRIMARY_RGB}, .26),
+        inset 0 1px 0 rgba(255,255,255,.22),
+        inset 0 -6px 14px rgba(2,14,36,.48) !important;
+    color:#ffffff !important;
+    transition:all .30s ease !important;
+}}
+html body div[data-testid="stTextInput"] input,
+html body div[data-testid="stNumberInput"] input,
+html body div[data-testid="stDateInput"] input,
+html body div[data-testid="stTimeInput"] input,
+html body div[data-testid="stTextInput"] input[type="password"],
+html body div[data-testid="stTextInput"] input[type="text"],
+html body div[data-testid="stNumberInput"] input[type="number"],
+html body div[data-testid="stTextArea"] textarea,
+html body div[data-testid="stSelectbox"] [data-baseweb="select"] *,
+html body div[data-testid="stMultiSelect"] [data-baseweb="select"] * {{
+    background:transparent !important;
+    color:#ffffff !important;
+    -webkit-text-fill-color:#ffffff !important;
+    font-weight:800 !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.84), 0 0 10px rgba({THEME_PRIMARY_RGB}, .34) !important;
+}}
+html body div[data-testid="stTextInput"] [data-baseweb="input"]:hover,
+html body div[data-testid="stNumberInput"] [data-baseweb="input"]:hover,
+html body div[data-testid="stDateInput"] [data-baseweb="input"]:hover,
+html body div[data-testid="stTimeInput"] [data-baseweb="input"]:hover,
+html body div[data-testid="stTextArea"] textarea:hover,
+html body div[data-testid="stSelectbox"] [data-baseweb="select"]:hover,
+html body div[data-testid="stMultiSelect"] [data-baseweb="select"]:hover,
+html body div[data-testid="stTextInput"] [data-baseweb="input"]:focus-within,
+html body div[data-testid="stNumberInput"] [data-baseweb="input"]:focus-within,
+html body div[data-testid="stDateInput"] [data-baseweb="input"]:focus-within,
+html body div[data-testid="stTimeInput"] [data-baseweb="input"]:focus-within,
+html body div[data-testid="stTextArea"] textarea:focus,
+html body div[data-testid="stSelectbox"] [data-baseweb="select"]:focus-within,
+html body div[data-testid="stMultiSelect"] [data-baseweb="select"]:focus-within {{
+    border-color:var(--tmg-primary-soft) !important;
+    box-shadow:
+        0 12px 28px rgba(0,0,0,.46),
+        0 0 30px rgba({THEME_PRIMARY_RGB}, .46),
+        inset 0 1px 0 rgba(255,255,255,.32),
+        inset 0 -6px 14px rgba(2,14,36,.44) !important;
+}}
+html body div[data-testid="stTextInput"] input::placeholder,
+html body div[data-testid="stNumberInput"] input::placeholder,
+html body div[data-testid="stTextArea"] textarea::placeholder {{
+    color:rgba(224,247,255,.76) !important;
+    -webkit-text-fill-color:rgba(224,247,255,.76) !important;
+    opacity:1 !important;
+    font-weight:700 !important;
+}}
+html body div[data-testid="stTextInput"] input:-webkit-autofill,
+html body div[data-testid="stNumberInput"] input:-webkit-autofill,
+html body div[data-testid="stDateInput"] input:-webkit-autofill,
+html body div[data-testid="stTimeInput"] input:-webkit-autofill {{
+    -webkit-text-fill-color:#ffffff !important;
+    caret-color:var(--tmg-primary-soft) !important;
+    box-shadow:
+        0 0 0 1000px rgba(2,14,36,.96) inset,
+        0 10px 24px rgba(0,0,0,.40),
+        0 0 20px rgba({THEME_PRIMARY_RGB}, .26) !important;
+    transition:background-color 9999s ease-in-out 0s !important;
+}}
+html body div[data-testid="stTextInput"] input:disabled,
+html body div[data-testid="stNumberInput"] input:disabled,
+html body div[data-testid="stDateInput"] input:disabled,
+html body div[data-testid="stTimeInput"] input:disabled,
+html body div[data-testid="stTextArea"] textarea:disabled {{
+    color:rgba(255,255,255,.86) !important;
+    -webkit-text-fill-color:rgba(255,255,255,.86) !important;
+    opacity:1 !important;
+}}
+html body div[data-baseweb="popover"],
+html body div[data-baseweb="menu"],
+html body ul[role="listbox"] {{
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .58) !important;
+    border-radius:12px !important;
+    background:
+        linear-gradient(145deg, rgba(2,14,36,.98), rgba(18,62,100,.92), rgba({THEME_PRIMARY_RGB}, .18)) !important;
+    box-shadow:
+        0 16px 34px rgba(0,0,0,.54),
+        0 0 28px rgba({THEME_PRIMARY_RGB}, .32),
+        inset 0 1px 0 rgba(255,255,255,.18) !important;
+    color:#ffffff !important;
+}}
+html body div[data-baseweb="popover"] *,
+html body div[data-baseweb="menu"] *,
+html body ul[role="listbox"] * {{
+    color:#ffffff !important;
+    -webkit-text-fill-color:#ffffff !important;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown(f"""
+<style id="tmg-global-neon-system-final">
+html body,
+html body .stApp {{
+    background:
+        radial-gradient(circle at 14% 0%, rgba({THEME_PRIMARY_RGB}, .12), transparent 34%),
+        linear-gradient(135deg, #020e24 0%, #061525 48%, #0d2b45 100%) !important;
+    color:#ffffff !important;
+}}
+html body .block-container {{
+    color:#ffffff !important;
+}}
+html body ::selection {{
+    background:rgba({THEME_PRIMARY_RGB}, .44) !important;
+    color:#ffffff !important;
+}}
+html body ::-webkit-scrollbar {{
+    width:11px !important;
+    height:11px !important;
+}}
+html body ::-webkit-scrollbar-track {{
+    background:linear-gradient(180deg, #020e24, #071a2c) !important;
+    border-radius:999px !important;
+}}
+html body ::-webkit-scrollbar-thumb {{
+    background:linear-gradient(180deg, var(--tmg-primary-soft), var(--tmg-primary), var(--tmg-primary-dark)) !important;
+    border:2px solid #020e24 !important;
+    border-radius:999px !important;
+    box-shadow:0 0 14px rgba({THEME_PRIMARY_RGB}, .40) !important;
+}}
+html body ::-webkit-scrollbar-thumb:hover {{
+    box-shadow:0 0 20px rgba({THEME_PRIMARY_RGB}, .62) !important;
+}}
+html body [data-testid="stSidebar"],
+html body [data-testid="stSidebarContent"] {{
+    background:
+        radial-gradient(circle at 20% 0%, rgba({THEME_PRIMARY_RGB}, .18), transparent 38%),
+        linear-gradient(180deg, rgba(2,14,36,.98), rgba(7,26,53,.98) 52%, rgba(13,43,69,.96)) !important;
+    color:#ffffff !important;
+}}
+html body [data-testid="stSidebar"] * {{
+    color:#ffffff;
+}}
+html body header[data-testid="stHeader"],
+html body [data-testid="stToolbar"],
+html body [data-testid="stDecoration"] {{
+    color:#ffffff !important;
+}}
+html body div.stButton > button,
+html body div[data-testid="stDownloadButton"] button,
+html body button[kind],
+html body button[data-testid="baseButton-secondary"],
+html body button[data-testid="baseButton-primary"],
+html body button[data-testid="baseButton-minimal"] {{
+    border-radius:10px !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .68) !important;
+    background:
+        linear-gradient(120deg, rgba(255,255,255,.12), transparent 34%),
+        linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.84), rgba({THEME_PRIMARY_RGB}, .28)) !important;
+    color:#ffffff !important;
+    -webkit-text-fill-color:#ffffff !important;
+    font-weight:850 !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 10px rgba({THEME_PRIMARY_RGB}, .42) !important;
+    box-shadow:
+        0 10px 24px rgba(0,0,0,.38),
+        0 0 20px rgba({THEME_PRIMARY_RGB}, .26),
+        inset 0 1px 0 rgba(255,255,255,.22),
+        inset 0 -7px 14px rgba(2,14,36,.44) !important;
+    transition:all .30s ease !important;
+}}
+html body div.stButton > button:hover,
+html body div[data-testid="stDownloadButton"] button:hover,
+html body button[kind]:hover,
+html body button[data-testid="baseButton-secondary"]:hover,
+html body button[data-testid="baseButton-primary"]:hover,
+html body button[data-testid="baseButton-minimal"]:hover {{
+    transform:translateY(-1px) !important;
+    border-color:var(--tmg-primary-soft) !important;
+    box-shadow:
+        0 14px 30px rgba(0,0,0,.46),
+        0 0 32px rgba({THEME_PRIMARY_RGB}, .48),
+        inset 0 1px 0 rgba(255,255,255,.32),
+        inset 0 -7px 14px rgba(2,14,36,.38) !important;
+}}
+html body div.stButton > button:active,
+html body div[data-testid="stDownloadButton"] button:active,
+html body button[kind]:active {{
+    transform:translateY(1px) scale(.99) !important;
+}}
+html body div[data-testid="stFileUploader"],
+html body div[data-testid="stFileUploader"] section,
+html body div[data-testid="stFileUploaderDropzone"] {{
+    border-radius:14px !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .62) !important;
+    background:
+        radial-gradient(circle at 16% 0%, rgba({THEME_PRIMARY_RGB}, .20), transparent 44%),
+        linear-gradient(145deg, rgba(2,14,36,.94), rgba(18,62,100,.78), rgba({THEME_PRIMARY_RGB}, .16)) !important;
+    color:#ffffff !important;
+    box-shadow:
+        0 14px 28px rgba(0,0,0,.38),
+        0 0 22px rgba({THEME_PRIMARY_RGB}, .24),
+        inset 0 1px 0 rgba(255,255,255,.16) !important;
+}}
+html body div[data-testid="stFileUploader"] *,
+html body div[data-testid="stFileUploaderDropzone"] * {{
+    color:#ffffff !important;
+    -webkit-text-fill-color:#ffffff !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.80), 0 0 8px rgba({THEME_PRIMARY_RGB}, .30) !important;
+}}
+html body div[data-testid="stProgress"] > div {{
+    border-radius:999px !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .70) !important;
+    background:linear-gradient(180deg, #020e24, #071a2c) !important;
+    box-shadow:
+        inset 0 3px 8px rgba(0,0,0,.70),
+        0 0 18px rgba({THEME_PRIMARY_RGB}, .28) !important;
+}}
+html body div[data-testid="stProgress"] > div > div > div {{
+    border-radius:999px !important;
+    background:
+        linear-gradient(90deg, var(--tmg-primary-soft), var(--tmg-primary), #00ff9d) !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.42),
+        0 0 18px rgba({THEME_PRIMARY_RGB}, .58) !important;
+}}
+html body div[data-testid="stExpander"] {{
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .54) !important;
+    border-radius:12px !important;
+    background:
+        linear-gradient(145deg, rgba(2,14,36,.94), rgba(13,43,69,.82), rgba({THEME_PRIMARY_RGB}, .12)) !important;
+    box-shadow:
+        0 12px 26px rgba(0,0,0,.34),
+        0 0 20px rgba({THEME_PRIMARY_RGB}, .20),
+        inset 0 1px 0 rgba(255,255,255,.10) !important;
+    overflow:hidden !important;
+}}
+html body div[data-testid="stExpander"] summary,
+html body div[data-testid="stExpander"] summary * {{
+    color:#ffffff !important;
+    -webkit-text-fill-color:#ffffff !important;
+    font-weight:850 !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.86), 0 0 10px rgba({THEME_PRIMARY_RGB}, .34) !important;
+}}
+html body div[data-testid="stTabs"] [role="tablist"] {{
+    gap:8px !important;
+    border-bottom:1px solid rgba({THEME_PRIMARY_RGB}, .40) !important;
+}}
+html body div[data-testid="stTabs"] button[role="tab"] {{
+    border-radius:10px 10px 0 0 !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .42) !important;
+    background:
+        linear-gradient(145deg, rgba(2,14,36,.88), rgba(18,62,100,.62), rgba({THEME_PRIMARY_RGB}, .14)) !important;
+    color:#dffbff !important;
+    font-weight:800 !important;
+    box-shadow:0 0 14px rgba({THEME_PRIMARY_RGB}, .16), inset 0 1px 0 rgba(255,255,255,.12) !important;
+}}
+html body div[data-testid="stTabs"] button[aria-selected="true"] {{
+    background:
+        linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.84), rgba({THEME_PRIMARY_RGB}, .32)) !important;
+    color:#ffffff !important;
+    border-color:rgba({THEME_PRIMARY_RGB}, .78) !important;
+    box-shadow:0 0 24px rgba({THEME_PRIMARY_RGB}, .36), inset 0 1px 0 rgba(255,255,255,.22) !important;
+}}
+html body div[data-testid="stMetric"],
+html body div[data-testid="stAlert"],
+html body div[data-testid="stStatusWidget"],
+html body div[data-testid="stInfo"],
+html body div[data-testid="stSuccess"],
+html body div[data-testid="stWarning"],
+html body div[data-testid="stError"] {{
+    border-radius:12px !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .46) !important;
+    background:
+        linear-gradient(145deg, rgba(2,14,36,.93), rgba(13,43,69,.78), rgba({THEME_PRIMARY_RGB}, .12)) !important;
+    color:#ffffff !important;
+    box-shadow:
+        0 12px 24px rgba(0,0,0,.32),
+        0 0 18px rgba({THEME_PRIMARY_RGB}, .18),
+        inset 0 1px 0 rgba(255,255,255,.10) !important;
+}}
+html body div[data-testid="stMetric"] *,
+html body div[data-testid="stAlert"] *,
+html body div[data-testid="stStatusWidget"] *,
+html body div[data-testid="stInfo"] *,
+html body div[data-testid="stSuccess"] *,
+html body div[data-testid="stWarning"] *,
+html body div[data-testid="stError"] * {{
+    color:#ffffff !important;
+    -webkit-text-fill-color:#ffffff !important;
+}}
+html body div[data-testid="stDataFrame"],
+html body div[data-testid="stTable"],
+html body div[data-testid="stJson"],
+html body div[data-testid="stDataEditor"],
+html body .stDataFrame,
+html body .stTable {{
+    border-radius:14px !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .58) !important;
+    background:
+        radial-gradient(circle at 12% 0%, rgba({THEME_PRIMARY_RGB}, .18), transparent 42%),
+        linear-gradient(145deg, rgba(2,14,36,.96), rgba(13,43,69,.86), rgba({THEME_PRIMARY_RGB}, .12)) !important;
+    color:#ffffff !important;
+    box-shadow:
+        0 14px 30px rgba(0,0,0,.40),
+        0 0 24px rgba({THEME_PRIMARY_RGB}, .22),
+        inset 0 1px 0 rgba(255,255,255,.12) !important;
+    overflow:hidden !important;
+}}
+html body div[data-testid="stDataFrame"] *,
+html body div[data-testid="stTable"] *,
+html body div[data-testid="stJson"] *,
+html body div[data-testid="stDataEditor"] * {{
+    color:#ffffff !important;
+    border-color:rgba({THEME_PRIMARY_RGB}, .22) !important;
+}}
+html body table {{
+    color:#ffffff !important;
+    background:rgba(2,14,36,.72) !important;
+    border-color:rgba({THEME_PRIMARY_RGB}, .32) !important;
+}}
+html body thead,
+html body thead tr,
+html body th {{
+    background:
+        linear-gradient(145deg, rgba(18,62,100,.96), rgba({THEME_PRIMARY_RGB}, .30)) !important;
+    color:#ffffff !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.82), 0 0 8px rgba({THEME_PRIMARY_RGB}, .26) !important;
+}}
+html body tbody tr:nth-child(odd) {{
+    background:rgba(2,14,36,.52) !important;
+}}
+html body tbody tr:nth-child(even) {{
+    background:rgba(13,43,69,.44) !important;
+}}
+html body tbody tr:hover {{
+    background:rgba({THEME_PRIMARY_RGB}, .22) !important;
+    box-shadow:inset 3px 0 0 var(--tmg-primary-soft) !important;
+}}
+html body div[data-testid="stImage"],
+html body div[data-testid="stPlotlyChart"],
+html body div[data-testid="stPyplot"],
+html body iframe,
+html body canvas {{
+    border-radius:12px !important;
+}}
+html body div[data-testid="stImage"] img,
+html body div[data-testid="stPlotlyChart"],
+html body div[data-testid="stPyplot"],
+html body iframe {{
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .38) !important;
+    box-shadow:
+        0 14px 30px rgba(0,0,0,.34),
+        0 0 22px rgba({THEME_PRIMARY_RGB}, .16) !important;
+}}
+html body hr,
+html body [data-testid="stDivider"] {{
+    border-color:rgba({THEME_PRIMARY_RGB}, .34) !important;
+}}
+html body label,
+html body .stMarkdown,
+html body p,
+html body span {{
+    text-shadow:0 1px 0 rgba(0,0,0,.56);
+}}
+html body code,
+html body pre {{
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .40) !important;
+    border-radius:10px !important;
+    background:rgba(2,14,36,.82) !important;
+    color:#e8fbff !important;
+}}
+</style>
+""", unsafe_allow_html=True)
 
 # ==========================================
 # FOOTER[cite: 1]

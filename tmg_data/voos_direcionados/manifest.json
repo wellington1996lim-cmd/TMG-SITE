@@ -1,0 +1,12 @@
+{
+  "voos": [],
+  "orthos": [],
+  "grids": [],
+  "exports": [],
+  "history": [],
+  "config": {
+    "destino": "Diretório local",
+    "caminho": "C:\\Users\\wellingtonlima\\tmg_data\\voos_direcionados\\destinos\\local",
+    "usuario_padrao": "Operador"
+  }
+}

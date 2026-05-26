@@ -1,0 +1,5 @@
+path: dados_treinamento_yolo/pendao_milho
+train: images/train
+val: images/val
+names:
+  0: pendao

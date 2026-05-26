@@ -1,0 +1,26 @@
+[
+  {
+    "chat_id": "123__wellington",
+    "de": "Wellington",
+    "de_nome": "Wellington",
+    "para": "123",
+    "para_nome": "Acesso legado",
+    "mensagem": "OI",
+    "hora": "13:18",
+    "data": "12/05/2026",
+    "criado_em": "2026-05-12T13:18:06",
+    "lida": false
+  },
+  {
+    "chat_id": "123456__wellington",
+    "de": "Wellington",
+    "de_nome": "Wellington",
+    "para": "123456",
+    "para_nome": "123456",
+    "mensagem": "OIII",
+    "hora": "13:18",
+    "data": "12/05/2026",
+    "criado_em": "2026-05-12T13:18:15",
+    "lida": false
+  }
+]
