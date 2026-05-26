@@ -216,10 +216,53 @@ SYSTEM_CONFIG_PATH = SYSTEM_CONFIG_DIR / "system_config.json"
 # ==========================================
 # HELPER — ENCODE IMAGEM PARA BASE64 CSS[cite: 1]
 # ==========================================
+def _tmg_file_signature(path: Path) -> tuple[str, int, int]:
+    p = Path(path)
+    stat = p.stat()
+    return str(p.resolve()), int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))), int(stat.st_size)
+
+def _tmg_image_mime(path: Path) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix in (".jpg", ".jpeg"):
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    if suffix == ".gif":
+        return "image/gif"
+    if suffix == ".svg":
+        return "image/svg+xml"
+    return "image/png"
+
+@st.cache_data(show_spinner=False, max_entries=80)
+def _img_to_base64_css_cached(path_str: str, mtime_ns: int, size_bytes: int, mime: str) -> str:
+    del mtime_ns, size_bytes
+    data = base64.b64encode(Path(path_str).read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{data}"
+
 def _img_to_base64_css(path: Path) -> str:
-    with open(path, "rb") as f:
-        data = base64.b64encode(f.read()).decode()
-    return f"data:image/png;base64,{data}"
+    path_str, mtime_ns, size_bytes = _tmg_file_signature(path)
+    return _img_to_base64_css_cached(path_str, mtime_ns, size_bytes, _tmg_image_mime(Path(path_str)))
+
+@st.cache_data(show_spinner=False, max_entries=120)
+def _tmg_read_json_cached(path_str: str, mtime_ns: int, size_bytes: int):
+    del mtime_ns, size_bytes
+    return json.loads(Path(path_str).read_text(encoding="utf-8"))
+
+def _tmg_json_clone(data):
+    try:
+        return json.loads(json.dumps(data, ensure_ascii=False))
+    except Exception:
+        return data
+
+def _tmg_read_json_file(path: Path, default):
+    path = Path(path)
+    if not path.exists():
+        return _tmg_json_clone(default)
+    try:
+        path_str, mtime_ns, size_bytes = _tmg_file_signature(path)
+        return _tmg_read_json_cached(path_str, mtime_ns, size_bytes)
+    except Exception:
+        return _tmg_json_clone(default)
 
 def get_progress_color(progress: int | float) -> str:
     try:
@@ -504,10 +547,7 @@ def _load_system_config() -> dict:
     if not SYSTEM_CONFIG_PATH.exists():
         SYSTEM_CONFIG_PATH.write_text(json.dumps(default, indent=2, ensure_ascii=False), encoding="utf-8")
         return default
-    try:
-        data = json.loads(SYSTEM_CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        data = default
+    data = _tmg_read_json_file(SYSTEM_CONFIG_PATH, default)
     data.setdefault("database_dir", str(default_dir))
     data.setdefault("updated_at", "")
     data.setdefault("tema", "padrao")
@@ -598,14 +638,8 @@ def _default_deploy_bar_theme() -> dict:
 
 def _load_deploy_bar_theme() -> dict:
     default = _default_deploy_bar_theme()
-    try:
-        if DEPLOY_BAR_THEME_PATH.exists():
-            data = json.loads(DEPLOY_BAR_THEME_PATH.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                data = {}
-        else:
-            data = {}
-    except Exception:
+    data = _tmg_read_json_file(DEPLOY_BAR_THEME_PATH, {})
+    if not isinstance(data, dict):
         data = {}
     if data.get("theme") not in (None, default["theme"]):
         data = {}
@@ -1353,17 +1387,23 @@ def _auth_ensure_users() -> None:
     if not AUTH_USERS_PATH.exists():
         AUTH_USERS_PATH.write_text(json.dumps(_auth_default_users(), indent=2, ensure_ascii=False), encoding="utf-8")
         return
+    original_text = ""
+    try:
+        original_text = AUTH_USERS_PATH.read_text(encoding="utf-8")
+    except Exception:
+        original_text = ""
     data = _auth_load_users()
     users = data.setdefault("users", [])
+    changed = False
     if not any(str(u.get("usuario", "")).lower() == "wellington" for u in users):
         users.insert(0, _auth_default_users()["users"][0])
-    _auth_save_users(data)
+        changed = True
+    normalized_text = json.dumps(data, indent=2, ensure_ascii=False)
+    if changed or normalized_text != original_text:
+        AUTH_USERS_PATH.write_text(normalized_text, encoding="utf-8")
 
 def _auth_load_users() -> dict:
-    try:
-        data = json.loads(AUTH_USERS_PATH.read_text(encoding="utf-8")) if AUTH_USERS_PATH.exists() else _auth_default_users()
-    except Exception:
-        data = _auth_default_users()
+    data = _tmg_read_json_file(AUTH_USERS_PATH, _auth_default_users())
     data.setdefault("users", [])
     for user in data["users"]:
         user.setdefault("nome", user.get("usuario", "Usuário"))
@@ -1498,10 +1538,7 @@ def _chat_user_display(user: dict) -> str:
 
 def _chat_load_state() -> dict:
     CHAT_MESSAGES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        data = json.loads(CHAT_MESSAGES_PATH.read_text(encoding="utf-8")) if CHAT_MESSAGES_PATH.exists() else {}
-    except Exception:
-        data = {}
+    data = _tmg_read_json_file(CHAT_MESSAGES_PATH, {})
     if not isinstance(data, dict):
         data = {}
     data.setdefault("messages", [])
@@ -1869,10 +1906,7 @@ def _partners_ensure_storage() -> None:
 
 def _partners_load_state() -> dict:
     _partners_ensure_storage()
-    try:
-        state = json.loads(PARTNERS_STATE_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        state = _partners_default_state()
+    state = _tmg_read_json_file(PARTNERS_STATE_PATH, _partners_default_state())
     state.setdefault("partners", {})
     state.setdefault("history_general", [])
     for key in PARTNER_KEYS:
@@ -1943,12 +1977,9 @@ def _partners_logo_html(partner_key: str) -> str:
     label = _partner_label(partner_key)
     logo_path = _partners_logo_path(partner_key)
     if logo_path and logo_path.exists():
-        suffix = logo_path.suffix.lower()
-        mime = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/webp" if suffix == ".webp" else "image/png"
-        data = base64.b64encode(logo_path.read_bytes()).decode("ascii")
         return (
             "<div class='partner-logo-frame'>"
-            f"<img src='data:{mime};base64,{data}' alt='Logo {label}' class='partner-logo-img'>"
+            f"<img src='{_img_to_base64_css(logo_path)}' alt='Logo {label}' class='partner-logo-img'>"
             "</div>"
         )
     return f"<div class='partner-logo-frame partner-logo-empty'>LOGO {label}</div>"
