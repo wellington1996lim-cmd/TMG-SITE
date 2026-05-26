@@ -5190,6 +5190,70 @@ if not st.session_state.logged_in:
     <style>
     [data-testid="stSidebar"] { display: none !important; }
 
+    .login-mobile-btn {
+        position: fixed;
+        top: 18px;
+        right: 24px;
+        z-index: 9999;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 152px;
+        min-height: 42px;
+        padding: 10px 18px;
+        border-radius: 14px;
+        border: 1.5px solid rgba(120, 220, 255, .88);
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.18), transparent 30%),
+            linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.88), rgba(0,212,255,.30));
+        color: #ffffff !important;
+        font-family: 'Segoe UI', Arial, sans-serif;
+        font-size: .86rem;
+        font-weight: 900;
+        letter-spacing: .45px;
+        text-decoration: none !important;
+        text-shadow:
+            0 1px 0 rgba(0,0,0,.95),
+            0 0 10px rgba(0,212,255,.60);
+        box-shadow:
+            0 14px 28px rgba(0,0,0,.46),
+            0 0 0 1px rgba(255,255,255,.10),
+            0 0 24px rgba(0,212,255,.34),
+            inset 0 1px 0 rgba(255,255,255,.28),
+            inset 0 -10px 18px rgba(2,14,36,.42);
+        backdrop-filter: blur(12px) saturate(145%);
+        -webkit-backdrop-filter: blur(12px) saturate(145%);
+        transition: transform .25s ease, box-shadow .30s ease, border-color .30s ease, filter .30s ease;
+    }
+
+    .login-mobile-btn:hover {
+        transform: translateY(-2px);
+        border-color: rgba(178, 240, 255, .98);
+        color: #ffffff !important;
+        filter: brightness(1.10);
+        box-shadow:
+            0 18px 34px rgba(0,0,0,.55),
+            0 0 0 1px rgba(255,255,255,.16),
+            0 0 34px rgba(0,212,255,.54),
+            inset 0 1px 0 rgba(255,255,255,.36),
+            inset 0 -10px 18px rgba(2,14,36,.34);
+    }
+
+    .login-mobile-btn:active {
+        transform: translateY(1px) scale(.99);
+    }
+
+    @media (max-width: 720px) {
+        .login-mobile-btn {
+            top: 12px;
+            right: 12px;
+            min-width: 126px;
+            min-height: 38px;
+            padding: 8px 13px;
+            font-size: .76rem;
+        }
+    }
+
     .login-card {
         background: linear-gradient(160deg, #1c1c1c 0%, #111111 100%);
         border: 1px solid #2e2e2e;
@@ -5399,6 +5463,8 @@ if not st.session_state.logged_in:
     }
     </style>
     """, unsafe_allow_html=True)
+
+    st.markdown("<a class='login-mobile-btn' href='?mobile=1'>Versão Mobile</a>", unsafe_allow_html=True)
 
     _, col_mid, _ = st.columns([1.25, 0.9, 1.25])
 
