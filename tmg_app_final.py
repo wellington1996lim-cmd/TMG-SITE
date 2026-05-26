@@ -1158,9 +1158,168 @@ td {{
 tr:nth-child(odd) {{ background:rgba(2,14,36,.48) !important; }}
 tr:nth-child(even) {{ background:rgba(13,43,69,.38) !important; }}
 tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
+.tmg-viewer-runtime-loader {{
+  position:fixed;
+  inset:0;
+  z-index:2147483000;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:rgba(2,14,36,.76);
+  backdrop-filter:blur(8px) saturate(135%);
+  -webkit-backdrop-filter:blur(8px) saturate(135%);
+  opacity:1;
+  transition:opacity .35s ease;
+  pointer-events:none;
+}}
+.tmg-viewer-runtime-card {{
+  width:min(440px, calc(100vw - 36px));
+  padding:18px 20px;
+  border-radius:18px;
+  border:1px solid rgba({THEME_PRIMARY_RGB},.62);
+  background:
+    linear-gradient(120deg, rgba(255,255,255,.14), transparent 30%),
+    radial-gradient(circle at top left, rgba({THEME_PRIMARY_RGB},.24), transparent 42%),
+    linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.84), rgba({THEME_PRIMARY_RGB},.20));
+  box-shadow:
+    0 20px 44px rgba(0,0,0,.52),
+    0 0 34px rgba({THEME_PRIMARY_RGB},.34),
+    inset 0 1px 0 rgba(255,255,255,.24),
+    inset 0 -12px 22px rgba(2,14,36,.40);
+  color:#fff;
+  font-family:'Segoe UI', Arial, sans-serif;
+  text-align:center;
+}}
+.tmg-viewer-runtime-logo {{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:82px;
+  min-height:34px;
+  margin-bottom:10px;
+  color:#ffffff;
+  font-weight:950;
+  letter-spacing:4px;
+  text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba({THEME_PRIMARY_RGB},.62);
+}}
+.tmg-viewer-runtime-text {{
+  font-size:.88rem;
+  font-weight:900;
+  letter-spacing:.45px;
+  text-shadow:0 1px 0 rgba(0,0,0,.86), 0 0 12px rgba({THEME_PRIMARY_RGB},.42);
+}}
+.tmg-viewer-runtime-track {{
+  position:relative;
+  height:24px;
+  margin-top:13px;
+  border-radius:999px;
+  overflow:hidden;
+  border:1px solid rgba({THEME_PRIMARY_RGB},.58);
+  background:linear-gradient(180deg,#020e24,#071a2c);
+  box-shadow:inset 0 3px 8px rgba(0,0,0,.70), 0 0 18px rgba({THEME_PRIMARY_RGB},.28);
+}}
+.tmg-viewer-runtime-fill {{
+  width:8%;
+  height:100%;
+  border-radius:999px;
+  background:linear-gradient(90deg,var(--tmg-primary-soft),var(--tmg-primary),#00ff9d);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.46), 0 0 20px rgba({THEME_PRIMARY_RGB},.58);
+  transition:width .28s ease;
+}}
+.tmg-viewer-runtime-fill:after {{
+  content:"";
+  position:absolute;
+  inset:0;
+  background:linear-gradient(120deg, transparent 0%, rgba(255,255,255,.38) 45%, transparent 75%);
+  transform:translateX(-100%);
+  animation:tmgRuntimeShine 1.25s ease-in-out infinite;
+}}
+.tmg-viewer-runtime-percent {{
+  position:absolute;
+  inset:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color:#fff;
+  font-weight:950;
+  font-size:.78rem;
+  text-shadow:0 1px 4px rgba(0,0,0,.85);
+}}
+.tmg-viewer-runtime-status {{
+  margin-top:8px;
+  color:#dffbff;
+  font-size:.76rem;
+  font-weight:800;
+}}
+@keyframes tmgRuntimeShine {{
+  0% {{ transform:translateX(-100%); }}
+  100% {{ transform:translateX(180%); }}
+}}
 </style>
 <script id="tmg-embedded-viewer-loading-autohide">
 (function() {{
+  function ensureRuntimeLoader() {{
+    if (document.getElementById('tmg-viewer-runtime-loader')) return;
+    if (!document.body) return;
+    var loader = document.createElement('div');
+    loader.id = 'tmg-viewer-runtime-loader';
+    loader.className = 'tmg-viewer-runtime-loader';
+    loader.innerHTML =
+      '<div class="tmg-viewer-runtime-card">' +
+      '<div class="tmg-viewer-runtime-logo">TMG</div>' +
+      '<div class="tmg-viewer-runtime-text">Carregando visualizador...</div>' +
+      '<div class="tmg-viewer-runtime-track">' +
+      '<div class="tmg-viewer-runtime-fill"></div>' +
+      '<div class="tmg-viewer-runtime-percent">8%</div>' +
+      '</div>' +
+      '<div class="tmg-viewer-runtime-status">Preparando ortofoto e ferramentas...</div>' +
+      '</div>';
+    document.body.appendChild(loader);
+    var fill = loader.querySelector('.tmg-viewer-runtime-fill');
+    var pctEl = loader.querySelector('.tmg-viewer-runtime-percent');
+    var statusEl = loader.querySelector('.tmg-viewer-runtime-status');
+    var pct = 8;
+    function setPct(value, status) {{
+      pct = Math.max(0, Math.min(100, Math.round(value)));
+      if (fill) fill.style.width = pct + '%';
+      if (pctEl) pctEl.textContent = pct + '%';
+      if (status && statusEl) statusEl.textContent = status;
+    }}
+    setPct(12, 'Recebendo imagem no visualizador...');
+    loader.__tmgTimer = setInterval(function() {{
+      if (pct < 92) {{
+        setPct(pct + Math.max(1, Math.round((92 - pct) / 9)), pct < 55 ? 'Carregando ortofoto...' : 'Montando canvas e camadas...');
+      }}
+    }}, 260);
+    function allImagesReady() {{
+      try {{
+        var images = Array.prototype.slice.call(document.images || []);
+        return images.every(function(img) {{ return img.complete && img.naturalWidth !== 0; }});
+      }} catch(e) {{
+        return true;
+      }}
+    }}
+    function hideLoader() {{
+      if (loader.__tmgHidden) return;
+      loader.__tmgHidden = true;
+      clearInterval(loader.__tmgTimer);
+      setPct(100, 'Visualizador pronto.');
+      setTimeout(function() {{
+        loader.style.opacity = '0';
+        setTimeout(function() {{ loader.style.display = 'none'; }}, 380);
+      }}, 360);
+    }}
+    function waitReady() {{
+      if (document.readyState === 'complete' && allImagesReady()) {{
+        hideLoader();
+      }} else {{
+        setTimeout(waitReady, 180);
+      }}
+    }}
+    window.addEventListener('load', function() {{ setTimeout(waitReady, 80); }});
+    setTimeout(waitReady, 240);
+    setTimeout(hideLoader, 12000);
+  }}
   function setProgressVisibility(bar) {{
     if (!bar) return;
     var parent = bar.closest('.progress') || bar.parentElement;
@@ -1180,6 +1339,11 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
     document.querySelectorAll('.progress > div, [class*="progress"] > div').forEach(setProgressVisibility);
   }}
   try {{
+    if (document.readyState === 'loading') {{
+      document.addEventListener('DOMContentLoaded', ensureRuntimeLoader);
+    }} else {{
+      ensureRuntimeLoader();
+    }}
     scanProgress();
     new MutationObserver(scanProgress).observe(document.documentElement, {{attributes:true, childList:true, subtree:true, attributeFilter:['style','class']}});
   }} catch (e) {{}}
@@ -2492,14 +2656,14 @@ if SYSTEM_CONFIG.get("tema", "padrao") == "tmg_azul":
 # ==========================================
 # HELPER — PROCESSAR ORTOFOTO PARA VISUALIZAÇÃO[cite: 1]
 # ==========================================
-@st.cache_data(show_spinner=False, max_entries=12)
-def _processar_ortofoto_cached(
+def _processar_ortofoto_core(
     file_bytes: bytes,
     filename: str,
     preview_max_dim: int,
     preview_jpeg_quality: int,
     preview_max_payload_mb: int,
     preview_min_dim: int,
+    progress_callback=None,
 ):
     """Converte ortofotos para pré-visualização de alta qualidade no Streamlit.
 
@@ -2507,7 +2671,11 @@ def _processar_ortofoto_cached(
     e reduzindo a imagem somente para o tamanho seguro de navegação no browser.
     """
     def _set_progress(pct: int, message: str):
-        return None
+        if callable(progress_callback):
+            try:
+                progress_callback(pct, message)
+            except Exception:
+                pass
 
     ext = Path(filename).suffix.lower()
     img = None
@@ -2734,6 +2902,36 @@ def _processar_ortofoto_cached(
 
     return b64, img.size, None, spatial_meta
 
+@st.cache_data(show_spinner=False, max_entries=12)
+def _processar_ortofoto_cached(
+    file_bytes: bytes,
+    filename: str,
+    preview_max_dim: int,
+    preview_jpeg_quality: int,
+    preview_max_payload_mb: int,
+    preview_min_dim: int,
+):
+    return _processar_ortofoto_core(
+        file_bytes,
+        filename,
+        preview_max_dim,
+        preview_jpeg_quality,
+        preview_max_payload_mb,
+        preview_min_dim,
+        progress_callback=None,
+    )
+
+def _ortho_preview_cache_key(file_bytes: bytes, filename: str, params: tuple) -> str:
+    hasher = hashlib.sha1()
+    hasher.update(str(filename or "").encode("utf-8", errors="ignore"))
+    hasher.update(str(params).encode("utf-8", errors="ignore"))
+    if file_bytes:
+        hasher.update(str(len(file_bytes)).encode("ascii"))
+        hasher.update(file_bytes[:1024 * 1024])
+        if len(file_bytes) > 1024 * 1024:
+            hasher.update(file_bytes[-1024 * 1024:])
+    return hasher.hexdigest()
+
 def processar_ortofoto(file_bytes: bytes, filename: str):
     file_name = Path(filename or "ortofoto").name
     total_mb = (len(file_bytes or b"") / (1024 * 1024)) if file_bytes is not None else 0
@@ -2748,18 +2946,35 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         update_tmg_loading(loading_slot, pct, detail)
 
     try:
+        params = (preview_max_dim, preview_jpeg_quality, preview_max_payload_mb, preview_min_dim)
+        cache_key = _ortho_preview_cache_key(file_bytes or b"", file_name, params)
+        session_cache = st.session_state.setdefault("_tmg_ortho_preview_cache", {})
         _progress(6, f"Iniciando carregamento da ortofoto: {file_name}")
-        _progress(18, "Preparando cache e parâmetros de alta qualidade...")
-        _progress(32, f"Processando preview até {preview_max_dim}px com qualidade {preview_jpeg_quality}...")
-        result = _processar_ortofoto_cached(
-            file_bytes,
-            filename,
-            preview_max_dim,
-            preview_jpeg_quality,
-            preview_max_payload_mb,
-            preview_min_dim,
-        )
-        _progress(94, "Aplicando preview otimizado no visualizador...")
+        _progress(12, "Validando arquivo recebido pelo Streamlit...")
+        if cache_key in session_cache:
+            _progress(36, "Preview já processado nesta sessão. Reaproveitando alta qualidade...")
+            result = session_cache[cache_key]
+            _progress(86, "Restaurando ortofoto no visualizador...")
+        else:
+            _progress(18, "Preparando parâmetros de alta qualidade...")
+            _progress(26, f"Processando preview até {preview_max_dim}px com qualidade {preview_jpeg_quality}...")
+            result = _processar_ortofoto_core(
+                file_bytes,
+                filename,
+                preview_max_dim,
+                preview_jpeg_quality,
+                preview_max_payload_mb,
+                preview_min_dim,
+                progress_callback=_progress,
+            )
+            if result and not result[2]:
+                session_cache[cache_key] = result
+                if len(session_cache) > 8:
+                    for old_key in list(session_cache.keys())[:-8]:
+                        session_cache.pop(old_key, None)
+                st.session_state["_tmg_ortho_preview_cache"] = session_cache
+        _progress(94, "Entregando ortofoto ao visualizador...")
+        _progress(98, "Abrindo canvas e ferramentas do visualizador...")
         finish_tmg_loading_and_clear(loading_slot, "Ortofoto carregada com sucesso.")
         return result
     except Exception:
