@@ -5192,7 +5192,7 @@ if not st.session_state.logged_in:
 
     .login-mobile-btn {
         position: fixed;
-        top: 18px;
+        bottom: 18px;
         right: 24px;
         z-index: 9999;
         display: inline-flex;
@@ -5245,7 +5245,7 @@ if not st.session_state.logged_in:
 
     @media (max-width: 720px) {
         .login-mobile-btn {
-            top: 12px;
+            bottom: 12px;
             right: 12px;
             min-width: 126px;
             min-height: 38px;
