@@ -85,105 +85,22 @@ st.set_page_config(
 )
 
 st.markdown(
-    '<meta name="google" content="notranslate"><meta name="robots" content="notranslate">',
-    unsafe_allow_html=True
-)
-
-components.html(
     """
-<script>
-(function () {
-  function patchDomForTranslate(win) {
-    try {
-      if (!win || win.__tmgDomPatchInstalled || !win.Node || !win.Node.prototype) {
-        return;
+    <meta name="google" content="notranslate">
+    <meta name="robots" content="notranslate">
+    <style>
+      html, body, #root, .stApp, [data-testid="stAppViewContainer"] {
+        translate: no;
       }
-
-      const nodeProto = win.Node.prototype;
-      const nativeRemoveChild = nodeProto.removeChild;
-      const nativeInsertBefore = nodeProto.insertBefore;
-
-      nodeProto.removeChild = function (child) {
-        if (child && child.parentNode !== this) {
-          return child;
-        }
-        return nativeRemoveChild.call(this, child);
-      };
-
-      nodeProto.insertBefore = function (newNode, referenceNode) {
-        if (referenceNode && referenceNode.parentNode !== this) {
-          return this.appendChild(newNode);
-        }
-        return nativeInsertBefore.call(this, newNode, referenceNode);
-      };
-
-      Object.defineProperty(win, "__tmgDomPatchInstalled", {
-        value: true,
-        configurable: false,
-        writable: false
-      });
-    } catch (err) {
-      // Browser extensions and hosted iframes can block prototype access.
-    }
-  }
-
-  function protectOneDocument(doc) {
-    const root = doc.documentElement;
-    root.setAttribute("lang", "pt-BR");
-    root.setAttribute("translate", "no");
-    root.classList.add("notranslate");
-    root.classList.remove("translated-ltr", "translated-rtl");
-
-    if (doc.body) {
-      doc.body.setAttribute("translate", "no");
-      doc.body.classList.add("notranslate");
-      doc.body.classList.remove("translated-ltr", "translated-rtl");
-    }
-
-    doc.querySelectorAll("body, #root, .stApp, [data-testid='stAppViewContainer']").forEach((el) => {
-      el.setAttribute("translate", "no");
-      el.classList.add("notranslate");
-    });
-
-    if (!doc.head.querySelector('meta[name="google"][content="notranslate"]')) {
-      const meta = doc.createElement("meta");
-      meta.setAttribute("name", "google");
-      meta.setAttribute("content", "notranslate");
-      doc.head.appendChild(meta);
-    }
-
-    if (!doc.head.querySelector("#tmg-notranslate-style")) {
-      const style = doc.createElement("style");
-      style.id = "tmg-notranslate-style";
-      style.textContent = ".goog-te-banner-frame,.skiptranslate{display:none!important;}body{top:0!important;}";
-      doc.head.appendChild(style);
-    }
-  }
-
-  function protectDocument() {
-    try {
-      let current = window;
-      for (let i = 0; i < 4; i += 1) {
-        patchDomForTranslate(current);
-        protectOneDocument(current.document);
-        if (current === current.parent) {
-          break;
-        }
-        current = current.parent;
+      .goog-te-banner-frame, .skiptranslate {
+        display: none !important;
       }
-    } catch (err) {
-      // Cross-frame access can be blocked in some hosted contexts; the app still works without it.
-    }
-  }
-
-  protectDocument();
-  window.setTimeout(protectDocument, 500);
-  window.setTimeout(protectDocument, 2000);
-})();
-</script>
+      body {
+        top: 0 !important;
+      }
+    </style>
     """,
-    height=0,
-    width=0,
+    unsafe_allow_html=True
 )
 
 # ==========================================
@@ -469,7 +386,10 @@ def render_upload_status_tmg(progress=100, texto: str = "Carregamento concluído
 def clear_tmg_loading(container):
     try:
         if container is not None:
-            container.empty()
+            container.markdown(
+                "<div class='tmg-load-cleared' style='display:none;height:0;overflow:hidden'></div>",
+                unsafe_allow_html=True,
+            )
     except Exception:
         pass
 
@@ -11662,7 +11582,7 @@ def render_analise_marcacao_grid() -> None:
             render_loading_camadas(38, "Raster:", raster_file.name if raster_file else "", "Processando ortofoto...", loading_slot)
             raster, err = _gridmark_read_raster(raster_file)
             if err:
-                loading_slot.empty()
+                clear_tmg_loading(loading_slot)
                 st.error(err)
             else:
                 render_loading_camadas(82, "Raster:", raster.get("name", ""), "Gerando visualização...", loading_slot)
@@ -11692,7 +11612,7 @@ def render_analise_marcacao_grid() -> None:
                 st.session_state["gridmark_layers"].extend(layers_loaded)
                 st.success(f"{len(layers_loaded)} camada(s) vetorial(is) carregada(s).")
             else:
-                loading_slot.empty()
+                clear_tmg_loading(loading_slot)
         st.markdown("---")
         render_lista_camadas()
         if st.button("Limpar somente esta análise", key="gridmark_clear_all", use_container_width=True):
