@@ -2,6 +2,8 @@
 port = 8501
 headless = true
 maxUploadSize = 2048
+maxMessageSize = 2048
+enableWebsocketCompression = true
 enableXsrfProtection = true
 
 [browser]

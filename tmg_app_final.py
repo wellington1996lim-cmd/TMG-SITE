@@ -494,18 +494,22 @@ def _preview_max_dim() -> int:
     # Ajuste solicitado: visualização de ortofotos com mais qualidade no Streamlit.
     # Pode ser configurado por variável/secret TMG_PREVIEW_MAX_DIM.
     # Mantém compatibilidade com Streamlit Cloud evitando carregar a imagem original inteira no navegador.
-    return _int_setting("TMG_PREVIEW_MAX_DIM", 8192, 1024, 12000)
+    return _int_setting("TMG_PREVIEW_MAX_DIM", 10000, 2048, 14000)
 
 def _preview_jpeg_quality() -> int:
     # Qualidade alta para preservar detalhes de TIF/GeoTIFF/RGB no visualizador.
-    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 97, 70, 98)
+    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 98, 82, 98)
+
+def _preview_min_jpeg_quality() -> int:
+    # Piso de qualidade para evitar perda visual agressiva nas ortofotos grandes.
+    return _int_setting("TMG_PREVIEW_MIN_JPEG_QUALITY", 90, 70, 98)
 
 def _preview_max_payload_mb() -> int:
-    # Evita que o HTML do visualizador fique pesado demais para carregar no navegador.
-    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 10, 4, 80)
+    # Limite alto para preservar mais detalhes no preview sem alterar o arquivo original.
+    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 35, 8, 160)
 
 def _preview_min_dim() -> int:
-    return _int_setting("TMG_PREVIEW_MIN_DIM", 2048, 900, 4096)
+    return _int_setting("TMG_PREVIEW_MIN_DIM", 4096, 1200, 8192)
 
 def _upload_limit_mb() -> int:
     # Valor informativo mostrado na interface; o limite real do Streamlit Cloud é definido em .streamlit/config.toml.
@@ -2661,6 +2665,7 @@ def _processar_ortofoto_core(
     filename: str,
     preview_max_dim: int,
     preview_jpeg_quality: int,
+    preview_min_jpeg_quality: int,
     preview_max_payload_mb: int,
     preview_min_dim: int,
     progress_callback=None,
@@ -2690,6 +2695,8 @@ def _processar_ortofoto_core(
         "preview_width": 0,
         "preview_height": 0,
         "preview_quality": preview_jpeg_quality,
+        "preview_min_quality": preview_min_jpeg_quality,
+        "preview_mode": "alta_qualidade",
     }
 
     def _stretch_band(band):
@@ -2850,6 +2857,7 @@ def _processar_ortofoto_core(
     max_payload_bytes = preview_max_payload_mb * 1024 * 1024
     min_preview_dim = min(preview_min_dim, preview_max_dim)
     quality = preview_jpeg_quality
+    min_quality = min(preview_jpeg_quality, preview_min_jpeg_quality)
     preview_img = img
     buf = BytesIO()
 
@@ -2860,8 +2868,8 @@ def _processar_ortofoto_core(
             payload_size = buf.tell()
             if payload_size <= max_payload_bytes:
                 break
-            if quality > 82:
-                quality = max(82, quality - 5)
+            if quality > min_quality:
+                quality = max(min_quality, quality - 3)
                 continue
             current_max_dim = max(preview_img.size)
             if current_max_dim > min_preview_dim:
@@ -2872,10 +2880,7 @@ def _processar_ortofoto_core(
                 )
                 resample_filter = getattr(Image, 'Resampling', Image).LANCZOS
                 preview_img = preview_img.resize(new_size, resample_filter)
-                quality = min(quality, 90)
-                continue
-            if quality > 70:
-                quality = max(70, quality - 4)
+                quality = max(min_quality, min(quality, preview_jpeg_quality))
                 continue
             if current_max_dim > 1200:
                 scale = 0.85
@@ -2894,6 +2899,8 @@ def _processar_ortofoto_core(
     spatial_meta["preview_width"] = img.width
     spatial_meta["preview_height"] = img.height
     spatial_meta["preview_quality"] = quality
+    spatial_meta["preview_min_quality"] = min_quality
+    spatial_meta["preview_max_payload_mb"] = preview_max_payload_mb
     spatial_meta["preview_payload_mb"] = round(buf.tell() / (1024 * 1024), 2)
     if spatial_meta["orig_width"]:
         spatial_meta["ratio"] = img.width / spatial_meta["orig_width"]
@@ -2908,6 +2915,7 @@ def _processar_ortofoto_cached(
     filename: str,
     preview_max_dim: int,
     preview_jpeg_quality: int,
+    preview_min_jpeg_quality: int,
     preview_max_payload_mb: int,
     preview_min_dim: int,
 ):
@@ -2916,6 +2924,7 @@ def _processar_ortofoto_cached(
         filename,
         preview_max_dim,
         preview_jpeg_quality,
+        preview_min_jpeg_quality,
         preview_max_payload_mb,
         preview_min_dim,
         progress_callback=None,
@@ -2938,6 +2947,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
     loading_slot = st.empty()
     preview_max_dim = _preview_max_dim()
     preview_jpeg_quality = _preview_jpeg_quality()
+    preview_min_jpeg_quality = _preview_min_jpeg_quality()
     preview_max_payload_mb = _preview_max_payload_mb()
     preview_min_dim = _preview_min_dim()
 
@@ -2946,7 +2956,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         update_tmg_loading(loading_slot, pct, detail)
 
     try:
-        params = (preview_max_dim, preview_jpeg_quality, preview_max_payload_mb, preview_min_dim)
+        params = (preview_max_dim, preview_jpeg_quality, preview_min_jpeg_quality, preview_max_payload_mb, preview_min_dim)
         cache_key = _ortho_preview_cache_key(file_bytes or b"", file_name, params)
         session_cache = st.session_state.setdefault("_tmg_ortho_preview_cache", {})
         _progress(6, f"Iniciando carregamento da ortofoto: {file_name}")
@@ -2963,6 +2973,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                 filename,
                 preview_max_dim,
                 preview_jpeg_quality,
+                preview_min_jpeg_quality,
                 preview_max_payload_mb,
                 preview_min_dim,
                 progress_callback=_progress,
@@ -10451,6 +10462,7 @@ def carregar_preview_raster_otimizado(file_bytes: bytes, filename: str):
         filename,
         _preview_max_dim(),
         _preview_jpeg_quality(),
+        _preview_min_jpeg_quality(),
         _preview_max_payload_mb(),
         _preview_min_dim(),
     )
