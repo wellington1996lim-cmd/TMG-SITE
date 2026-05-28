@@ -1290,6 +1290,7 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
       if (status && statusEl) statusEl.textContent = status;
     }}
     setPct(12, 'Recebendo imagem no visualizador...');
+    var minReadyAt = Date.now() + 900;
     loader.__tmgTimer = setInterval(function() {{
       if (pct < 92) {{
         setPct(pct + Math.max(1, Math.round((92 - pct) / 9)), pct < 55 ? 'Carregando ortofoto...' : 'Montando canvas e camadas...');
@@ -1303,6 +1304,32 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
         return true;
       }}
     }}
+    function canvasHasContent(canvas) {{
+      try {{
+        if (!canvas || !canvas.width || !canvas.height) return false;
+        var ctx = canvas.getContext && canvas.getContext('2d', {{ willReadFrequently:true }});
+        if (!ctx) return false;
+        var w = canvas.width, h = canvas.height;
+        var points = [
+          [Math.floor(w * .50), Math.floor(h * .50)],
+          [Math.floor(w * .25), Math.floor(h * .25)],
+          [Math.floor(w * .75), Math.floor(h * .25)],
+          [Math.floor(w * .25), Math.floor(h * .75)],
+          [Math.floor(w * .75), Math.floor(h * .75)]
+        ];
+        for (var i = 0; i < points.length; i++) {{
+          var p = points[i];
+          var data = ctx.getImageData(Math.max(0, p[0]), Math.max(0, p[1]), 1, 1).data;
+          if (data[3] > 0 || data[0] > 8 || data[1] > 8 || data[2] > 8) return true;
+        }}
+      }} catch(e) {{}}
+      return false;
+    }}
+    function viewerHasContent() {{
+      var canvases = Array.prototype.slice.call(document.querySelectorAll('canvas') || []);
+      if (!canvases.length) return allImagesReady();
+      return canvases.some(canvasHasContent);
+    }}
     function hideLoader() {{
       if (loader.__tmgHidden) return;
       loader.__tmgHidden = true;
@@ -1314,7 +1341,7 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
       }}, 360);
     }}
     function waitReady() {{
-      if (document.readyState === 'complete' && allImagesReady()) {{
+      if (document.readyState === 'complete' && allImagesReady() && viewerHasContent() && Date.now() >= minReadyAt) {{
         hideLoader();
       }} else {{
         setTimeout(waitReady, 180);
@@ -1322,7 +1349,10 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
     }}
     window.addEventListener('load', function() {{ setTimeout(waitReady, 80); }});
     setTimeout(waitReady, 240);
-    setTimeout(hideLoader, 12000);
+    setTimeout(function() {{
+      setPct(96, 'Finalizando visualizador...');
+      hideLoader();
+    }}, 18000);
   }}
   function setProgressVisibility(bar) {{
     if (!bar) return;
@@ -1476,7 +1506,7 @@ PARTNER_ROW_ID = "__tmg_row_id"
 MENU_PERMISSION_OPTIONS = {
     "menu_checklist": "Checklist",
     "menu_grid": "Marcar Grid",
-    "menu_upload": "Upload",
+    "menu_upload": "Upload Azure Storage",
     "menu_bases": "Banco de Dados",
     "menu_sync": "Sincronizar",
     "menu_ortomosaicos": "Gerar Ortomosaico",
@@ -10248,6 +10278,104 @@ def render_webodm_iframe_panel() -> None:
     )
     components.iframe(iframe_url, height=900, scrolling=True)
 
+def janela_abrir_azure() -> None:
+    st.markdown(
+        """
+        <style>
+        .tmg-azure-card {
+            max-width: 980px;
+            margin: 18px auto 26px auto;
+            padding: 30px;
+            border-radius: 22px;
+            border: 1px solid rgba(0,229,255,.42);
+            background:
+                radial-gradient(circle at 18% 0%, rgba(0,229,255,.20), transparent 34%),
+                radial-gradient(circle at 85% 12%, rgba(255,140,0,.16), transparent 30%),
+                linear-gradient(145deg, rgba(4,15,29,.98), rgba(9,37,63,.94), rgba(15,18,25,.98));
+            box-shadow:
+                0 22px 48px rgba(0,0,0,.48),
+                0 0 34px rgba(0,229,255,.18),
+                inset 0 1px 0 rgba(255,255,255,.12),
+                inset 0 -18px 34px rgba(0,0,0,.20);
+            font-family: 'Segoe UI', Arial, sans-serif;
+            text-align: center;
+        }
+        .tmg-azure-title {
+            color: #ffffff;
+            font-size: 2rem;
+            font-weight: 950;
+            letter-spacing: 2px;
+            text-shadow:
+                2px 2px 0 rgba(0,0,0,.82),
+                0 0 22px rgba(0,229,255,.42),
+                0 0 18px rgba(255,140,0,.30);
+            margin-bottom: 8px;
+        }
+        .tmg-azure-desc {
+            color: #dffbff;
+            font-size: .96rem;
+            font-weight: 700;
+            line-height: 1.5;
+            max-width: 720px;
+            margin: 0 auto 22px auto;
+            text-shadow: 0 1px 0 rgba(0,0,0,.78);
+        }
+        .tmg-azure-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: min(100%, 360px);
+            min-height: 58px;
+            padding: 0 26px;
+            border-radius: 16px;
+            color: #ffffff !important;
+            text-decoration: none !important;
+            font-weight: 950;
+            letter-spacing: .7px;
+            border: 1px solid rgba(0,229,255,.68);
+            background:
+                linear-gradient(120deg, rgba(255,255,255,.16), transparent 30%),
+                linear-gradient(145deg, rgba(0,62,108,.98), rgba(0,152,190,.82), rgba(255,140,0,.28));
+            box-shadow:
+                0 14px 30px rgba(0,0,0,.44),
+                0 0 26px rgba(0,229,255,.34),
+                inset 0 1px 0 rgba(255,255,255,.22),
+                inset 0 -9px 18px rgba(2,14,36,.38);
+            transition: all .28s ease;
+        }
+        .tmg-azure-button:hover {
+            transform: translateY(-2px);
+            border-color: rgba(255,140,0,.82);
+            box-shadow:
+                0 18px 36px rgba(0,0,0,.52),
+                0 0 36px rgba(0,229,255,.48),
+                0 0 22px rgba(255,140,0,.22),
+                inset 0 1px 0 rgba(255,255,255,.28);
+        }
+        .tmg-azure-note {
+            margin-top: 18px;
+            color: rgba(255,255,255,.68);
+            font-size: .78rem;
+            font-weight: 700;
+        }
+        </style>
+        <div class="tmg-azure-card">
+            <div class="tmg-azure-title">☁️ Azure</div>
+            <div class="tmg-azure-desc">
+                Acesse o Azure Portal oficial em uma nova aba para trabalhar com seus recursos,
+                contas de armazenamento e serviços Microsoft Azure.
+            </div>
+            <a class="tmg-azure-button" href="https://portal.azure.com/" target="_blank" rel="noopener noreferrer">
+                🚀 Abrir Azure Portal
+            </a>
+            <div class="tmg-azure-note">
+                O Azure Portal é aberto fora do iframe porque a Microsoft bloqueia carregamento embutido por segurança.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 def _render_orthomosaic_generator() -> None:
     st.subheader("🛰️ Gerador de Ortomosaico")
     jobs_root = SYSTEM_DATABASE_DIR / "ortomosaicos_jobs"
@@ -12420,8 +12548,11 @@ with st.sidebar:
             if st.button("🗺️ Análise de Marcação de Grid", key="btn_analise_marcacao_grid"):
                 ir_para('AnaliseMarcacaoGrid')
 
-            if _auth_menu_allowed("menu_upload", current_user) and st.button("📤 Upload de Imagens", key="btn_upload"):
+            if _auth_menu_allowed("menu_upload", current_user) and st.button("📤 Upload Azure Storage", key="btn_upload"):
                 ir_para('Upload')
+
+            if _auth_menu_allowed("menu_upload", current_user) and st.button("☁️ Abrir Azure", key="btn_abrir_azure"):
+                ir_para('Azure')
 
             if _auth_menu_allowed("menu_bases", current_user) and st.button("🗂️ Banco de Dados Sistema", key="btn_bases"):
                 ir_para('Bases')
@@ -14528,7 +14659,7 @@ window.addEventListener('resize', resize);
     # UPLOAD COM SISTEMA DE TRANSFERÊNCIA INTELIGENTE[cite: 1]
     # ==========================================
     elif st.session_state.pagina_ativa == 'Upload':
-        st.subheader("📤 Central de Arquivos")
+        st.subheader("📤 Upload Azure Storage")
 
         st.info("Arraste e solte as imagens do experimento agrícola abaixo.")
 
@@ -14595,6 +14726,10 @@ window.addEventListener('resize', resize);
                 st.success(f"✅ Transferência concluída com sucesso!")
                 st.markdown(f"**Status:** {len(uploaded_files)} imagens salvas na pasta configurada: `{caminho_envio}`")
                 st.balloons()
+    # AZURE PORTAL OFICIAL
+    elif st.session_state.pagina_ativa == 'Azure':
+        janela_abrir_azure()
+
     # CONFIG[cite: 1]
     elif st.session_state.pagina_ativa == 'Config':
         st.subheader("⚙️ Painel Administrativo")
