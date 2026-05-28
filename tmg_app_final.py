@@ -1506,7 +1506,7 @@ PARTNER_ROW_ID = "__tmg_row_id"
 MENU_PERMISSION_OPTIONS = {
     "menu_checklist": "Checklist",
     "menu_grid": "Marcar Grid",
-    "menu_upload": "Upload Azure Storage",
+    "menu_upload": "Abrir Azure",
     "menu_bases": "Banco de Dados",
     "menu_sync": "Sincronizar",
     "menu_ortomosaicos": "Gerar Ortomosaico",
@@ -10278,7 +10278,55 @@ def render_webodm_iframe_panel() -> None:
     )
     components.iframe(iframe_url, height=900, scrolling=True)
 
+AZURE_STORAGE_EXPLORER_CANDIDATES = [
+    APP_ROOT / "Microsoft Azure Storage Explorer" / "StorageExplorer.exe",
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Microsoft Azure Storage Explorer" / "StorageExplorer.exe",
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Microsoft Azure Storage Explorer" / "Microsoft Azure Storage Explorer.exe",
+    Path(os.environ.get("PROGRAMFILES", "")) / "Microsoft Azure Storage Explorer" / "StorageExplorer.exe",
+    Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Microsoft Azure Storage Explorer" / "StorageExplorer.exe",
+]
+
+def _find_azure_storage_explorer() -> Path | None:
+    try:
+        cmd_path = shutil.which("StorageExplorer.exe") or shutil.which("Microsoft Azure Storage Explorer.exe")
+        if cmd_path and Path(cmd_path).exists():
+            return Path(cmd_path)
+    except Exception:
+        pass
+    for candidate in AZURE_STORAGE_EXPLORER_CANDIDATES:
+        try:
+            if candidate and candidate.exists():
+                return candidate
+        except Exception:
+            pass
+    return None
+
+def _open_azure_storage_explorer() -> tuple[bool, str]:
+    app_path = _find_azure_storage_explorer()
+    if not app_path:
+        expected = " | ".join(str(p) for p in AZURE_STORAGE_EXPLORER_CANDIDATES if str(p).strip())
+        return False, f"Microsoft Azure Storage Explorer não encontrado. Caminhos verificados: {expected}"
+    try:
+        subprocess.Popen(
+            [str(app_path)],
+            cwd=str(app_path.parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+        )
+        return True, f"Azure Storage Explorer aberto: {app_path}"
+    except Exception as exc:
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(str(app_path))
+                return True, f"Azure Storage Explorer aberto: {app_path}"
+        except Exception:
+            pass
+        return False, f"Não foi possível abrir o Azure Storage Explorer: {exc}"
+
 def janela_abrir_azure() -> None:
+    azure_path = _find_azure_storage_explorer()
+    azure_path_text = str(azure_path) if azure_path else "Microsoft Azure Storage Explorer não encontrado automaticamente."
     st.markdown(
         """
         <style>
@@ -10358,23 +10406,40 @@ def janela_abrir_azure() -> None:
             font-size: .78rem;
             font-weight: 700;
         }
+        .tmg-azure-path {
+            margin: 16px auto 20px auto;
+            max-width: 760px;
+            padding: 10px 12px;
+            border-radius: 12px;
+            border: 1px solid rgba(0,229,255,.24);
+            background: rgba(4,15,29,.52);
+            color: #dffbff;
+            font-size: .78rem;
+            font-weight: 750;
+            word-break: break-word;
+            text-shadow: 0 1px 0 rgba(0,0,0,.72);
+        }
         </style>
         <div class="tmg-azure-card">
             <div class="tmg-azure-title">☁️ Azure</div>
             <div class="tmg-azure-desc">
-                Acesse o Azure Portal oficial em uma nova aba para trabalhar com seus recursos,
-                contas de armazenamento e serviços Microsoft Azure.
+                Abra o Microsoft Azure Storage Explorer instalado nesta máquina para trabalhar
+                com suas contas, containers e arquivos do Azure Storage.
             </div>
-            <a class="tmg-azure-button" href="https://portal.azure.com/" target="_blank" rel="noopener noreferrer">
-                🚀 Abrir Azure Portal
-            </a>
+            <div class="tmg-azure-path">Aplicativo: __AZURE_STORAGE_EXPLORER_PATH__</div>
             <div class="tmg-azure-note">
-                O Azure Portal é aberto fora do iframe porque a Microsoft bloqueia carregamento embutido por segurança.
+                O aplicativo nativo abre fora do navegador, mantendo esta janela integrada no tema do sistema.
             </div>
         </div>
-        """,
+        """.replace("__AZURE_STORAGE_EXPLORER_PATH__", html.escape(azure_path_text)),
         unsafe_allow_html=True,
     )
+    if st.button("🚀 Abrir Azure Storage Explorer", key="btn_launch_azure_storage_explorer", use_container_width=True):
+        ok, msg = _open_azure_storage_explorer()
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
 
 def _render_orthomosaic_generator() -> None:
     st.subheader("🛰️ Gerador de Ortomosaico")
@@ -12548,9 +12613,6 @@ with st.sidebar:
             if st.button("🗺️ Análise de Marcação de Grid", key="btn_analise_marcacao_grid"):
                 ir_para('AnaliseMarcacaoGrid')
 
-            if _auth_menu_allowed("menu_upload", current_user) and st.button("📤 Upload Azure Storage", key="btn_upload"):
-                ir_para('Upload')
-
             if _auth_menu_allowed("menu_upload", current_user) and st.button("☁️ Abrir Azure", key="btn_abrir_azure"):
                 ir_para('Azure')
 
@@ -14659,7 +14721,7 @@ window.addEventListener('resize', resize);
     # UPLOAD COM SISTEMA DE TRANSFERÊNCIA INTELIGENTE[cite: 1]
     # ==========================================
     elif st.session_state.pagina_ativa == 'Upload':
-        st.subheader("📤 Upload Azure Storage")
+        st.subheader("📤 Central de Arquivos")
 
         st.info("Arraste e solte as imagens do experimento agrícola abaixo.")
 
