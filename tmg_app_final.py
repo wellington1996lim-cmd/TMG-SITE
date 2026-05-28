@@ -10300,6 +10300,7 @@ AZURE_STORAGE_EXPLORER_QUICK_ACCESS_LINK = (
     f"&serviceEndpoint={quote(AZURE_STORAGE_SERVICE_ENDPOINT, safe='')}"
     f"&subscriptionId={AZURE_STORAGE_SUBSCRIPTION_ID}"
 )
+AZURE_STORAGE_CONFIG_PATH = SYSTEM_CONFIG_DIR / "config_azure_storage.json"
 
 def _azure_storage_explorer_direct_link() -> str:
     return AZURE_STORAGE_EXPLORER_QUICK_ACCESS_LINK
@@ -10354,6 +10355,272 @@ def _open_azure_storage_explorer_path() -> tuple[bool, str]:
         if ok:
             return True, f"Storage Explorer aberto. Selecione o container {AZURE_STORAGE_CONTAINER_NAME}. Detalhe: {exc}"
         return False, f"Não foi possível abrir o caminho dentro do Storage Explorer. {fallback_msg}"
+
+def _normalize_azure_sas_token(token: str) -> str:
+    token = (token or "").strip()
+    if token.startswith("?"):
+        token = token[1:]
+    return token
+
+def _load_azure_storage_config() -> dict:
+    default = {"sas_token": "", "prefix": "", "recursive": False}
+    try:
+        if not AZURE_STORAGE_CONFIG_PATH.exists():
+            return default
+        data = _tmg_read_json_file(AZURE_STORAGE_CONFIG_PATH, default)
+        if not isinstance(data, dict):
+            return default
+        return {**default, **data}
+    except Exception:
+        return default
+
+def _save_azure_storage_config(sas_token: str, prefix: str, recursive: bool) -> None:
+    AZURE_STORAGE_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    AZURE_STORAGE_CONFIG_PATH.write_text(
+        json.dumps(
+            {
+                "sas_token": _normalize_azure_sas_token(sas_token),
+                "prefix": (prefix or "").strip().strip("/"),
+                "recursive": bool(recursive),
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+def _format_azure_size(value) -> str:
+    try:
+        size = float(value or 0)
+    except Exception:
+        return "-"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    idx = 0
+    while size >= 1024 and idx < len(units) - 1:
+        size /= 1024
+        idx += 1
+    if idx == 0:
+        return f"{int(size)} {units[idx]}"
+    return f"{size:.2f} {units[idx]}"
+
+def _list_azure_storage_paths(sas_token: str, prefix: str = "", recursive: bool = False, max_results: int = 500) -> tuple[bool, str, list[dict]]:
+    sas_token = _normalize_azure_sas_token(sas_token)
+    prefix = (prefix or "").strip().strip("/")
+    if not sas_token:
+        return False, "Informe um SAS/token com permissão de leitura/listagem para visualizar os arquivos dentro do app.", []
+
+    params = [
+        "resource=filesystem",
+        f"recursive={'true' if recursive else 'false'}",
+        f"maxResults={int(max_results)}",
+    ]
+    if prefix:
+        params.append(f"directory={quote(prefix, safe='/')}")
+    dfs_url = f"{AZURE_STORAGE_SERVICE_ENDPOINT}{AZURE_STORAGE_CONTAINER_NAME}?{'&'.join(params)}&{sas_token}"
+    headers = {"x-ms-version": "2021-12-02"}
+    try:
+        response = requests.get(dfs_url, headers=headers, timeout=35)
+        if response.ok:
+            payload = response.json()
+            rows = []
+            for item in payload.get("paths", []):
+                name = item.get("name") or ""
+                rows.append(
+                    {
+                        "Nome": Path(name).name or name,
+                        "Caminho": name,
+                        "Tipo": "Pasta" if str(item.get("isDirectory", "")).lower() == "true" else "Arquivo",
+                        "Tamanho": _format_azure_size(item.get("contentLength")),
+                        "Modificado": item.get("lastModified") or "-",
+                    }
+                )
+            return True, f"{len(rows)} item(ns) carregado(s) do Azure.", rows
+        last_error = f"ADLS retornou {response.status_code}: {response.text[:220]}"
+    except Exception as exc:
+        last_error = f"Erro ADLS: {exc}"
+
+    try:
+        import xml.etree.ElementTree as ET
+
+        blob_endpoint = f"https://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/"
+        blob_params = [
+            "restype=container",
+            "comp=list",
+            f"maxresults={int(max_results)}",
+        ]
+        if prefix:
+            blob_params.append(f"prefix={quote(prefix, safe='/')}")
+        if not recursive:
+            blob_params.append("delimiter=/")
+        blob_url = f"{blob_endpoint}{AZURE_STORAGE_CONTAINER_NAME}?{'&'.join(blob_params)}&{sas_token}"
+        response = requests.get(blob_url, timeout=35)
+        if not response.ok:
+            return False, f"Não foi possível listar dentro do app. {last_error} | Blob retornou {response.status_code}.", []
+
+        root = ET.fromstring(response.text)
+        rows = []
+        for prefix_node in root.findall(".//BlobPrefix"):
+            name = (prefix_node.findtext("Name") or "").strip("/")
+            rows.append({"Nome": Path(name).name or name, "Caminho": name, "Tipo": "Pasta", "Tamanho": "-", "Modificado": "-"})
+        for blob_node in root.findall(".//Blob"):
+            name = blob_node.findtext("Name") or ""
+            rows.append(
+                {
+                    "Nome": Path(name).name or name,
+                    "Caminho": name,
+                    "Tipo": "Arquivo",
+                    "Tamanho": _format_azure_size(blob_node.findtext("Properties/Content-Length")),
+                    "Modificado": blob_node.findtext("Properties/Last-Modified") or "-",
+                }
+            )
+        return True, f"{len(rows)} item(ns) carregado(s) do Azure.", rows
+    except Exception as exc:
+        return False, f"Não foi possível montar a visualização Azure dentro do app: {exc}", []
+
+def _render_azure_embedded_storage_viewer() -> None:
+    config = _load_azure_storage_config()
+    st.markdown(
+        """
+        <style>
+        .tmg-azure-inner-window {
+            margin: 24px auto 10px auto;
+            padding: 20px;
+            border-radius: 20px;
+            border: 1px solid rgba(0,229,255,.34);
+            background:
+                radial-gradient(circle at 18% 0%, rgba(0,229,255,.16), transparent 32%),
+                linear-gradient(145deg, rgba(4,15,29,.96), rgba(8,38,64,.86), rgba(4,15,29,.98));
+            box-shadow:
+                0 18px 38px rgba(0,0,0,.42),
+                0 0 28px rgba(0,229,255,.18),
+                inset 0 1px 0 rgba(255,255,255,.10);
+            color: #ffffff;
+        }
+        .tmg-azure-inner-title {
+            color: #ffffff;
+            font-size: 1.18rem;
+            font-weight: 950;
+            letter-spacing: 1px;
+            text-align: center;
+            text-shadow: 2px 2px 0 rgba(0,0,0,.75), 0 0 20px rgba(0,229,255,.34);
+            margin-bottom: 8px;
+        }
+        .tmg-azure-inner-note {
+            color: #dffbff;
+            font-size: .82rem;
+            font-weight: 750;
+            text-align: center;
+            margin-bottom: 16px;
+            text-shadow: 0 1px 0 rgba(0,0,0,.72);
+        }
+        .tmg-azure-table-wrap {
+            max-height: 520px;
+            overflow: auto;
+            border-radius: 14px;
+            border: 1px solid rgba(0,229,255,.22);
+            box-shadow: inset 0 0 24px rgba(0,229,255,.08);
+        }
+        .tmg-azure-table {
+            width: 100%;
+            border-collapse: collapse;
+            color: #ffffff;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: .82rem;
+        }
+        .tmg-azure-table th {
+            position: sticky;
+            top: 0;
+            background: linear-gradient(145deg, rgba(4,25,48,.98), rgba(0,130,170,.82));
+            color: #ffffff;
+            padding: 10px;
+            text-align: left;
+            text-shadow: 0 1px 0 rgba(0,0,0,.82);
+            border-bottom: 1px solid rgba(0,229,255,.32);
+        }
+        .tmg-azure-table td {
+            padding: 9px 10px;
+            border-bottom: 1px solid rgba(255,255,255,.08);
+            background: rgba(255,255,255,.035);
+            word-break: break-word;
+        }
+        .tmg-azure-table tr:hover td {
+            background: rgba(0,229,255,.12);
+        }
+        </style>
+        <div class="tmg-azure-inner-window">
+            <div class="tmg-azure-inner-title">Janela Azure integrada no sistema</div>
+            <div class="tmg-azure-inner-note">
+                Visualize a pasta 2025-2026 dentro do app usando um SAS/token com permissão de leitura e listagem.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    azure_cols = st.columns([2, 1, 1])
+    with azure_cols[0]:
+        sas_token = st.text_input(
+            "SAS/token para visualizar dentro do app",
+            value=config.get("sas_token", ""),
+            type="password",
+            key="azure_storage_sas_token",
+            help="Cole o SAS da conta/container com permissão de leitura e listagem. Pode começar com ? ou sem ?.",
+        )
+    with azure_cols[1]:
+        prefix = st.text_input("Pasta/filtro", value=config.get("prefix", ""), key="azure_storage_prefix")
+    with azure_cols[2]:
+        recursive = st.checkbox("Listar subpastas", value=bool(config.get("recursive", False)), key="azure_storage_recursive")
+
+    action_cols = st.columns([1, 1, 2])
+    with action_cols[0]:
+        salvar = st.button("💾 Salvar acesso Azure", key="btn_save_azure_storage_config", use_container_width=True)
+    with action_cols[1]:
+        atualizar = st.button("🔄 Atualizar janela Azure", key="btn_refresh_azure_storage_view", use_container_width=True)
+
+    if salvar:
+        _save_azure_storage_config(sas_token, prefix, recursive)
+        st.success("Acesso Azure salvo nesta pasta do sistema.")
+
+    if atualizar or bool(_normalize_azure_sas_token(config.get("sas_token", ""))):
+        with st.spinner("Carregando janela Azure dentro do app..."):
+            ok, msg, rows = _list_azure_storage_paths(sas_token or config.get("sas_token", ""), prefix, recursive)
+        if ok:
+            st.success(msg)
+            if rows:
+                table_rows = []
+                for row in rows[:500]:
+                    table_rows.append(
+                        "<tr>"
+                        f"<td>{html.escape(str(row.get('Tipo', '-')))}</td>"
+                        f"<td>{html.escape(str(row.get('Nome', '-')))}</td>"
+                        f"<td>{html.escape(str(row.get('Tamanho', '-')))}</td>"
+                        f"<td>{html.escape(str(row.get('Modificado', '-')))}</td>"
+                        f"<td>{html.escape(str(row.get('Caminho', '-')))}</td>"
+                        "</tr>"
+                    )
+                st.markdown(
+                    """
+                    <div class="tmg-azure-table-wrap">
+                    <table class="tmg-azure-table">
+                        <thead>
+                            <tr><th>Tipo</th><th>Nome</th><th>Tamanho</th><th>Modificado</th><th>Caminho</th></tr>
+                        </thead>
+                        <tbody>
+                    """
+                    + "\n".join(table_rows)
+                    + """
+                        </tbody>
+                    </table>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.info("A pasta foi acessada, mas nenhum item foi encontrado nesse caminho/filtro.")
+        else:
+            st.warning(msg)
+            st.caption("A janela nativa do Azure Storage Explorer não pode ser embutida no navegador do Streamlit; para visualização interna, o app precisa de SAS/token.")
 
 def janela_abrir_azure() -> None:
     azure_path = _find_azure_storage_explorer()
@@ -10502,6 +10769,7 @@ def janela_abrir_azure() -> None:
                 st.success(msg)
             else:
                 st.error(msg)
+    _render_azure_embedded_storage_viewer()
 
 def _render_orthomosaic_generator() -> None:
     st.subheader("🛰️ Gerador de Ortomosaico")
