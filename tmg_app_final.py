@@ -9974,13 +9974,13 @@ def _orthomosaic_render_viewer(path: Path) -> None:
             st.info("Não foi possível gerar a prévia no navegador. O arquivo continua disponível para download.")
 
 WEBODM_CONFIG_PATH = SYSTEM_CONFIG_DIR / "config_webodm.json"
-WEBODM_DEFAULT_URL = "http://localhost:8000"
+WEBODM_DEFAULT_URL = "http://localhost:8000/dashboard/"
 
 def _normalize_webodm_url(url: str) -> str:
     value = str(url or "").strip() or WEBODM_DEFAULT_URL
     if not value.lower().startswith(("http://", "https://")):
         value = "http://" + value
-    return value.rstrip("/")
+    return value
 
 def get_webodm_url_config() -> str:
     try:
@@ -10167,7 +10167,6 @@ def render_webodm_iframe_panel() -> None:
 
 def _render_orthomosaic_generator() -> None:
     st.subheader("🛰️ Gerador de Ortomosaico")
-    st.info("O Streamlit prepara o projeto, registra no SQLite e abre o VS Code. O processamento pesado fica no Docker/WebODM local.")
     jobs_root = SYSTEM_DATABASE_DIR / "ortomosaicos_jobs"
     default_output = SYSTEM_DATABASE_DIR / "ortomosaicos"
     jobs_root.mkdir(parents=True, exist_ok=True)
@@ -10181,6 +10180,7 @@ def _render_orthomosaic_generator() -> None:
             st.session_state["show_webodm_panel"] = True
     if st.session_state.get("show_webodm_panel"):
         render_webodm_iframe_panel()
+    return
 
     files = st.file_uploader(
         "Anexar imagens/fotos do voo ou ortomosaico base",
