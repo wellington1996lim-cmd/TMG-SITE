@@ -9973,6 +9973,156 @@ def _orthomosaic_render_viewer(path: Path) -> None:
         except Exception:
             st.info("Não foi possível gerar a prévia no navegador. O arquivo continua disponível para download.")
 
+WEBODM_CONFIG_PATH = SYSTEM_CONFIG_DIR / "config_webodm.json"
+WEBODM_DEFAULT_URL = "http://localhost:8000"
+
+def _normalize_webodm_url(url: str) -> str:
+    value = str(url or "").strip() or WEBODM_DEFAULT_URL
+    if not value.lower().startswith(("http://", "https://")):
+        value = "http://" + value
+    return value.rstrip("/")
+
+def get_webodm_url_config() -> str:
+    try:
+        if not WEBODM_CONFIG_PATH.exists():
+            save_webodm_url_config(WEBODM_DEFAULT_URL)
+        data = _tmg_read_json_file(WEBODM_CONFIG_PATH, {"webodm_url": WEBODM_DEFAULT_URL})
+        return _normalize_webodm_url(data.get("webodm_url", WEBODM_DEFAULT_URL))
+    except Exception:
+        return WEBODM_DEFAULT_URL
+
+def save_webodm_url_config(webodm_url: str) -> str:
+    url = _normalize_webodm_url(webodm_url)
+    try:
+        SYSTEM_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        WEBODM_CONFIG_PATH.write_text(
+            json.dumps({"webodm_url": url}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    return url
+
+def render_webodm_iframe_panel() -> None:
+    default_url = get_webodm_url_config()
+    if "webodm_iframe_url" not in st.session_state:
+        st.session_state["webodm_iframe_url"] = default_url
+
+    st.markdown(
+        """
+        <style>
+        .tmg-webodm-shell {
+            margin: 18px 0 22px 0;
+            padding: 22px;
+            border-radius: 18px;
+            border: 1px solid rgba(255,140,0,.46);
+            background:
+                radial-gradient(circle at top left, rgba(255,140,0,.18), transparent 30%),
+                linear-gradient(145deg, rgba(9,22,38,.96), rgba(18,20,26,.98));
+            box-shadow:
+                0 18px 38px rgba(0,0,0,.42),
+                inset 0 1px 0 rgba(255,255,255,.10),
+                0 0 24px rgba(255,140,0,.16);
+            font-family: 'Segoe UI', Arial, sans-serif;
+        }
+        .tmg-webodm-title {
+            color: #fff;
+            font-size: 1.45rem;
+            font-weight: 900;
+            letter-spacing: 1.5px;
+            text-shadow:
+                2px 2px 0 #000,
+                0 0 18px rgba(255,140,0,.45),
+                0 0 28px rgba(66,165,245,.22);
+            margin-bottom: 4px;
+        }
+        .tmg-webodm-subtitle {
+            color: #dcecff;
+            font-size: .92rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+        .tmg-webodm-note {
+            color: rgba(255,255,255,.72);
+            font-size: .78rem;
+            margin-top: 8px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid rgba(66,165,245,.25);
+            background: rgba(8,16,28,.56);
+        }
+        .tmg-webodm-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            min-height: 45px;
+            border-radius: 12px;
+            text-decoration: none !important;
+            color: #fff !important;
+            font-weight: 900;
+            letter-spacing: .4px;
+            border: 1px solid rgba(0,229,255,.68);
+            background: linear-gradient(145deg, rgba(10,36,58,.98), rgba(0,130,160,.82));
+            box-shadow:
+                0 10px 22px rgba(0,0,0,.35),
+                inset 0 1px 0 rgba(255,255,255,.18),
+                0 0 18px rgba(0,229,255,.34);
+            transition: all .25s ease;
+        }
+        .tmg-webodm-link:hover {
+            transform: translateY(-2px);
+            box-shadow:
+                0 14px 28px rgba(0,0,0,.44),
+                inset 0 1px 0 rgba(255,255,255,.22),
+                0 0 26px rgba(0,229,255,.52);
+        }
+        .tmg-webodm-frame-wrap {
+            margin-top: 14px;
+            padding: 8px;
+            border-radius: 16px;
+            border: 1px solid rgba(66,165,245,.34);
+            background: linear-gradient(145deg, rgba(4,12,22,.95), rgba(12,30,48,.92));
+            box-shadow: inset 0 0 20px rgba(0,229,255,.08), 0 12px 30px rgba(0,0,0,.32);
+        }
+        </style>
+        <div class="tmg-webodm-shell">
+            <div class="tmg-webodm-title">Gerador WebODM TMG</div>
+            <div class="tmg-webodm-subtitle">WebODM integrado ao sistema</div>
+            <div class="tmg-webodm-note">
+                Para funcionar, o WebODM precisa estar rodando localmente ou em um servidor acessível pela URL informada.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    url_value = st.text_input(
+        "URL do WebODM",
+        value=st.session_state.get("webodm_iframe_url", default_url) or WEBODM_DEFAULT_URL,
+        key="webodm_url_input",
+        help="Exemplo: http://localhost:8000, http://127.0.0.1:8000 ou http://meu-servidor-webodm:8000",
+    )
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button("Atualizar Janela WebODM", key="webodm_update_frame", use_container_width=True):
+            st.session_state["webodm_iframe_url"] = save_webodm_url_config(url_value)
+            st.success(f"URL WebODM atualizada: {st.session_state['webodm_iframe_url']}")
+    with c2:
+        open_url = _normalize_webodm_url(st.session_state.get("webodm_iframe_url", url_value))
+        st.markdown(
+            f"<a class='tmg-webodm-link' href='{html.escape(open_url, quote=True)}' target='_blank' rel='noopener noreferrer'>Abrir em nova guia</a>",
+            unsafe_allow_html=True,
+        )
+
+    iframe_url = _normalize_webodm_url(st.session_state.get("webodm_iframe_url", url_value))
+    st.caption(f"Janela atual: {iframe_url}")
+    st.markdown(
+        "<div class='tmg-webodm-frame-wrap' style='color:#fff;font-weight:800;'>Janela WebODM integrada abaixo</div>",
+        unsafe_allow_html=True,
+    )
+    components.iframe(iframe_url, height=900, scrolling=True)
+
 def _render_orthomosaic_generator() -> None:
     st.subheader("🛰️ Gerador de Ortomosaico")
     st.info("O Streamlit prepara o projeto, registra no SQLite e abre o VS Code. O processamento pesado fica no Docker/WebODM local.")
@@ -9980,6 +10130,18 @@ def _render_orthomosaic_generator() -> None:
     default_output = SYSTEM_DATABASE_DIR / "ortomosaicos"
     jobs_root.mkdir(parents=True, exist_ok=True)
     default_output.mkdir(parents=True, exist_ok=True)
+
+    if "show_webodm_panel" not in st.session_state:
+        st.session_state["show_webodm_panel"] = False
+    webodm_cols = st.columns([1, 1, 2])
+    with webodm_cols[0]:
+        if st.button("🌐 Gerador WebODM", key="ortho_open_webodm_panel", use_container_width=True):
+            st.session_state["show_webodm_panel"] = True
+    with webodm_cols[1]:
+        if st.session_state.get("show_webodm_panel") and st.button("Fechar WebODM", key="ortho_close_webodm_panel", use_container_width=True):
+            st.session_state["show_webodm_panel"] = False
+    if st.session_state.get("show_webodm_panel"):
+        render_webodm_iframe_panel()
 
     files = st.file_uploader(
         "Anexar imagens/fotos do voo ou ortomosaico base",
