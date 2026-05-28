@@ -494,22 +494,22 @@ def _preview_max_dim() -> int:
     # Ajuste solicitado: visualização de ortofotos com mais qualidade no Streamlit.
     # Pode ser configurado por variável/secret TMG_PREVIEW_MAX_DIM.
     # Mantém compatibilidade com Streamlit Cloud evitando carregar a imagem original inteira no navegador.
-    return _int_setting("TMG_PREVIEW_MAX_DIM", 10000, 2048, 14000)
+    return _int_setting("TMG_PREVIEW_MAX_DIM", 9000, 2048, 14000)
 
 def _preview_jpeg_quality() -> int:
     # Qualidade alta para preservar detalhes de TIF/GeoTIFF/RGB no visualizador.
-    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 98, 82, 98)
+    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 96, 82, 98)
 
 def _preview_min_jpeg_quality() -> int:
     # Piso de qualidade para evitar perda visual agressiva nas ortofotos grandes.
-    return _int_setting("TMG_PREVIEW_MIN_JPEG_QUALITY", 90, 70, 98)
+    return _int_setting("TMG_PREVIEW_MIN_JPEG_QUALITY", 88, 70, 98)
 
 def _preview_max_payload_mb() -> int:
     # Limite alto para preservar mais detalhes no preview sem alterar o arquivo original.
-    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 35, 8, 160)
+    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 28, 8, 160)
 
 def _preview_min_dim() -> int:
-    return _int_setting("TMG_PREVIEW_MIN_DIM", 4096, 1200, 8192)
+    return _int_setting("TMG_PREVIEW_MIN_DIM", 3600, 1200, 8192)
 
 def _upload_limit_mb() -> int:
     # Valor informativo mostrado na interface; o limite real do Streamlit Cloud é definido em .streamlit/config.toml.
@@ -2757,7 +2757,8 @@ def _processar_ortofoto_core(
                 spatial_meta["preview_width"] = out_width
                 spatial_meta["preview_height"] = out_height
 
-                resampling_filter = getattr(Resampling, "lanczos", Resampling.bilinear)
+                # Cúbico mantém boa nitidez visual e é mais rápido que Lanczos em ortofotos grandes.
+                resampling_filter = getattr(Resampling, "cubic", Resampling.bilinear)
                 bands = int(src.count)
 
                 if bands >= 3:
@@ -2837,10 +2838,10 @@ def _processar_ortofoto_core(
 
     def _save_preview_jpeg(pil_img, jpeg_quality):
         save_options = [
-            {"subsampling": 0, "optimize": True, "progressive": True},
-            {"subsampling": 0, "optimize": True, "progressive": False},
+            {"subsampling": 0, "optimize": False, "progressive": False},
             {"subsampling": 1, "optimize": False, "progressive": False},
             {"subsampling": 2, "optimize": False, "progressive": False},
+            {"subsampling": 0, "optimize": True, "progressive": False},
         ]
         last_error = None
         for options in save_options:
@@ -2941,6 +2942,81 @@ def _ortho_preview_cache_key(file_bytes: bytes, filename: str, params: tuple) ->
             hasher.update(file_bytes[-1024 * 1024:])
     return hasher.hexdigest()
 
+ORTHO_PREVIEW_CACHE_DIR = SYSTEM_DATABASE_DIR / "ortho_preview_cache"
+
+def _ortho_preview_disk_paths(cache_key: str) -> tuple[Path, Path]:
+    safe_key = re.sub(r"[^a-fA-F0-9]+", "", str(cache_key or ""))[:64] or "preview"
+    return ORTHO_PREVIEW_CACHE_DIR / f"{safe_key}.jpg", ORTHO_PREVIEW_CACHE_DIR / f"{safe_key}.json"
+
+def _cleanup_ortho_preview_disk_cache(max_files: int = 36, max_bytes: int = 900 * 1024 * 1024) -> None:
+    try:
+        ORTHO_PREVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        files = sorted(
+            [p for p in ORTHO_PREVIEW_CACHE_DIR.glob("*.jpg") if p.is_file()],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        total = 0
+        keep = []
+        for path in files:
+            try:
+                total += path.stat().st_size
+                keep.append(path)
+            except Exception:
+                pass
+        for idx, path in enumerate(keep):
+            if idx >= max_files or total > max_bytes:
+                try:
+                    size = path.stat().st_size
+                    path.unlink(missing_ok=True)
+                    path.with_suffix(".json").unlink(missing_ok=True)
+                    total -= size
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+def _read_ortho_preview_disk_cache(cache_key: str):
+    jpg_path, meta_path = _ortho_preview_disk_paths(cache_key)
+    try:
+        if not jpg_path.exists() or not meta_path.exists():
+            return None
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        data = jpg_path.read_bytes()
+        if not data:
+            return None
+        spatial_meta = meta.get("spatial_meta") or {}
+        dims = tuple(meta.get("dims") or (spatial_meta.get("preview_width", 0), spatial_meta.get("preview_height", 0)))
+        if len(dims) != 2 or not all(int(v) > 0 for v in dims):
+            return None
+        b64 = base64.b64encode(data).decode("ascii")
+        try:
+            now = time.time()
+            os.utime(jpg_path, (now, now))
+            os.utime(meta_path, (now, now))
+        except Exception:
+            pass
+        return b64, (int(dims[0]), int(dims[1])), None, spatial_meta
+    except Exception:
+        return None
+
+def _write_ortho_preview_disk_cache(cache_key: str, result) -> None:
+    try:
+        if not result or result[2] or not result[0]:
+            return
+        jpg_path, meta_path = _ortho_preview_disk_paths(cache_key)
+        ORTHO_PREVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        jpg_path.write_bytes(base64.b64decode(result[0]))
+        meta = {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "dims": list(result[1] or (0, 0)),
+            "spatial_meta": result[3] or {},
+        }
+        meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        _cleanup_ortho_preview_disk_cache()
+    except Exception:
+        pass
+
 def processar_ortofoto(file_bytes: bytes, filename: str):
     file_name = Path(filename or "ortofoto").name
     total_mb = (len(file_bytes or b"") / (1024 * 1024)) if file_bytes is not None else 0
@@ -2966,18 +3042,25 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
             result = session_cache[cache_key]
             _progress(86, "Restaurando ortofoto no visualizador...")
         else:
-            _progress(18, "Preparando parâmetros de alta qualidade...")
-            _progress(26, f"Processando preview até {preview_max_dim}px com qualidade {preview_jpeg_quality}...")
-            result = _processar_ortofoto_core(
-                file_bytes,
-                filename,
-                preview_max_dim,
-                preview_jpeg_quality,
-                preview_min_jpeg_quality,
-                preview_max_payload_mb,
-                preview_min_dim,
-                progress_callback=_progress,
-            )
+            _progress(18, "Buscando preview otimizado salvo na pasta do sistema...")
+            disk_result = _read_ortho_preview_disk_cache(cache_key)
+            if disk_result:
+                result = disk_result
+                _progress(78, "Preview salvo encontrado. Abrindo ortofoto sem reprocessar...")
+            else:
+                _progress(22, "Preparando parâmetros de alta qualidade...")
+                _progress(30, f"Processando preview até {preview_max_dim}px com qualidade {preview_jpeg_quality}...")
+                result = _processar_ortofoto_core(
+                    file_bytes,
+                    filename,
+                    preview_max_dim,
+                    preview_jpeg_quality,
+                    preview_min_jpeg_quality,
+                    preview_max_payload_mb,
+                    preview_min_dim,
+                    progress_callback=_progress,
+                )
+                _write_ortho_preview_disk_cache(cache_key, result)
             if result and not result[2]:
                 session_cache[cache_key] = result
                 if len(session_cache) > 8:
@@ -2986,7 +3069,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                 st.session_state["_tmg_ortho_preview_cache"] = session_cache
         _progress(94, "Entregando ortofoto ao visualizador...")
         _progress(98, "Abrindo canvas e ferramentas do visualizador...")
-        finish_tmg_loading_and_clear(loading_slot, "Ortofoto carregada com sucesso.")
+        finish_tmg_loading_and_clear(loading_slot, "Ortofoto carregada com sucesso.", hold_seconds=0.08)
         return result
     except Exception:
         clear_tmg_loading(loading_slot)
