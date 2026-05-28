@@ -10003,37 +10003,76 @@ def save_webodm_url_config(webodm_url: str) -> str:
         pass
     return url
 
+def _webodm_logo_html() -> str:
+    try:
+        if LOGO_PATH.exists():
+            return f"<img class='tmg-webodm-logo-img' src='{_img_to_base64_css(LOGO_PATH)}' alt='TMG'>"
+    except Exception:
+        pass
+    return "<div class='tmg-webodm-logo-fallback'>TMG</div>"
+
 def render_webodm_iframe_panel() -> None:
     default_url = get_webodm_url_config()
     if "webodm_iframe_url" not in st.session_state:
         st.session_state["webodm_iframe_url"] = default_url
+    logo_html = _webodm_logo_html()
 
     st.markdown(
         """
         <style>
         .tmg-webodm-shell {
             margin: 18px 0 22px 0;
-            padding: 22px;
-            border-radius: 18px;
-            border: 1px solid rgba(255,140,0,.46);
+            padding: 24px;
+            border-radius: 20px;
+            border: 1px solid rgba(0,229,255,.48);
             background:
-                radial-gradient(circle at top left, rgba(255,140,0,.18), transparent 30%),
-                linear-gradient(145deg, rgba(9,22,38,.96), rgba(18,20,26,.98));
+                radial-gradient(circle at 50% 0%, rgba(0,229,255,.22), transparent 34%),
+                radial-gradient(circle at top left, rgba(255,140,0,.15), transparent 28%),
+                linear-gradient(145deg, rgba(6,18,34,.98), rgba(12,37,59,.94), rgba(15,18,25,.98));
             box-shadow:
                 0 18px 38px rgba(0,0,0,.42),
-                inset 0 1px 0 rgba(255,255,255,.10),
-                0 0 24px rgba(255,140,0,.16);
+                inset 0 1px 0 rgba(255,255,255,.12),
+                inset 0 -18px 34px rgba(0,0,0,.18),
+                0 0 28px rgba(0,229,255,.18),
+                0 0 22px rgba(255,140,0,.14);
             font-family: 'Segoe UI', Arial, sans-serif;
+            text-align: center;
+        }
+        .tmg-webodm-logo-box {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 72px;
+            margin-bottom: 12px;
+        }
+        .tmg-webodm-logo-img {
+            max-height: 72px;
+            max-width: 210px;
+            object-fit: contain;
+            filter:
+                drop-shadow(0 10px 18px rgba(0,0,0,.58))
+                drop-shadow(0 0 16px rgba(0,229,255,.35));
+        }
+        .tmg-webodm-logo-fallback {
+            color: #fff;
+            font-size: 2rem;
+            font-weight: 950;
+            letter-spacing: 7px;
+            text-shadow:
+                2px 2px 0 #000,
+                0 0 22px rgba(0,229,255,.55),
+                0 0 18px rgba(255,140,0,.35);
         }
         .tmg-webodm-title {
             color: #fff;
-            font-size: 1.45rem;
+            font-size: 1.62rem;
             font-weight: 900;
-            letter-spacing: 1.5px;
+            letter-spacing: 2px;
             text-shadow:
                 2px 2px 0 #000,
+                4px 4px 8px rgba(0,0,0,.7),
                 0 0 18px rgba(255,140,0,.45),
-                0 0 28px rgba(66,165,245,.22);
+                0 0 28px rgba(0,229,255,.30);
             margin-bottom: 4px;
         }
         .tmg-webodm-subtitle {
@@ -10041,6 +10080,7 @@ def render_webodm_iframe_panel() -> None:
             font-size: .92rem;
             font-weight: 700;
             margin-bottom: 10px;
+            text-shadow: 0 0 12px rgba(0,229,255,.28);
         }
         .tmg-webodm-note {
             color: rgba(255,255,255,.72);
@@ -10050,6 +10090,7 @@ def render_webodm_iframe_panel() -> None:
             border-radius: 10px;
             border: 1px solid rgba(66,165,245,.25);
             background: rgba(8,16,28,.56);
+            text-align: center;
         }
         .tmg-webodm-link {
             display: inline-flex;
@@ -10087,13 +10128,14 @@ def render_webodm_iframe_panel() -> None:
         }
         </style>
         <div class="tmg-webodm-shell">
+            <div class="tmg-webodm-logo-box">__TMG_WEBODM_LOGO__</div>
             <div class="tmg-webodm-title">Gerador WebODM TMG</div>
             <div class="tmg-webodm-subtitle">WebODM integrado ao sistema</div>
             <div class="tmg-webodm-note">
                 Para funcionar, o WebODM precisa estar rodando localmente ou em um servidor acessível pela URL informada.
             </div>
         </div>
-        """,
+        """.replace("__TMG_WEBODM_LOGO__", logo_html),
         unsafe_allow_html=True,
     )
 
@@ -10133,13 +10175,10 @@ def _render_orthomosaic_generator() -> None:
 
     if "show_webodm_panel" not in st.session_state:
         st.session_state["show_webodm_panel"] = False
-    webodm_cols = st.columns([1, 1, 2])
+    webodm_cols = st.columns([1, 3])
     with webodm_cols[0]:
         if st.button("🌐 Gerador WebODM", key="ortho_open_webodm_panel", use_container_width=True):
             st.session_state["show_webodm_panel"] = True
-    with webodm_cols[1]:
-        if st.session_state.get("show_webodm_panel") and st.button("Fechar WebODM", key="ortho_close_webodm_panel", use_container_width=True):
-            st.session_state["show_webodm_panel"] = False
     if st.session_state.get("show_webodm_panel"):
         render_webodm_iframe_panel()
 
