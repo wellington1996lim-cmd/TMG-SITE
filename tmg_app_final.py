@@ -10286,19 +10286,23 @@ AZURE_STORAGE_EXPLORER_CANDIDATES = [
     Path(os.environ.get("PROGRAMFILES", "")) / "Microsoft Azure Storage Explorer" / "StorageExplorer.exe",
     Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Microsoft Azure Storage Explorer" / "StorageExplorer.exe",
 ]
-AZURE_STORAGE_DEFAULT_URL = "https://statmgwebodm.blob.core.windows.net/2025-2026"
+AZURE_STORAGE_DEFAULT_URL = "https://statmgwebodm.dfs.core.windows.net/2025-2026"
 AZURE_STORAGE_ACCOUNT_NAME = "statmgwebodm"
 AZURE_STORAGE_CONTAINER_NAME = "2025-2026"
-AZURE_STORAGE_SERVICE_ENDPOINT = f"https://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/"
+AZURE_STORAGE_SERVICE_ENDPOINT = f"https://{AZURE_STORAGE_ACCOUNT_NAME}.dfs.core.windows.net/"
+AZURE_STORAGE_TENANT_ID = "a819a679-3a36-4ff2-83cc-47e62081f03f"
+AZURE_STORAGE_SUBSCRIPTION_ID = "2625ad76-a580-4f71-a941-125a9cfe9af9"
+AZURE_STORAGE_EXPLORER_QUICK_ACCESS_LINK = (
+    "storageexplorer://?v=2"
+    f"&tenantId={AZURE_STORAGE_TENANT_ID}"
+    f"&container={AZURE_STORAGE_CONTAINER_NAME}"
+    "&type=fileSystem"
+    f"&serviceEndpoint={quote(AZURE_STORAGE_SERVICE_ENDPOINT, safe='')}"
+    f"&subscriptionId={AZURE_STORAGE_SUBSCRIPTION_ID}"
+)
 
 def _azure_storage_explorer_direct_link() -> str:
-    return (
-        "storageexplorer://"
-        "?v=2"
-        "&type=blobContainer"
-        f"&container={quote(AZURE_STORAGE_CONTAINER_NAME, safe='')}"
-        f"&serviceEndpoint={quote(AZURE_STORAGE_SERVICE_ENDPOINT, safe='')}"
-    )
+    return AZURE_STORAGE_EXPLORER_QUICK_ACCESS_LINK
 
 def _find_azure_storage_explorer() -> Path | None:
     try:
@@ -10471,7 +10475,7 @@ def janela_abrir_azure() -> None:
         <div class="tmg-azure-card">
             <div class="tmg-azure-title">☁️ Azure</div>
             <div class="tmg-azure-desc">
-                Abra o caminho Azure 2025-2026 por dentro do Microsoft Azure Storage Explorer instalado na máquina.
+                Abra o acesso rápido Azure 2025-2026 por dentro do Microsoft Azure Storage Explorer instalado na máquina.
             </div>
             <div class="tmg-azure-pill">🚀 Acesso pelo aplicativo local</div>
             <div class="tmg-azure-path">Caminho Azure: __AZURE_STORAGE_URL__</div>
