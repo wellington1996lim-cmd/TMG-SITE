@@ -448,6 +448,52 @@ def finish_tmg_loading_and_clear(container, texto: str = "Carregamento concluíd
         pass
     clear_tmg_loading(container)
 
+TMG_PAGE_LABELS = {
+    "Checklist": "Notas Rápidas",
+    "Grid": "Marcador de Grid",
+    "AnaliseMarcacaoGrid": "Análise de Marcação de Grid",
+    "Azure": "Azure",
+    "Bases": "Banco de Dados Sistema",
+    "Sync": "Sincronizar Dados",
+    "Ortomosaicos": "Gerar Ortomosaicos",
+    "Visualizador": "Análises de Fenotipagem",
+    "VoosDirecionados": "Processos de Voos para Análise",
+    "Parceiros": "Parceiros",
+    "Config": "Configurações",
+    "Upload": "Central de Arquivos",
+}
+
+def _tmg_page_label(page: str) -> str:
+    return TMG_PAGE_LABELS.get(str(page or ""), str(page or "janela"))
+
+def _mark_tmg_page_transition(target_page: str) -> None:
+    current_page = st.session_state.get("pagina_ativa")
+    if not target_page or target_page == current_page:
+        return
+    st.session_state["_tmg_page_transition"] = {
+        "from": str(current_page or ""),
+        "to": str(target_page),
+        "started_at": time.time(),
+    }
+
+def render_tmg_page_transition_loading(container=None):
+    transition = st.session_state.get("_tmg_page_transition")
+    if not isinstance(transition, dict) or not transition.get("to"):
+        return None
+    target = container if container is not None else st.empty()
+    label = _tmg_page_label(transition.get("to"))
+    render_tmg_loading_bar(18, f"Carregando janela: {label}", container=target)
+    return target
+
+def clear_tmg_page_transition_loading(container=None) -> None:
+    if "_tmg_page_transition" not in st.session_state:
+        return
+    try:
+        if container is not None:
+            finish_tmg_loading_and_clear(container, "Janela carregada com sucesso.", hold_seconds=0.03)
+    finally:
+        st.session_state.pop("_tmg_page_transition", None)
+
 def app_rerun():
     if hasattr(st, "rerun"):
         st.rerun()
@@ -567,6 +613,11 @@ def _save_system_config(data: dict) -> None:
 SYSTEM_CONFIG = _load_system_config()
 SYSTEM_DATABASE_DIR = _resolve_system_path(SYSTEM_CONFIG.get("database_dir", "tmg_data"))
 SYSTEM_DATABASE_DIR.mkdir(parents=True, exist_ok=True)
+TMG_RUNTIME_CACHE_DIR = SYSTEM_DATABASE_DIR / "runtime_cache"
+TMG_PAGE_TRANSITION_CACHE_DIR = TMG_RUNTIME_CACHE_DIR / "page_transitions"
+TMG_RUNTIME_CONFIG_PATH = SYSTEM_CONFIG_DIR / "runtime_optimization.json"
+for _runtime_dir in (TMG_RUNTIME_CACHE_DIR, TMG_PAGE_TRANSITION_CACHE_DIR):
+    _runtime_dir.mkdir(parents=True, exist_ok=True)
 
 THEME_PALETTES = {
     "padrao": {
@@ -662,6 +713,50 @@ def _load_deploy_bar_theme() -> dict:
     return merged
 
 DEPLOY_BAR_THEME = _load_deploy_bar_theme()
+
+def _ensure_tmg_runtime_optimization_config() -> None:
+    manifest = {
+        "version": 1,
+        "app_root": str(APP_ROOT),
+        "data_dir": str(SYSTEM_DATABASE_DIR),
+        "runtime_cache_dir": str(TMG_RUNTIME_CACHE_DIR),
+        "page_transition_cache_dir": str(TMG_PAGE_TRANSITION_CACHE_DIR),
+        "ortho_preview_cache_dir": str(SYSTEM_DATABASE_DIR / "ortho_preview_cache"),
+        "preview_max_dim": _preview_max_dim(),
+        "preview_jpeg_quality": _preview_jpeg_quality(),
+        "preview_max_payload_mb": _preview_max_payload_mb(),
+        "page_transition_loading": True,
+        "keep_all_runtime_data_inside_program_folder": True,
+    }
+    try:
+        current = _tmg_read_json_file(TMG_RUNTIME_CONFIG_PATH, {})
+        if current != manifest:
+            TMG_RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            TMG_RUNTIME_CONFIG_PATH.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+def _cleanup_tmg_runtime_temp(max_age_seconds: int = 3 * 24 * 60 * 60) -> None:
+    now = time.time()
+    for root in (APP_TEMP_DIR, TMG_PAGE_TRANSITION_CACHE_DIR):
+        try:
+            if not Path(root).exists():
+                continue
+            for item in Path(root).iterdir():
+                if not item.is_file():
+                    continue
+                if item.suffix.lower() not in (".tmp", ".uploading", ".cache", ".json"):
+                    continue
+                try:
+                    if now - item.stat().st_mtime > max_age_seconds:
+                        item.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+_ensure_tmg_runtime_optimization_config()
+_cleanup_tmg_runtime_temp()
 
 st.markdown(f"""
 <style>
@@ -6160,6 +6255,7 @@ if "logo_sistema" not in st.session_state:
         st.session_state.logo_sistema = None
 
 def ir_para(pagina):
+    _mark_tmg_page_transition(pagina)
     st.session_state.pagina_ativa = pagina
 
 def _cultura_ambiente_info(cultura: str = "") -> dict:
@@ -13003,8 +13099,10 @@ if st.session_state.pagina_ativa not in ('TransferenciaVoos', 'VoosDirecionados'
 # CONTEÚDO[cite: 1]
 # ==========================================
 main_container = st.container()
+_tmg_page_transition_slot = None
 
 with main_container:
+    _tmg_page_transition_slot = render_tmg_page_transition_loading()
 
     # ==========================================
     # TRANSFERENCIA DE VOOS
@@ -22710,6 +22808,8 @@ html body pre {{
 }}
 </style>
 """, unsafe_allow_html=True)
+
+clear_tmg_page_transition_loading(_tmg_page_transition_slot)
 
 # ==========================================
 # FOOTER[cite: 1]
