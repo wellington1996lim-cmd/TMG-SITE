@@ -14779,6 +14779,7 @@ const MIN_SC = 0.05, MAX_SC = 40;
 let imgW = 0, imgH = 0;
 let viewW = 0, viewH = 0, canvasDpr = 1;
 let redrawPending = false;
+let imageNeedsRedraw = true;
 const MAX_CANVAS_PIXELS = 2600000;
 
 let plantCenters = [];
@@ -14790,6 +14791,8 @@ let suppressPersist = false;
 
 const img = new Image();
 img.decoding = 'async';
+const bgCv = document.createElement('canvas');
+const bgCtx = bgCv.getContext('2d', {{ alpha:false }});
 
 function resizeCanvasIfNeeded() {{
   const rect = vc.getBoundingClientRect();
@@ -14810,11 +14813,15 @@ function resizeCanvasIfNeeded() {{
     cv.height = pixelH;
     cv.style.width = nextW + 'px';
     cv.style.height = nextH + 'px';
+    bgCv.width = pixelW;
+    bgCv.height = pixelH;
+    imageNeedsRedraw = true;
   }}
   ctx.setTransform(canvasDpr, 0, 0, canvasDpr, 0, 0);
 }}
 
-function requestDraw() {{
+function requestDraw(redrawImage=false) {{
+  if (redrawImage) imageNeedsRedraw = true;
   if (redrawPending) return;
   redrawPending = true;
   requestAnimationFrame(() => {{
@@ -14829,17 +14836,31 @@ function isPointVisible(p, pad=32) {{
   return sx >= -pad && sx <= viewW + pad && sy >= -pad && sy <= viewH + pad;
 }}
 
-function drawVisibleImage() {{
+function drawVisibleImage(targetCtx=ctx) {{
   if (imgW <= 0 || imgH <= 0) return;
   const sx = Math.max(0, Math.floor((-ox) / sc) - 2);
   const sy = Math.max(0, Math.floor((-oy) / sc) - 2);
   const sw = Math.min(imgW - sx, Math.ceil(viewW / sc) + 4);
   const sh = Math.min(imgH - sy, Math.ceil(viewH / sc) + 4);
   if (sw > 0 && sh > 0) {{
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, sx, sy, sw, sh, sx, sy, sw, sh);
+    targetCtx.imageSmoothingEnabled = true;
+    targetCtx.imageSmoothingQuality = 'high';
+    targetCtx.drawImage(img, sx, sy, sw, sh, sx, sy, sw, sh);
   }}
+}}
+
+function redrawBackgroundIfNeeded() {{
+  if (!imageNeedsRedraw) return;
+  resizeCanvasIfNeeded();
+  const W = viewW || vc.clientWidth, H = viewH || vc.clientHeight;
+  bgCtx.setTransform(canvasDpr, 0, 0, canvasDpr, 0, 0);
+  bgCtx.clearRect(0, 0, W, H);
+  bgCtx.save();
+  bgCtx.translate(ox, oy);
+  bgCtx.scale(sc, sc);
+  drawVisibleImage(bgCtx);
+  bgCtx.restore();
+  imageNeedsRedraw = false;
 }}
 
 function getImgCoords(cx, cy) {{
@@ -15295,11 +15316,13 @@ function countPlantsInGrid() {{
 function drawAll() {{
   resizeCanvasIfNeeded();
   const W = viewW || vc.clientWidth, H = viewH || vc.clientHeight;
+  redrawBackgroundIfNeeded();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (bgCv.width > 0 && bgCv.height > 0) ctx.drawImage(bgCv, 0, 0);
   ctx.setTransform(canvasDpr, 0, 0, canvasDpr, 0, 0);
-  ctx.clearRect(0,0,W,H);
   ctx.save();
   ctx.translate(ox,oy); ctx.scale(sc,sc);
-  drawVisibleImage();
 
   // Desenhar grid
   if (points.length === 4) {{
@@ -15413,7 +15436,7 @@ img.onload = () => {{
   const W = viewW || vc.clientWidth, H = viewH || vc.clientHeight;
   sc = Math.min(W/imgW, H/imgH);
   ox = (W - imgW*sc)/2; oy = (H - imgH*sc)/2;
-  requestDraw();
+  requestDraw(true);
 }};
 img.src = 'data:image/jpeg;base64,' + IMG_B64;
 
@@ -15427,7 +15450,7 @@ vc.addEventListener('wheel', e => {{
   sc *= factor;
   sc = Math.max(MIN_SC, Math.min(MAX_SC, sc));
   ox = mx - ix*sc; oy = my - iy*sc;
-  requestDraw();
+  requestDraw(true);
 }}, {{passive:false}});
 
 vc.addEventListener('mousedown', e => {{
@@ -15438,6 +15461,7 @@ vc.addEventListener('mousedown', e => {{
     const dx = (pt.x - points[i].x)*sc, dy = (pt.y - points[i].y)*sc;
     if (Math.sqrt(dx*dx+dy*dy) < 20) {{
       draggingPoint = i;
+      requestDraw(false);
       return;
     }}
   }}
@@ -15481,7 +15505,7 @@ vc.addEventListener('mousemove', e => {{
   if (drag) {{
     ox += e.clientX - lx; oy += e.clientY - ly;
     lx = e.clientX; ly = e.clientY;
-    requestDraw();
+    requestDraw(true);
   }}
 }});
 
@@ -15489,9 +15513,11 @@ vc.addEventListener('mouseup', () => {{
   if(draggingPoint >= 0) saveActiveGrid(false);
   drag = false; draggingPoint = -1;
   vc.style.cursor = 'grab';
+  requestDraw(false);
 }});
 vc.addEventListener('mouseleave', () => {{
   drag = false; draggingPoint = -1;
+  requestDraw(false);
 }});
 
 function recount() {{
@@ -15661,7 +15687,7 @@ updateGridSelect();
 // Resize
 new ResizeObserver(() => {{
   resizeCanvasIfNeeded();
-  requestDraw();
+  requestDraw(true);
 }}).observe(vc);
 </script>
 </body>
