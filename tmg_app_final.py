@@ -15364,12 +15364,6 @@ function drawAll() {{
           const cnt = parcelCounts[dispLabel + '_' + tiroLabel] || 0;
 
           ctx.save();
-          ctx.fillStyle = cnt > 0 ? 'rgba(0,255,0,0.15)' : 'rgba(255,0,0,0.08)';
-          ctx.beginPath();
-          ctx.moveTo(tl.x,tl.y); ctx.lineTo(tr.x,tr.y);
-          ctx.lineTo(br.x,br.y); ctx.lineTo(bl.x,bl.y);
-          ctx.closePath(); ctx.fill();
-
           ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=4/sc;
           ctx.fillStyle='#ffffff';
           ctx.font='bold '+(Math.max(8, 11/sc))+'px Arial';
