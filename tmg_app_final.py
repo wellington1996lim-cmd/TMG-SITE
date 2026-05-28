@@ -14740,7 +14740,7 @@ window.addEventListener('resize', resize);
 const IMG_B64 = '{cnt_b64}';
 const vc    = document.getElementById('vc');
 const cv    = document.getElementById('cv');
-const ctx   = cv.getContext('2d');
+const ctx   = cv.getContext('2d', {{ alpha:false }});
 const zb    = document.getElementById('zbadge');
 const coordEl = document.getElementById('coord');
 
@@ -14777,6 +14777,9 @@ let sc = 1, ox = 0, oy = 0;
 let drag = false, lx = 0, ly = 0;
 const MIN_SC = 0.05, MAX_SC = 40;
 let imgW = 0, imgH = 0;
+let viewW = 0, viewH = 0, canvasDpr = 1;
+let redrawPending = false;
+const MAX_CANVAS_PIXELS = 2600000;
 
 let plantCenters = [];
 let manualMarks = [];
@@ -14786,6 +14789,58 @@ let activeGridName = 'Grid 1';
 let suppressPersist = false;
 
 const img = new Image();
+img.decoding = 'async';
+
+function resizeCanvasIfNeeded() {{
+  const rect = vc.getBoundingClientRect();
+  const nextW = Math.max(1, Math.floor(rect.width || vc.clientWidth || 1));
+  const nextH = Math.max(1, Math.floor(rect.height || vc.clientHeight || 1));
+  let nextDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const targetPixels = nextW * nextH * nextDpr * nextDpr;
+  if (targetPixels > MAX_CANVAS_PIXELS) {{
+    nextDpr = Math.max(1, Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, nextW * nextH)));
+  }}
+  const pixelW = Math.max(1, Math.floor(nextW * nextDpr));
+  const pixelH = Math.max(1, Math.floor(nextH * nextDpr));
+  if (cv.width !== pixelW || cv.height !== pixelH || viewW !== nextW || viewH !== nextH || Math.abs(canvasDpr - nextDpr) > 0.01) {{
+    viewW = nextW;
+    viewH = nextH;
+    canvasDpr = nextDpr;
+    cv.width = pixelW;
+    cv.height = pixelH;
+    cv.style.width = nextW + 'px';
+    cv.style.height = nextH + 'px';
+  }}
+  ctx.setTransform(canvasDpr, 0, 0, canvasDpr, 0, 0);
+}}
+
+function requestDraw() {{
+  if (redrawPending) return;
+  redrawPending = true;
+  requestAnimationFrame(() => {{
+    redrawPending = false;
+    drawAll();
+  }});
+}}
+
+function isPointVisible(p, pad=32) {{
+  const sx = ox + p.x * sc;
+  const sy = oy + p.y * sc;
+  return sx >= -pad && sx <= viewW + pad && sy >= -pad && sy <= viewH + pad;
+}}
+
+function drawVisibleImage() {{
+  if (imgW <= 0 || imgH <= 0) return;
+  const sx = Math.max(0, Math.floor((-ox) / sc) - 2);
+  const sy = Math.max(0, Math.floor((-oy) / sc) - 2);
+  const sw = Math.min(imgW - sx, Math.ceil(viewW / sc) + 4);
+  const sh = Math.min(imgH - sy, Math.ceil(viewH / sc) + 4);
+  if (sw > 0 && sh > 0) {{
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, sx, sy, sw, sh, sx, sy, sw, sh);
+  }}
+}}
 
 function getImgCoords(cx, cy) {{
   const r = cv.getBoundingClientRect();
@@ -14929,7 +14984,7 @@ function loadGridByName(name) {{
   activeGridName = target;
   applyGridRecord(rec);
   updateGridSelect();
-  drawAll();
+  requestDraw();
 }}
 
 function createNewGrid() {{
@@ -14953,7 +15008,7 @@ function createNewGrid() {{
   countPanel.style.display = 'none';
   updateGridSelect();
   persistGrids();
-  drawAll();
+  requestDraw();
 }}
 
 function renameActiveGrid() {{
@@ -14991,7 +15046,7 @@ function deleteActiveGrid() {{
   }}
   updateGridSelect();
   persistGrids();
-  drawAll();
+  requestDraw();
 }}
 
 function getExportGridRecords(exportAll=false) {{
@@ -15109,35 +15164,45 @@ function countPlantsInGrid() {{
   const C = parseInt(inpCols.value) || 1;
   const p0=points[0], p1=points[1], p2=points[2], p3=points[3];
 
-  // Extrair pixels da região do grid para detecção HSV via canvas
-  // Criar canvas temporário para processar a imagem
-  const tempCv = document.createElement('canvas');
-  tempCv.width = imgW; tempCv.height = imgH;
-  const tempCtx = tempCv.getContext('2d');
-  tempCtx.drawImage(img, 0, 0);
-
   // Bounding box do polígono
   const xs = points.map(p=>p.x), ys = points.map(p=>p.y);
   const minX = Math.max(0, Math.floor(Math.min(...xs)));
   const maxX = Math.min(imgW, Math.ceil(Math.max(...xs)));
   const minY = Math.max(0, Math.floor(Math.min(...ys)));
   const maxY = Math.min(imgH, Math.ceil(Math.max(...ys)));
-
-  const imgData = tempCtx.getImageData(minX, minY, maxX-minX, maxY-minY);
-  const data = imgData.data;
   const w = maxX - minX;
   const h = maxY - minY;
+  if (w <= 0 || h <= 0) {{
+    alert('A área do grid está fora da ortofoto.');
+    return;
+  }}
+
+  // Extrair somente a região do grid, evitando travar com ortofotos grandes.
+  const MAX_ANALYSIS_PIXELS = 8000000;
+  const processScale = Math.min(1, Math.sqrt(MAX_ANALYSIS_PIXELS / Math.max(1, w * h)));
+  const scanW = Math.max(1, Math.round(w * processScale));
+  const scanH = Math.max(1, Math.round(h * processScale));
+  const tempCv = document.createElement('canvas');
+  tempCv.width = scanW; tempCv.height = scanH;
+  const tempCtx = tempCv.getContext('2d', {{ willReadFrequently:true }});
+  tempCtx.imageSmoothingEnabled = processScale < 1;
+  tempCtx.imageSmoothingQuality = 'high';
+  tempCtx.drawImage(img, minX, minY, w, h, 0, 0, scanW, scanH);
+
+  const imgData = tempCtx.getImageData(0, 0, scanW, scanH);
+  const data = imgData.data;
 
   plantCenters = [];
 
   // Detecção HSV simplificada (verde)
   // Converter RGB para HSV e detectar plantas
-  const visited = new Uint8Array(w * h);
-  const minArea = 25;
+  const visited = new Uint8Array(scanW * scanH);
+  const minArea = Math.max(8, Math.round(25 * processScale * processScale));
+  const maxFloodArea = Math.max(minArea + 1, Math.round(2000 * processScale * processScale));
 
-  for (let y = 0; y < h; y++) {{
-    for (let x = 0; x < w; x++) {{
-      const idx = (y * w + x) * 4;
+  for (let y = 0; y < scanH; y++) {{
+    for (let x = 0; x < scanW; x++) {{
+      const idx = (y * scanW + x) * 4;
       const r2 = data[idx], g = data[idx+1], b = data[idx+2];
 
       // RGB para HSV
@@ -15156,16 +15221,16 @@ function countPlantsInGrid() {{
 
       // Filtro verde (H:30-90, S:40-255, V:40-255)
       if (hue >= 30 && hue <= 90 && sat >= 40 && val >= 40) {{
-        const absX = x + minX, absY = y + minY;
-        if (pointInPolygon(absX, absY, points) && !visited[y * w + x]) {{
+        const absX = minX + x / processScale, absY = minY + y / processScale;
+        if (pointInPolygon(absX, absY, points) && !visited[y * scanW + x]) {{
           // Flood-fill simples para agrupar pixels conectados
           let area = 0, sumX = 0, sumY = 0;
           const stack = [[x, y]];
-          while (stack.length > 0 && area < 2000) {{
+          while (stack.length > 0 && area < maxFloodArea) {{
             const [sx, sy] = stack.pop();
-            if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue;
-            if (visited[sy * w + sx]) continue;
-            const si = (sy * w + sx) * 4;
+            if (sx < 0 || sx >= scanW || sy < 0 || sy >= scanH) continue;
+            if (visited[sy * scanW + sx]) continue;
+            const si = (sy * scanW + sx) * 4;
             const sr = data[si], sg = data[si+1], sb = data[si+2];
             const smax = Math.max(sr,sg,sb), smin = Math.min(sr,sg,sb);
             const sdiff = smax - smin;
@@ -15179,12 +15244,12 @@ function countPlantsInGrid() {{
             }}
             sh = sh/2;
             if (sh < 30 || sh > 90 || ss < 40 || smax < 40) continue;
-            visited[sy * w + sx] = 1;
+            visited[sy * scanW + sx] = 1;
             area++; sumX += sx; sumY += sy;
             stack.push([sx+1,sy],[sx-1,sy],[sx,sy+1],[sx,sy-1]);
           }}
           if (area >= minArea) {{
-            plantCenters.push({{ x: Math.round(sumX/area) + minX, y: Math.round(sumY/area) + minY }});
+            plantCenters.push({{ x: Math.round(minX + (sumX/area) / processScale), y: Math.round(minY + (sumY/area) / processScale) }});
           }}
         }}
       }}
@@ -15223,17 +15288,18 @@ function countPlantsInGrid() {{
   totalCountEl.textContent = plantCenters.length;
   countInfoEl.textContent = 'Grid ' + R + '×' + C + ' | Dentro da área marcada';
 
-  drawAll();
+  requestDraw();
   saveActiveGrid(false);
 }}
 
 function drawAll() {{
-  const W = vc.clientWidth, H = vc.clientHeight;
-  cv.width = W; cv.height = H;
+  resizeCanvasIfNeeded();
+  const W = viewW || vc.clientWidth, H = viewH || vc.clientHeight;
+  ctx.setTransform(canvasDpr, 0, 0, canvasDpr, 0, 0);
   ctx.clearRect(0,0,W,H);
   ctx.save();
   ctx.translate(ox,oy); ctx.scale(sc,sc);
-  if(imgW>0) ctx.drawImage(img,0,0);
+  drawVisibleImage();
 
   // Desenhar grid
   if (points.length === 4) {{
@@ -15260,7 +15326,7 @@ function drawAll() {{
     ctx.restore();
 
     // Mostrar contagem por parcela
-    if (Object.keys(parcelCounts).length > 0) {{
+    if (Object.keys(parcelCounts).length > 0 && sc > 0.06) {{
       for (let r2=0; r2<R; r2++) {{
         for (let c=0; c<C; c++) {{
           const u0=c/C, u1=(c+1)/C, v0=r2/R, v1=(r2+1)/R;
@@ -15297,6 +15363,7 @@ function drawAll() {{
 
   // Desenhar pontos do grid
   points.forEach((p,i) => {{
+    if (!isPointVisible(p, 80)) return;
     const isDrag = draggingPoint===i;
     const r2 = 11/sc;
     ctx.save();
@@ -15315,6 +15382,7 @@ function drawAll() {{
 
   // Desenhar plantas detectadas (X verde)
   for (const p of plantCenters) {{
+    if (!isPointVisible(p, 40)) continue;
     const sz = 6/sc;
     ctx.save();
     ctx.strokeStyle='#00ff00'; ctx.lineWidth=2/sc;
@@ -15325,6 +15393,7 @@ function drawAll() {{
 
   // Desenhar marcas manuais (X vermelho)
   for (const p of manualMarks) {{
+    if (!isPointVisible(p, 40)) continue;
     const sz = 8/sc;
     ctx.save();
     ctx.strokeStyle='#ff3333'; ctx.lineWidth=2.5/sc;
@@ -15340,10 +15409,11 @@ function drawAll() {{
 // Eventos
 img.onload = () => {{
   imgW = img.width; imgH = img.height;
-  const W = vc.clientWidth, H = vc.clientHeight;
+  resizeCanvasIfNeeded();
+  const W = viewW || vc.clientWidth, H = viewH || vc.clientHeight;
   sc = Math.min(W/imgW, H/imgH);
   ox = (W - imgW*sc)/2; oy = (H - imgH*sc)/2;
-  drawAll();
+  requestDraw();
 }};
 img.src = 'data:image/jpeg;base64,' + IMG_B64;
 
@@ -15357,7 +15427,7 @@ vc.addEventListener('wheel', e => {{
   sc *= factor;
   sc = Math.max(MIN_SC, Math.min(MAX_SC, sc));
   ox = mx - ix*sc; oy = my - iy*sc;
-  drawAll();
+  requestDraw();
 }}, {{passive:false}});
 
 vc.addEventListener('mousedown', e => {{
@@ -15377,7 +15447,7 @@ vc.addEventListener('mousedown', e => {{
     points.push({{x:pt.x, y:pt.y}});
     if (points.length === 4) gridMode = false;
     saveActiveGrid(false);
-    drawAll();
+    requestDraw();
     return;
   }}
 
@@ -15389,7 +15459,7 @@ vc.addEventListener('mousedown', e => {{
       // Recontabilizar
       recount();
       saveActiveGrid(false);
-      drawAll();
+      requestDraw();
     }}
     return;
   }}
@@ -15405,13 +15475,13 @@ vc.addEventListener('mousemove', e => {{
 
   if (draggingPoint >= 0) {{
     points[draggingPoint] = {{x:pt.x, y:pt.y}};
-    drawAll();
+    requestDraw();
     return;
   }}
   if (drag) {{
     ox += e.clientX - lx; oy += e.clientY - ly;
     lx = e.clientX; ly = e.clientY;
-    drawAll();
+    requestDraw();
   }}
 }});
 
@@ -15456,7 +15526,7 @@ btnGridTool.onclick = () => {{
   gridMode = !gridMode; manualMode = false;
   btnGridTool.style.borderColor = gridMode ? '#ff8c00' : '#3a3a3a';
   btnManualMode.style.borderColor = '#3a3a3a';
-  if (gridMode) {{ points = []; plantCenters = []; manualMarks = []; parcelCounts = {{}}; countPanel.style.display='none'; saveActiveGrid(false); drawAll(); }}
+  if (gridMode) {{ points = []; plantCenters = []; manualMarks = []; parcelCounts = {{}}; countPanel.style.display='none'; saveActiveGrid(false); requestDraw(); }}
 }};
 
 btnCountPlants.onclick = () => countPlantsInGrid();
@@ -15476,7 +15546,7 @@ btnRemoveLast.onclick = () => {{
   if (manualMarks.length > 0) {{
     const removed = manualMarks.pop();
     plantCenters = plantCenters.filter(p => p.x !== removed.x || p.y !== removed.y);
-    recount(); saveActiveGrid(false); drawAll();
+    recount(); saveActiveGrid(false); requestDraw();
   }}
 }};
 btnUndoMark.onclick = btnRemoveLast.onclick;
@@ -15487,7 +15557,7 @@ btnClearAll.onclick = () => {{
   btnGridTool.style.borderColor = '#3a3a3a';
   btnManualMode.style.borderColor = '#3a3a3a';
   saveActiveGrid(false);
-  drawAll();
+  requestDraw();
 }};
 
 btnSaveGrid.onclick = () => saveActiveGrid(true);
@@ -15495,8 +15565,8 @@ btnNewGrid.onclick = createNewGrid;
 btnDeleteGrid.onclick = deleteActiveGrid;
 selGridList.onchange = () => loadGridByName(selGridList.value);
 inpGridName.onchange = renameActiveGrid;
-inpRows.onchange = () => {{ recount(); saveActiveGrid(false); drawAll(); }};
-inpCols.onchange = () => {{ recount(); saveActiveGrid(false); drawAll(); }};
+inpRows.onchange = () => {{ recount(); saveActiveGrid(false); requestDraw(); }};
+inpCols.onchange = () => {{ recount(); saveActiveGrid(false); requestDraw(); }};
 
 btnExportCnt.onclick = () => exportContagemCSV(cbExportAll.checked);
 btnExportXLSXCnt.onclick = () => exportContagemExcel(cbExportAll.checked);
@@ -15589,7 +15659,10 @@ saveActiveGrid(false);
 updateGridSelect();
 
 // Resize
-new ResizeObserver(() => drawAll()).observe(vc);
+new ResizeObserver(() => {{
+  resizeCanvasIfNeeded();
+  requestDraw();
+}}).observe(vc);
 </script>
 </body>
 </html>
