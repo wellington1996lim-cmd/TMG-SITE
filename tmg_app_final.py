@@ -10285,6 +10285,7 @@ AZURE_STORAGE_EXPLORER_CANDIDATES = [
     Path(os.environ.get("PROGRAMFILES", "")) / "Microsoft Azure Storage Explorer" / "StorageExplorer.exe",
     Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Microsoft Azure Storage Explorer" / "StorageExplorer.exe",
 ]
+AZURE_STORAGE_DEFAULT_URL = "https://statmgwebodm.blob.core.windows.net/2025-2026"
 
 def _find_azure_storage_explorer() -> Path | None:
     try:
@@ -10327,6 +10328,7 @@ def _open_azure_storage_explorer() -> tuple[bool, str]:
 def janela_abrir_azure() -> None:
     azure_path = _find_azure_storage_explorer()
     azure_path_text = str(azure_path) if azure_path else "Microsoft Azure Storage Explorer não encontrado automaticamente."
+    azure_storage_url = AZURE_STORAGE_DEFAULT_URL
     st.markdown(
         """
         <style>
@@ -10423,15 +10425,18 @@ def janela_abrir_azure() -> None:
         <div class="tmg-azure-card">
             <div class="tmg-azure-title">☁️ Azure</div>
             <div class="tmg-azure-desc">
-                Abra o Microsoft Azure Storage Explorer instalado nesta máquina para trabalhar
-                com suas contas, containers e arquivos do Azure Storage.
+                Acesse diretamente o armazenamento Azure configurado para o sistema TMG.
             </div>
-            <div class="tmg-azure-path">Aplicativo: __AZURE_STORAGE_EXPLORER_PATH__</div>
+            <a class="tmg-azure-button" href="__AZURE_STORAGE_URL__" target="_blank" rel="noopener noreferrer">
+                🚀 Abrir caminho Azure 2025-2026
+            </a>
+            <div class="tmg-azure-path">Caminho Azure: __AZURE_STORAGE_URL__</div>
+            <div class="tmg-azure-path">Aplicativo local: __AZURE_STORAGE_EXPLORER_PATH__</div>
             <div class="tmg-azure-note">
-                O aplicativo nativo abre fora do navegador, mantendo esta janela integrada no tema do sistema.
+                Se a conta exigir autenticação, use o Storage Explorer local com sua conta autorizada.
             </div>
         </div>
-        """.replace("__AZURE_STORAGE_EXPLORER_PATH__", html.escape(azure_path_text)),
+        """.replace("__AZURE_STORAGE_URL__", html.escape(azure_storage_url, quote=True)).replace("__AZURE_STORAGE_EXPLORER_PATH__", html.escape(azure_path_text)),
         unsafe_allow_html=True,
     )
     if st.button("🚀 Abrir Azure Storage Explorer", key="btn_launch_azure_storage_explorer", use_container_width=True):
