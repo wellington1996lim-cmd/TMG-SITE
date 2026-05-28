@@ -23,6 +23,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, date
+from urllib.parse import quote
 import pandas as pd
 
 try:
@@ -10286,6 +10287,18 @@ AZURE_STORAGE_EXPLORER_CANDIDATES = [
     Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Microsoft Azure Storage Explorer" / "StorageExplorer.exe",
 ]
 AZURE_STORAGE_DEFAULT_URL = "https://statmgwebodm.blob.core.windows.net/2025-2026"
+AZURE_STORAGE_ACCOUNT_NAME = "statmgwebodm"
+AZURE_STORAGE_CONTAINER_NAME = "2025-2026"
+AZURE_STORAGE_SERVICE_ENDPOINT = f"https://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/"
+
+def _azure_storage_explorer_direct_link() -> str:
+    return (
+        "storageexplorer://"
+        "?v=2"
+        "&type=blobContainer"
+        f"&container={quote(AZURE_STORAGE_CONTAINER_NAME, safe='')}"
+        f"&serviceEndpoint={quote(AZURE_STORAGE_SERVICE_ENDPOINT, safe='')}"
+    )
 
 def _find_azure_storage_explorer() -> Path | None:
     try:
@@ -10324,6 +10337,19 @@ def _open_azure_storage_explorer() -> tuple[bool, str]:
         except Exception:
             pass
         return False, f"Não foi possível abrir o Azure Storage Explorer: {exc}"
+
+def _open_azure_storage_explorer_path() -> tuple[bool, str]:
+    direct_link = _azure_storage_explorer_direct_link()
+    try:
+        if hasattr(os, "startfile"):
+            os.startfile(direct_link)
+            return True, "Caminho 2025-2026 aberto dentro do Azure Storage Explorer."
+        return False, "Abertura direta por storageexplorer:// está disponível no Windows com o Storage Explorer instalado."
+    except Exception as exc:
+        ok, fallback_msg = _open_azure_storage_explorer()
+        if ok:
+            return True, f"Storage Explorer aberto. Selecione o container {AZURE_STORAGE_CONTAINER_NAME}. Detalhe: {exc}"
+        return False, f"Não foi possível abrir o caminho dentro do Storage Explorer. {fallback_msg}"
 
 def janela_abrir_azure() -> None:
     azure_path = _find_azure_storage_explorer()
@@ -10421,15 +10447,33 @@ def janela_abrir_azure() -> None:
             word-break: break-word;
             text-shadow: 0 1px 0 rgba(0,0,0,.72);
         }
+        .tmg-azure-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: min(100%, 360px);
+            min-height: 50px;
+            padding: 0 24px;
+            border-radius: 16px;
+            color: #ffffff;
+            font-weight: 950;
+            letter-spacing: .7px;
+            border: 1px solid rgba(0,229,255,.55);
+            background:
+                linear-gradient(120deg, rgba(255,255,255,.13), transparent 30%),
+                linear-gradient(145deg, rgba(0,62,108,.88), rgba(0,152,190,.72), rgba(255,140,0,.18));
+            box-shadow:
+                0 12px 26px rgba(0,0,0,.36),
+                0 0 22px rgba(0,229,255,.24),
+                inset 0 1px 0 rgba(255,255,255,.18);
+        }
         </style>
         <div class="tmg-azure-card">
             <div class="tmg-azure-title">☁️ Azure</div>
             <div class="tmg-azure-desc">
-                Acesse diretamente o armazenamento Azure configurado para o sistema TMG.
+                Abra o caminho Azure 2025-2026 por dentro do Microsoft Azure Storage Explorer instalado na máquina.
             </div>
-            <a class="tmg-azure-button" href="__AZURE_STORAGE_URL__" target="_blank" rel="noopener noreferrer">
-                🚀 Abrir caminho Azure 2025-2026
-            </a>
+            <div class="tmg-azure-pill">🚀 Acesso pelo aplicativo local</div>
             <div class="tmg-azure-path">Caminho Azure: __AZURE_STORAGE_URL__</div>
             <div class="tmg-azure-path">Aplicativo local: __AZURE_STORAGE_EXPLORER_PATH__</div>
             <div class="tmg-azure-note">
@@ -10439,12 +10483,21 @@ def janela_abrir_azure() -> None:
         """.replace("__AZURE_STORAGE_URL__", html.escape(azure_storage_url, quote=True)).replace("__AZURE_STORAGE_EXPLORER_PATH__", html.escape(azure_path_text)),
         unsafe_allow_html=True,
     )
-    if st.button("🚀 Abrir Azure Storage Explorer", key="btn_launch_azure_storage_explorer", use_container_width=True):
-        ok, msg = _open_azure_storage_explorer()
-        if ok:
-            st.success(msg)
-        else:
-            st.error(msg)
+    azure_c1, azure_c2 = st.columns([1, 1])
+    with azure_c1:
+        if st.button("🚀 Abrir caminho Azure 2025-2026", key="btn_launch_azure_storage_path", use_container_width=True):
+            ok, msg = _open_azure_storage_explorer_path()
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+    with azure_c2:
+        if st.button("🗂️ Abrir Azure Storage Explorer", key="btn_launch_azure_storage_explorer", use_container_width=True):
+            ok, msg = _open_azure_storage_explorer()
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
 
 def _render_orthomosaic_generator() -> None:
     st.subheader("🛰️ Gerador de Ortomosaico")
