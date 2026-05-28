@@ -1,0 +1,30 @@
+{
+  "setting": {
+    "app_name": "WebODM",
+    "app_logo": "settings/logo512.png",
+    "organization_name": "WebODM",
+    "organization_website": "https://github.com/WebODM/WebODM/",
+    "theme_id": 1
+  },
+  "theme": {
+    "name": "Default",
+    "primary": "#2c3e50",
+    "secondary": "#ffffff",
+    "tertiary": "#3498db",
+    "button_primary": "#2c3e50",
+    "button_default": "#95a5a6",
+    "button_danger": "#e74c3c",
+    "header_background": "#3498db",
+    "header_primary": "#ffffff",
+    "border": "#e7e7e7",
+    "highlight": "#f7f7f7",
+    "dialog_warning": "#f39c12",
+    "failed": "#ffcbcb",
+    "success": "#cbffcd",
+    "css": "",
+    "html_before_header": "",
+    "html_after_header": "",
+    "html_after_body": "",
+    "html_footer": ""
+  }
+}
