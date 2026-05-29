@@ -22,6 +22,7 @@ import subprocess
 import sqlite3
 import threading
 import time
+from contextlib import ExitStack
 from datetime import datetime, date
 from urllib.parse import quote
 import pandas as pd
@@ -2814,6 +2815,7 @@ def _processar_ortofoto_core(
     preview_max_payload_mb: int,
     preview_min_dim: int,
     progress_callback=None,
+    local_source_path: str | None = None,
 ):
     """Converte ortofotos para pré-visualização de alta qualidade no Streamlit.
 
@@ -2842,6 +2844,7 @@ def _processar_ortofoto_core(
         "preview_quality": preview_jpeg_quality,
         "preview_min_quality": preview_min_jpeg_quality,
         "preview_mode": "alta_qualidade",
+        "preview_backend": "memoria",
     }
 
     def _stretch_band(band):
@@ -2879,80 +2882,100 @@ def _processar_ortofoto_core(
             return pil_img.convert('RGB')
         return pil_img
 
+    local_source = None
     try:
-        _set_progress(14, f"Lendo ortofoto: {Path(filename).name}")
+        if local_source_path:
+            local_candidate = Path(local_source_path)
+            if local_candidate.exists() and local_candidate.is_file():
+                local_source = local_candidate
+    except Exception:
+        local_source = None
+
+    try:
+        if local_source:
+            spatial_meta["preview_backend"] = "desktop_local_rasterio"
+            _set_progress(14, f"Lendo ortofoto pelo cache local: {Path(filename).name}")
+        else:
+            spatial_meta["preview_backend"] = "memoryfile_rasterio"
+            _set_progress(14, f"Lendo ortofoto: {Path(filename).name}")
         import rasterio
         from rasterio.enums import Resampling
-        from rasterio.io import MemoryFile
-        with MemoryFile(file_bytes) as memfile:
-            with memfile.open() as src:
-                _set_progress(24, "Interpretando metadados e dimensões da ortofoto...")
-                spatial_meta["orig_width"] = int(src.width)
-                spatial_meta["orig_height"] = int(src.height)
-                if getattr(src, "crs", None):
-                    spatial_meta["crs"] = src.crs.to_wkt()
-                if getattr(src, "transform", None):
-                    spatial_meta["transform"] = src.transform.to_gdal()
+        with ExitStack() as stack:
+            if local_source:
+                src = stack.enter_context(rasterio.open(str(local_source)))
+            else:
+                from rasterio.io import MemoryFile
+                memfile = stack.enter_context(MemoryFile(file_bytes))
+                src = stack.enter_context(memfile.open())
+            _set_progress(24, "Interpretando metadados e dimensões da ortofoto...")
+            spatial_meta["orig_width"] = int(src.width)
+            spatial_meta["orig_height"] = int(src.height)
+            if getattr(src, "crs", None):
+                spatial_meta["crs"] = src.crs.to_wkt()
+            if getattr(src, "transform", None):
+                spatial_meta["transform"] = src.transform.to_gdal()
 
-                max_dim = preview_max_dim
-                ratio = min(1.0, max_dim / max(src.width, src.height))
-                out_width = max(1, int(src.width * ratio))
-                out_height = max(1, int(src.height * ratio))
-                spatial_meta["ratio"] = ratio
-                spatial_meta["preview_width"] = out_width
-                spatial_meta["preview_height"] = out_height
+            max_dim = preview_max_dim
+            ratio = min(1.0, max_dim / max(src.width, src.height))
+            out_width = max(1, int(src.width * ratio))
+            out_height = max(1, int(src.height * ratio))
+            spatial_meta["ratio"] = ratio
+            spatial_meta["preview_width"] = out_width
+            spatial_meta["preview_height"] = out_height
 
-                # Cúbico mantém boa nitidez visual e é mais rápido que Lanczos em ortofotos grandes.
-                resampling_filter = getattr(Resampling, "cubic", Resampling.bilinear)
-                bands = int(src.count)
+            # Cúbico mantém boa nitidez visual e é mais rápido que Lanczos em ortofotos grandes.
+            resampling_filter = getattr(Resampling, "cubic", Resampling.bilinear)
+            bands = int(src.count)
 
-                if bands >= 3:
-                    _set_progress(42, "Gerando pré-visualização RGB de alta qualidade...")
-                    # Mantém RGB verdadeiro quando o GeoTIFF já está em uint8; faz realce leve somente em 16/32 bits.
-                    band_indexes = [1, 2, 3]
-                    data = src.read(
-                        band_indexes,
-                        out_shape=(3, out_height, out_width),
-                        resampling=resampling_filter,
-                        masked=True,
-                    )
-                    selected_dtypes = [np.dtype(src.dtypes[index - 1]) for index in band_indexes]
-                    if all(dtype == np.dtype("uint8") for dtype in selected_dtypes):
-                        arr = np.transpose(np.stack([_preserve_uint8_band(data[i]) for i in range(3)]), (1, 2, 0))
-                    else:
-                        arr = np.transpose(np.stack([_stretch_band(data[i]) for i in range(3)]), (1, 2, 0))
-                    img = Image.fromarray(arr, "RGB")
-                elif bands == 2:
-                    _set_progress(42, "Preparando ortofoto com canal alfa...")
-                    data = src.read(1, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
-                    alpha = src.read(2, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
-                    gray = _preserve_uint8_band(data) if np.dtype(src.dtypes[0]) == np.dtype("uint8") else _stretch_band(data)
-                    rgba = np.dstack([gray, gray, gray, _preserve_uint8_band(alpha)])
-                    img = _rgba_to_rgb(Image.fromarray(rgba, "RGBA"))
+            if bands >= 3:
+                _set_progress(42, "Gerando pré-visualização RGB de alta qualidade...")
+                # Mantém RGB verdadeiro quando o GeoTIFF já está em uint8; faz realce leve somente em 16/32 bits.
+                band_indexes = [1, 2, 3]
+                data = src.read(
+                    band_indexes,
+                    out_shape=(3, out_height, out_width),
+                    resampling=resampling_filter,
+                    masked=True,
+                )
+                selected_dtypes = [np.dtype(src.dtypes[index - 1]) for index in band_indexes]
+                if all(dtype == np.dtype("uint8") for dtype in selected_dtypes):
+                    arr = np.transpose(np.stack([_preserve_uint8_band(data[i]) for i in range(3)]), (1, 2, 0))
                 else:
-                    _set_progress(42, "Preparando banda única da ortofoto...")
-                    data = src.read(1, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
-                    if np.dtype(src.dtypes[0]) == np.dtype("uint8"):
-                        img = Image.fromarray(_preserve_uint8_band(data), "L").convert("RGB")
-                    else:
-                        img = Image.fromarray(_stretch_band(data), "L").convert("RGB")
+                    arr = np.transpose(np.stack([_stretch_band(data[i]) for i in range(3)]), (1, 2, 0))
+                img = Image.fromarray(arr, "RGB")
+            elif bands == 2:
+                _set_progress(42, "Preparando ortofoto com canal alfa...")
+                data = src.read(1, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
+                alpha = src.read(2, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
+                gray = _preserve_uint8_band(data) if np.dtype(src.dtypes[0]) == np.dtype("uint8") else _stretch_band(data)
+                rgba = np.dstack([gray, gray, gray, _preserve_uint8_band(alpha)])
+                img = _rgba_to_rgb(Image.fromarray(rgba, "RGBA"))
+            else:
+                _set_progress(42, "Preparando banda única da ortofoto...")
+                data = src.read(1, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
+                if np.dtype(src.dtypes[0]) == np.dtype("uint8"):
+                    img = Image.fromarray(_preserve_uint8_band(data), "L").convert("RGB")
+                else:
+                    img = Image.fromarray(_stretch_band(data), "L").convert("RGB")
     except ImportError:
         try:
-            _set_progress(30, "Lendo imagem com Pillow...")
-            img = Image.open(BytesIO(file_bytes))
+            spatial_meta["preview_backend"] = "desktop_local_pillow" if local_source else "memory_pillow"
+            _set_progress(30, "Lendo imagem com Pillow local..." if local_source else "Lendo imagem com Pillow...")
+            img = Image.open(local_source if local_source else BytesIO(file_bytes))
         except Exception as e_pil:
             erro = f"Falha ao ler imagem sem Rasterio: {e_pil}"
     except Exception as e_rast:
         try:
-            _set_progress(30, "Lendo imagem em modo compatível...")
-            img = Image.open(BytesIO(file_bytes))
+            spatial_meta["preview_backend"] = "desktop_local_pillow_fallback" if local_source else "memory_pillow_fallback"
+            _set_progress(30, "Lendo imagem local em modo compatível..." if local_source else "Lendo imagem em modo compatível...")
+            img = Image.open(local_source if local_source else BytesIO(file_bytes))
         except Exception as e_pil:
             erro = f"Falha ao ler formato {ext}: {e_rast} | {e_pil}"
 
     if erro is None and img is None:
         try:
             _set_progress(34, "Interpretando imagem...")
-            img = Image.open(BytesIO(file_bytes))
+            img = Image.open(local_source if local_source else BytesIO(file_bytes))
         except Exception as e:
             erro = f"Falha ao interpretar a imagem: {e}"
 
@@ -3231,6 +3254,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                     preview_max_payload_mb,
                     preview_min_dim,
                     progress_callback=_progress,
+                    local_source_path=str(desktop_cache_path) if desktop_cache_path else None,
                 )
                 _write_ortho_preview_disk_cache(cache_key, result)
             if result and not result[2]:
