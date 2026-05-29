@@ -10185,6 +10185,287 @@ def _orthomosaic_render_viewer(path: Path) -> None:
 
 WEBODM_CONFIG_PATH = SYSTEM_CONFIG_DIR / "config_webodm.json"
 WEBODM_DEFAULT_URL = "http://localhost:8000/dashboard/"
+WEBODM_DOCKER_CONTAINER_HINTS = (
+    "webapp",
+    "worker",
+    "broker",
+    "db",
+    "node-odx-1",
+    "webodm",
+    "opendronemap",
+)
+
+def _run_quiet_command(args: list[str], timeout: int = 8) -> tuple[bool, str, str]:
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return result.returncode == 0, (result.stdout or "").strip(), (result.stderr or "").strip()
+    except Exception as exc:
+        return False, "", str(exc)
+
+def _find_docker_desktop_exe() -> Path | None:
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES", "")) / "Docker" / "Docker" / "Docker Desktop.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Docker" / "Docker Desktop.exe",
+        APP_ROOT / "Docker" / "Docker Desktop.exe",
+    ]
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate
+        except Exception:
+            pass
+    return None
+
+def _docker_engine_status(timeout: int = 4) -> dict:
+    docker_cmd = shutil.which("docker")
+    status = {
+        "docker_cmd": docker_cmd or "",
+        "active": False,
+        "version": "",
+        "message": "Docker CLI não encontrado.",
+    }
+    if not docker_cmd:
+        return status
+    ok, out, err = _run_quiet_command([docker_cmd, "info", "--format", "{{.ServerVersion}}"], timeout=timeout)
+    if ok:
+        status.update({"active": True, "version": out or "-", "message": "Docker ativo."})
+    else:
+        status["message"] = err or "Docker instalado, mas o serviço ainda não respondeu."
+    return status
+
+def _webodm_reachable(url: str | None = None, timeout: int = 3) -> tuple[bool, str]:
+    webodm_url = _normalize_webodm_url(url or get_webodm_url_config())
+    try:
+        response = requests.get(webodm_url, timeout=timeout, allow_redirects=True)
+        if response.status_code < 500:
+            return True, f"WebODM respondendo em {webodm_url}."
+        return False, f"WebODM respondeu {response.status_code} em {webodm_url}."
+    except Exception as exc:
+        return False, f"WebODM ainda não respondeu em {webodm_url}: {exc}"
+
+def _webodm_docker_containers(docker_cmd: str) -> list[dict]:
+    if not docker_cmd:
+        return []
+    ok, out, _ = _run_quiet_command([docker_cmd, "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"], timeout=10)
+    if not ok or not out:
+        return []
+    rows = []
+    for line in out.splitlines():
+        parts = line.split("\t", 1)
+        name = parts[0].strip()
+        status = parts[1].strip() if len(parts) > 1 else ""
+        lowered = name.lower()
+        if any(hint in lowered for hint in WEBODM_DOCKER_CONTAINER_HINTS):
+            rows.append({"name": name, "status": status, "running": status.lower().startswith("up")})
+    return rows
+
+def _start_webodm_docker_containers(docker_cmd: str) -> list[str]:
+    containers = _webodm_docker_containers(docker_cmd)
+    to_start = [item["name"] for item in containers if not item.get("running")]
+    if not docker_cmd or not to_start:
+        return []
+    ok, out, _ = _run_quiet_command([docker_cmd, "start", *to_start], timeout=35)
+    if not ok:
+        return []
+    started = [line.strip() for line in out.splitlines() if line.strip()]
+    return started or to_start
+
+def _activate_docker_for_webodm() -> dict:
+    status = {
+        "docker_started": False,
+        "docker_active": False,
+        "docker_version": "",
+        "desktop_path": "",
+        "containers": [],
+        "started_containers": [],
+        "webodm_online": False,
+        "messages": [],
+    }
+    docker_status = _docker_engine_status(timeout=8)
+    status["docker_active"] = bool(docker_status.get("active"))
+    status["docker_version"] = docker_status.get("version", "")
+    status["messages"].append(docker_status.get("message", ""))
+
+    if not status["docker_active"]:
+        desktop = _find_docker_desktop_exe()
+        if desktop:
+            status["desktop_path"] = str(desktop)
+            try:
+                subprocess.Popen(
+                    [str(desktop)],
+                    cwd=str(desktop.parent),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    shell=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                status["docker_started"] = True
+                status["messages"].append(f"Docker Desktop solicitado: {desktop}")
+            except Exception as exc:
+                status["messages"].append(f"Não foi possível chamar o Docker Desktop: {exc}")
+        else:
+            status["messages"].append("Docker Desktop não encontrado no caminho padrão.")
+
+        for _ in range(10):
+            time.sleep(3)
+            docker_status = _docker_engine_status(timeout=8)
+            if docker_status.get("active"):
+                status["docker_active"] = True
+                status["docker_version"] = docker_status.get("version", "")
+                status["messages"].append("Docker ativado com sucesso.")
+                break
+
+    docker_cmd = docker_status.get("docker_cmd") or shutil.which("docker") or ""
+    if status["docker_active"] and docker_cmd:
+        status["started_containers"] = _start_webodm_docker_containers(docker_cmd)
+        status["containers"] = _webodm_docker_containers(docker_cmd)
+        if status["started_containers"]:
+            status["messages"].append("Containers WebODM iniciados: " + ", ".join(status["started_containers"]))
+        elif status["containers"]:
+            status["messages"].append("Containers WebODM encontrados/verificados.")
+        else:
+            status["messages"].append("Docker ativo, mas nenhum container WebODM existente foi encontrado.")
+
+    for _ in range(8):
+        online, message = _webodm_reachable(timeout=5)
+        if online:
+            status["webodm_online"] = True
+            status["messages"].append(message)
+            break
+        last_message = message
+        time.sleep(2)
+    if not status["webodm_online"]:
+        status["messages"].append(last_message if "last_message" in locals() else "WebODM ainda não respondeu.")
+    return status
+
+def _current_webodm_docker_status() -> dict:
+    docker_status = _docker_engine_status(timeout=2)
+    online, webodm_msg = _webodm_reachable(timeout=2)
+    containers = _webodm_docker_containers(docker_status.get("docker_cmd", ""))
+    return {
+        "docker_active": bool(docker_status.get("active")),
+        "docker_version": docker_status.get("version", ""),
+        "containers": containers,
+        "webodm_online": online,
+        "messages": [docker_status.get("message", ""), webodm_msg],
+    }
+
+def _cached_current_webodm_docker_status(max_age_seconds: int = 12) -> dict:
+    cached = st.session_state.get("_webodm_docker_status_cache")
+    now = time.time()
+    if isinstance(cached, dict) and now - float(cached.get("time", 0)) <= max_age_seconds:
+        value = cached.get("value")
+        if isinstance(value, dict):
+            return value
+    value = _current_webodm_docker_status()
+    st.session_state["_webodm_docker_status_cache"] = {"time": now, "value": value}
+    return value
+
+def render_webodm_docker_status_card(status: dict | None = None) -> None:
+    status = status or _current_webodm_docker_status()
+    docker_ok = bool(status.get("docker_active"))
+    webodm_ok = bool(status.get("webodm_online"))
+    containers = status.get("containers") or []
+    started = status.get("started_containers") or []
+    messages = [msg for msg in status.get("messages", []) if msg]
+    container_html = "".join(
+        f"<div class='tmg-docker-row'><span>{html.escape(item.get('name', '-'))}</span><b>{html.escape(item.get('status', '-'))}</b></div>"
+        for item in containers[:8]
+    ) or "<div class='tmg-docker-muted'>Nenhum container WebODM listado ainda.</div>"
+    message_html = "".join(f"<li>{html.escape(str(msg))}</li>" for msg in messages[-5:])
+    started_text = ", ".join(started) if started else "Nenhum container novo iniciado nesta ação."
+    st.markdown(
+        f"""
+        <style>
+        .tmg-docker-card {{
+            margin: 12px 0 18px 0;
+            padding: 18px;
+            border-radius: 18px;
+            border: 1px solid rgba(0,229,255,.40);
+            background:
+                radial-gradient(circle at 16% 0%, rgba(0,229,255,.18), transparent 35%),
+                linear-gradient(145deg, rgba(4,15,29,.96), rgba(9,37,63,.88), rgba(4,15,29,.98));
+            box-shadow:
+                0 18px 36px rgba(0,0,0,.40),
+                0 0 26px rgba(0,229,255,.18),
+                inset 0 1px 0 rgba(255,255,255,.12);
+            color: #ffffff;
+            font-family: 'Segoe UI', Arial, sans-serif;
+        }}
+        .tmg-docker-title {{
+            font-weight: 950;
+            letter-spacing: 1.2px;
+            text-transform: uppercase;
+            text-shadow: 0 1px 0 #000, 0 0 16px rgba(0,229,255,.34);
+            margin-bottom: 12px;
+        }}
+        .tmg-docker-grid {{
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            margin-bottom: 12px;
+        }}
+        .tmg-docker-pill {{
+            border-radius: 14px;
+            border: 1px solid rgba(0,229,255,.30);
+            background: rgba(255,255,255,.045);
+            padding: 11px 12px;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.10);
+        }}
+        .tmg-docker-pill b {{
+            display: block;
+            color: #ffffff;
+            font-size: .82rem;
+        }}
+        .tmg-docker-pill span {{
+            display: block;
+            margin-top: 4px;
+            color: #dffbff;
+            font-size: .75rem;
+            font-weight: 800;
+        }}
+        .tmg-docker-ok {{ color: #5ff2b1 !important; }}
+        .tmg-docker-warn {{ color: #ffcc66 !important; }}
+        .tmg-docker-row {{
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 7px 0;
+            border-top: 1px solid rgba(255,255,255,.08);
+            color: #dffbff;
+            font-size: .78rem;
+        }}
+        .tmg-docker-row b {{ color: #ffffff; text-align: right; }}
+        .tmg-docker-muted, .tmg-docker-card li {{
+            color: rgba(255,255,255,.72);
+            font-size: .78rem;
+            font-weight: 700;
+        }}
+        @media (max-width: 760px) {{
+            .tmg-docker-grid {{ grid-template-columns: 1fr; }}
+        }}
+        </style>
+        <div class="tmg-docker-card">
+            <div class="tmg-docker-title">Status Docker / WebODM</div>
+            <div class="tmg-docker-grid">
+                <div class="tmg-docker-pill"><b>Docker</b><span class="{'tmg-docker-ok' if docker_ok else 'tmg-docker-warn'}">{'Ativo' if docker_ok else 'Não ativo'}</span></div>
+                <div class="tmg-docker-pill"><b>WebODM</b><span class="{'tmg-docker-ok' if webodm_ok else 'tmg-docker-warn'}">{'Online' if webodm_ok else 'Aguardando'}</span></div>
+                <div class="tmg-docker-pill"><b>Versão Docker</b><span>{html.escape(status.get('docker_version') or '-')}</span></div>
+            </div>
+            <div class="tmg-docker-muted">Iniciados agora: {html.escape(started_text)}</div>
+            {container_html}
+            <ul>{message_html}</ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 def _normalize_webodm_url(url: str) -> str:
     value = str(url or "").strip() or WEBODM_DEFAULT_URL
@@ -10876,10 +11157,23 @@ def _render_orthomosaic_generator() -> None:
 
     if "show_webodm_panel" not in st.session_state:
         st.session_state["show_webodm_panel"] = False
-    webodm_cols = st.columns([1, 3])
+    if "webodm_docker_status" not in st.session_state:
+        st.session_state["webodm_docker_status"] = None
+    webodm_cols = st.columns([1, 1, 2])
     with webodm_cols[0]:
+        if st.button("🐳 Ligar Docker", key="ortho_start_docker_webodm", use_container_width=True):
+            load_box = st.empty()
+            update_tmg_loading(load_box, 15, "Ligando Docker para WebODM...")
+            status = _activate_docker_for_webodm()
+            update_tmg_loading(load_box, 88, "Verificando status Docker/WebODM...")
+            st.session_state["webodm_docker_status"] = status
+            st.session_state["_webodm_docker_status_cache"] = {"time": time.time(), "value": status}
+            st.session_state["show_webodm_panel"] = True
+            finish_tmg_loading_and_clear(load_box, "Docker/WebODM verificado com sucesso.", hold_seconds=0.2)
+    with webodm_cols[1]:
         if st.button("🌐 Gerador WebODM", key="ortho_open_webodm_panel", use_container_width=True):
             st.session_state["show_webodm_panel"] = True
+    render_webodm_docker_status_card(st.session_state.get("webodm_docker_status") or _cached_current_webodm_docker_status())
     if st.session_state.get("show_webodm_panel"):
         render_webodm_iframe_panel()
     return
