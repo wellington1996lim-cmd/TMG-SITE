@@ -63,7 +63,33 @@ def save_image_for_desktop_viewer(file_bytes: bytes, filename: str, app_root: st
     target = cache_dir / safe_name
     if not target.exists() or target.stat().st_size != len(file_bytes or b""):
         target.write_bytes(file_bytes or b"")
+    cleanup_desktop_viewer_cache(cache_dir, keep_path=target)
     return target
+
+
+def cleanup_desktop_viewer_cache(cache_dir: str | Path, keep_path: str | Path | None = None, max_files: int = 4, max_bytes: int = 420 * 1024 * 1024) -> None:
+    try:
+        root = Path(cache_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        keep = Path(keep_path).resolve() if keep_path else None
+        files = sorted(
+            [item for item in root.iterdir() if item.is_file() and item.suffix.lower() in IMAGE_EXTENSIONS],
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        total = sum(item.stat().st_size for item in files)
+        for index, item in enumerate(files):
+            try:
+                if keep and item.resolve() == keep:
+                    continue
+                if index >= max_files or total > max_bytes:
+                    size = item.stat().st_size
+                    item.unlink(missing_ok=True)
+                    total -= size
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def launch_desktop_viewer(image_path: str | Path, app_root: str | Path | None = None) -> tuple[bool, str]:

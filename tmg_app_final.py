@@ -3450,7 +3450,7 @@ def _ortho_preview_disk_paths(cache_key: str) -> tuple[Path, Path]:
     safe_key = re.sub(r"[^a-fA-F0-9]+", "", str(cache_key or ""))[:64] or "preview"
     return ORTHO_PREVIEW_CACHE_DIR / f"{safe_key}.jpg", ORTHO_PREVIEW_CACHE_DIR / f"{safe_key}.json"
 
-def _cleanup_ortho_preview_disk_cache(max_files: int = 36, max_bytes: int = 900 * 1024 * 1024) -> None:
+def _cleanup_ortho_preview_disk_cache(max_files: int = 10, max_bytes: int = 260 * 1024 * 1024) -> None:
     try:
         ORTHO_PREVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         files = sorted(
