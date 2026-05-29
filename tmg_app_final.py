@@ -447,6 +447,22 @@ def render_progress_upload_tmg(progress, texto: str = "Carregando arquivo...", c
 def render_upload_status_tmg(progress=100, texto: str = "Carregamento concluído com sucesso.", container=None):
     return render_tmg_loading_bar(progress, texto, container=container)
 
+def _tmg_upload_file_label(uploaded) -> str:
+    try:
+        name = Path(getattr(uploaded, "name", "ortofoto")).name
+    except Exception:
+        name = "ortofoto"
+    try:
+        size = int(getattr(uploaded, "size", 0) or 0)
+    except Exception:
+        size = 0
+    size_label = _tv_human_size(size) if "_tv_human_size" in globals() and size else ""
+    return f"{name} · {size_label}" if size_label else name
+
+def render_tmg_ortho_import_progress(container, progress, uploaded=None, etapa: str = "Importando ortofoto..."):
+    label = _tmg_upload_file_label(uploaded) if uploaded is not None else "ortofoto"
+    return update_tmg_loading(container, progress, f"{etapa} · {label}")
+
 def clear_tmg_loading(container):
     try:
         if container is not None:
@@ -6854,11 +6870,13 @@ def _mosaic_bytes_from_selection(option: str) -> tuple:
 def _mosaic_input_bytes(uploaded, selected_option: str, origem: str) -> tuple:
     if uploaded is not None:
         load_box = st.empty()
-        update_tmg_loading(load_box, 35, f"Recebendo arquivo: {Path(uploaded.name).name}")
+        render_tmg_ortho_import_progress(load_box, 18, uploaded, "Recebendo ortofoto do importador")
+        render_tmg_ortho_import_progress(load_box, 36, uploaded, "Validando arquivo de ortofoto")
         raw = uploaded.getbuffer().tobytes()
-        update_tmg_loading(load_box, 78, "Registrando arquivo na biblioteca interna...")
+        render_tmg_ortho_import_progress(load_box, 68, uploaded, "Copiando arquivo para memória local")
+        render_tmg_ortho_import_progress(load_box, 84, uploaded, "Registrando ortofoto na biblioteca interna")
         _mosaic_register_bytes(raw, uploaded.name, origem)
-        finish_tmg_loading_and_clear(load_box, "Carregamento concluído com sucesso.")
+        finish_tmg_loading_and_clear(load_box, "Importação da ortofoto concluída com sucesso.", hold_seconds=0.22)
         return raw, uploaded.name
     return _mosaic_bytes_from_selection(selected_option)
 
@@ -6888,12 +6906,20 @@ def _resettable_ortho_uploader(label: str, key: str, accept_multiple_files: bool
         if accept_multiple_files:
             total_files = len(uploaded or [])
             if show_upload_loading:
-                update_tmg_loading(load_box, 65, f"Recebendo {total_files} arquivo(s) para carregamento...")
-                finish_tmg_loading_and_clear(load_box, f"{total_files} arquivo(s) carregado(s) com sucesso.")
+                total_size = sum(int(getattr(file, "size", 0) or 0) for file in (uploaded or []))
+                size_label = _tv_human_size(total_size) if total_size else ""
+                update_tmg_loading(load_box, 12, f"Recebendo {total_files} ortofoto(s) do importador...")
+                update_tmg_loading(load_box, 32, "Validando lote de ortofotos" + (f" · {size_label}" if size_label else ""))
+                update_tmg_loading(load_box, 58, "Preparando arquivos para os visualizadores...")
+                update_tmg_loading(load_box, 86, "Ortofotos prontas para processamento no visualizador...")
+                finish_tmg_loading_and_clear(load_box, f"{total_files} arquivo(s) carregado(s) com sucesso.", hold_seconds=0.22)
         else:
             if show_upload_loading:
-                update_tmg_loading(load_box, 65, f"Carregando ortofoto: {Path(uploaded.name).name}")
-                finish_tmg_loading_and_clear(load_box, "Carregamento concluído com sucesso.")
+                render_tmg_ortho_import_progress(load_box, 12, uploaded, "Recebendo ortofoto do importador")
+                render_tmg_ortho_import_progress(load_box, 34, uploaded, "Validando tipo, nome e tamanho")
+                render_tmg_ortho_import_progress(load_box, 58, uploaded, "Preparando ortofoto para o visualizador")
+                render_tmg_ortho_import_progress(load_box, 86, uploaded, "Arquivo pronto para processamento")
+                finish_tmg_loading_and_clear(load_box, "Importação da ortofoto concluída com sucesso.", hold_seconds=0.22)
         _, clear_col = st.columns([3, 1])
         with clear_col:
             if st.button("🗑️ Excluir e importar nova", key=f"{key}_clear_{st.session_state[reset_key]}", use_container_width=True):
@@ -7295,7 +7321,13 @@ def _tv_render_orthos(manifest: dict) -> None:
         key="tv_ortho_upload"
     )
     if ortho_files:
-        render_tmg_loading_bar(100, f"{len(ortho_files)} ortofoto(s) recebida(s) para registro.")
+        load_box = st.empty()
+        total_size = sum(int(getattr(file, "size", 0) or 0) for file in (ortho_files or []))
+        size_label = _tv_human_size(total_size) if total_size else ""
+        update_tmg_loading(load_box, 16, f"Recebendo {len(ortho_files)} ortofoto(s) para registro...")
+        update_tmg_loading(load_box, 48, "Validando lote de ortofotos" + (f" · {size_label}" if size_label else ""))
+        update_tmg_loading(load_box, 82, "Arquivos prontos para importar no visualizador...")
+        finish_tmg_loading_and_clear(load_box, f"{len(ortho_files)} ortofoto(s) recebida(s) para registro.", hold_seconds=0.22)
     if st.button("Registrar ortofoto recebida", type="primary", key="tv_register_ortho", use_container_width=True):
         if not ortho_files:
             st.warning("Selecione uma ortofoto.")
@@ -8465,7 +8497,11 @@ def _vd_render_ortofotos(manifest: dict) -> None:
             key="vd_ortho_file"
         )
         if ortho_file is not None:
-            render_tmg_loading_bar(100, f"Ortofoto recebida: {Path(ortho_file.name).name}")
+            load_box = st.empty()
+            render_tmg_ortho_import_progress(load_box, 18, ortho_file, "Recebendo ortofoto gerada")
+            render_tmg_ortho_import_progress(load_box, 52, ortho_file, "Validando arquivo para importação")
+            render_tmg_ortho_import_progress(load_box, 86, ortho_file, "Arquivo pronto para abrir no visualizador")
+            finish_tmg_loading_and_clear(load_box, "Ortofoto recebida com sucesso.", hold_seconds=0.22)
         importar_ortho = st.form_submit_button("Importar Ortofoto", type="primary", use_container_width=True)
 
     if importar_ortho:
