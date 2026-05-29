@@ -46,6 +46,26 @@ def _write_viewer_config(config: dict) -> None:
         pass
 
 
+def save_viewer_mode(mode: str, enable_desktop: bool | None = None) -> dict:
+    config = _read_viewer_config()
+    normalized = str(mode or "auto").strip().lower()
+    if normalized not in ("auto", "streamlit", "desktop"):
+        normalized = "auto"
+    config["viewer_mode"] = normalized
+    if enable_desktop is not None:
+        config["enable_desktop_viewer_local"] = bool(enable_desktop)
+    _write_viewer_config(config)
+    return config
+
+
+def enable_desktop_viewer_mode() -> dict:
+    return save_viewer_mode("desktop", enable_desktop=True)
+
+
+def enable_streamlit_viewer_mode() -> dict:
+    return save_viewer_mode("streamlit", enable_desktop=False)
+
+
 def is_deploy_environment() -> bool:
     cloud_markers = (
         "STREAMLIT_CLOUD",
@@ -101,4 +121,3 @@ def get_viewer_runtime() -> dict:
         "desktop_viewer_cache_dir": str((PROJECT_ROOT / str(config.get("desktop_viewer_cache_dir") or "tmg_data/desktop_viewer")).resolve()),
         "config_path": str(VIEWER_CONFIG_PATH),
     }
-

@@ -40,9 +40,17 @@ APP_MPLCONFIG_DIR = APP_ROOT / "tmg_data" / "matplotlib"
 
 try:
     from viewer_manager import render_desktop_viewer_controls as _tmg_render_desktop_viewer_controls
+    from config_app import (
+        enable_desktop_viewer_mode as _tmg_enable_desktop_viewer_mode,
+        enable_streamlit_viewer_mode as _tmg_enable_streamlit_viewer_mode,
+        get_viewer_runtime as _tmg_get_viewer_runtime,
+    )
     HAS_TMG_VIEWER_MANAGER = True
 except Exception:
     _tmg_render_desktop_viewer_controls = None
+    _tmg_enable_desktop_viewer_mode = None
+    _tmg_enable_streamlit_viewer_mode = None
+    _tmg_get_viewer_runtime = None
     HAS_TMG_VIEWER_MANAGER = False
 
 _TMG_DESKTOP_VIEWER_RENDERED_KEYS = set()
@@ -5908,6 +5916,42 @@ if not st.session_state.logged_in:
         margin-top: 14px;
     }
 
+    .login-desktop-mode-card {
+        margin: 10px 0 4px 0;
+        padding: 12px 14px;
+        border-radius: 14px;
+        border: 1px solid rgba(0,229,255,.40);
+        background:
+            radial-gradient(circle at 15% 0%, rgba(0,229,255,.18), transparent 36%),
+            linear-gradient(145deg, rgba(2,14,36,.94), rgba(18,62,100,.76), rgba(0,212,255,.12));
+        box-shadow:
+            0 12px 26px rgba(0,0,0,.38),
+            0 0 20px rgba(0,212,255,.20),
+            inset 0 1px 0 rgba(255,255,255,.16);
+    }
+
+    .login-desktop-mode-title {
+        color: #ffffff;
+        font-size: .82rem;
+        font-weight: 950;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        text-shadow: 0 1px 0 rgba(0,0,0,.95), 0 0 12px rgba(0,212,255,.42);
+        margin-bottom: 5px;
+    }
+
+    .login-desktop-mode-status {
+        color: #dffbff;
+        font-size: .74rem;
+        font-weight: 800;
+        line-height: 1.35;
+        text-shadow: 0 1px 0 rgba(0,0,0,.80);
+    }
+
+    .login-desktop-mode-status b {
+        color: #5ff2b1;
+    }
+
     .login-cfg-panel {
         background: linear-gradient(160deg, #181818 0%, #0f0f0f 100%);
         border: 1px solid #2a2a2a;
@@ -5972,6 +6016,49 @@ if not st.session_state.logged_in:
 
         usuario = st.text_input("Usuário", placeholder="Digite seu login", key="login_user")
         senha   = st.text_input("Senha",   placeholder="Digite sua senha", type="password", key="login_pass")
+
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        if HAS_TMG_VIEWER_MANAGER and _tmg_get_viewer_runtime is not None:
+            try:
+                viewer_runtime = _tmg_get_viewer_runtime()
+            except Exception:
+                viewer_runtime = {"active_mode": "streamlit", "configured_mode": "auto", "desktop_available": False, "is_deploy": True}
+            active_mode = str(viewer_runtime.get("active_mode", "streamlit"))
+            configured_mode = str(viewer_runtime.get("configured_mode", "auto"))
+            is_deploy_viewer = bool(viewer_runtime.get("is_deploy"))
+            desktop_available = bool(viewer_runtime.get("desktop_available"))
+            modo_label = "Desktop Local" if active_mode == "desktop" else "Streamlit Seguro"
+            libs_label = "Tkinter + Pillow + cache local" if active_mode == "desktop" else "Visualizador navegador/Streamlit"
+            deploy_note = "Deploy detectado: modo desktop fica bloqueado por segurança." if is_deploy_viewer else "Ambiente local detectado: bibliotecas locais podem acelerar zoom, pan e carregamento."
+            st.markdown(
+                f"""
+                <div class="login-desktop-mode-card">
+                    <div class="login-desktop-mode-title">Modo dos Visualizadores</div>
+                    <div class="login-desktop-mode-status">
+                        Ativo: <b>{html.escape(modo_label)}</b><br>
+                        Configuração: {html.escape(configured_mode)} · {html.escape(libs_label)}<br>
+                        {html.escape(deploy_note)}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            btn_label = "⚡ Ativar Modo Desktop Local" if active_mode != "desktop" else "🌐 Usar Modo Streamlit Seguro"
+            if st.button(btn_label, key="btn_login_toggle_desktop_viewer", use_container_width=True):
+                if active_mode == "desktop":
+                    if _tmg_enable_streamlit_viewer_mode is not None:
+                        _tmg_enable_streamlit_viewer_mode()
+                    st.success("Modo Streamlit Seguro ativado para os visualizadores.")
+                    app_rerun()
+                else:
+                    if is_deploy_viewer or not desktop_available:
+                        st.warning("Modo Desktop Local só fica disponível no computador local com sessão gráfica.")
+                    else:
+                        if _tmg_enable_desktop_viewer_mode is not None:
+                            _tmg_enable_desktop_viewer_mode()
+                        st.success("Modo Desktop Local ativado. As ortofotos poderão abrir em visualizador externo mais rápido.")
+                        app_rerun()
 
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
