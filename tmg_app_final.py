@@ -512,13 +512,36 @@ def _mark_tmg_page_transition(target_page: str) -> None:
         "started_at": time.time(),
     }
 
+def _mark_tmg_visualizador_transition(target_sub: str) -> None:
+    current_sub = st.session_state.get("visualizador_sub")
+    if not target_sub or target_sub == current_sub:
+        return
+    st.session_state["_tmg_visualizador_transition"] = {
+        "from": str(current_sub or ""),
+        "to": str(target_sub),
+        "started_at": time.time(),
+    }
+
 def render_tmg_page_transition_loading(container=None):
     transition = st.session_state.get("_tmg_page_transition")
     if not isinstance(transition, dict) or not transition.get("to"):
         return None
     target = container if container is not None else st.empty()
     label = _tmg_page_label(transition.get("to"))
-    render_tmg_loading_bar(18, f"Carregando janela: {label}", container=target)
+    elapsed = max(0.0, time.time() - float(transition.get("started_at") or time.time()))
+    progress = min(88, 18 + int(elapsed * 420))
+    render_tmg_loading_bar(progress, f"Carregando janela: {label}", container=target)
+    return target
+
+def render_tmg_visualizador_transition_loading(container=None):
+    transition = st.session_state.get("_tmg_visualizador_transition")
+    if not isinstance(transition, dict) or not transition.get("to"):
+        return None
+    target = container if container is not None else st.empty()
+    label = str(transition.get("to") or "visualizador")
+    elapsed = max(0.0, time.time() - float(transition.get("started_at") or time.time()))
+    progress = min(90, 22 + int(elapsed * 420))
+    render_tmg_loading_bar(progress, f"Preparando visualizador: {label}", container=target)
     return target
 
 def clear_tmg_page_transition_loading(container=None) -> None:
@@ -529,6 +552,15 @@ def clear_tmg_page_transition_loading(container=None) -> None:
             finish_tmg_loading_and_clear(container, "Janela carregada com sucesso.", hold_seconds=0.03)
     finally:
         st.session_state.pop("_tmg_page_transition", None)
+
+def clear_tmg_visualizador_transition_loading(container=None) -> None:
+    if "_tmg_visualizador_transition" not in st.session_state:
+        return
+    try:
+        if container is not None:
+            finish_tmg_loading_and_clear(container, "Visualizador carregado com sucesso.", hold_seconds=0.03)
+    finally:
+        st.session_state.pop("_tmg_visualizador_transition", None)
 
 def app_rerun():
     if hasattr(st, "rerun"):
@@ -6472,6 +6504,7 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
                 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
                 if st.button(f"Selecionar {nome}", key=f"btn_cultura_{nome}", type="primary"):
                     st.session_state.cultura_selecionada = nome
+                    _mark_tmg_page_transition("Checklist")
                     st.session_state.pagina_ativa = "Checklist"
                     app_rerun()
 
@@ -6491,6 +6524,7 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
                 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
                 if st.button("Abrir Parceiros / Controle de Voos e Dados", key="btn_open_partners_home", type="primary", use_container_width=True):
                     st.session_state.cultura_selecionada = "PARCEIROS"
+                    _mark_tmg_page_transition("Parceiros")
                     st.session_state.pagina_ativa = "Parceiros"
                     app_rerun()
 
@@ -16000,9 +16034,12 @@ window.addEventListener('resize', resize);
         for col, (_, label, sub_page, button_key) in zip(vcols, visible_phenotyping_buttons):
             with col:
                 if st.button(label, key=button_key, use_container_width=True):
+                    _mark_tmg_visualizador_transition(sub_page)
                     st.session_state.visualizador_sub = sub_page
+                    app_rerun()
 
         st.markdown("---")
+        _tmg_visualizador_transition_slot = render_tmg_visualizador_transition_loading()
 
         # NOVO - Sub-visualizações
         if st.session_state.visualizador_sub == "Contagem":
@@ -23393,6 +23430,10 @@ html body pre {{
 </style>
 """, unsafe_allow_html=True)
 
+try:
+    clear_tmg_visualizador_transition_loading(locals().get("_tmg_visualizador_transition_slot"))
+except Exception:
+    pass
 clear_tmg_page_transition_loading(_tmg_page_transition_slot)
 
 # ==========================================
