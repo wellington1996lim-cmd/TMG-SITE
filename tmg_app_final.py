@@ -502,7 +502,173 @@ def finish_tmg_loading_and_clear(container, texto: str = "Carregamento concluíd
     except Exception:
         pass
 
+def render_tmg_global_loading_overlay(
+    progress,
+    texto: str = "Carregando módulo...",
+    container=None,
+    auto_hide_seconds: float | None = None,
+):
+    try:
+        pct = max(0, min(100, int(float(progress))))
+    except Exception:
+        pct = 0
+    texto_seguro = html.escape(str(texto or "Carregando módulo..."))
+    status = "Carregamento concluído com sucesso." if pct >= 100 else texto_seguro
+    fill = get_progress_color(pct)
+    logo_html = _tmg_loading_logo_html()
+    autohide_class = " tmg-global-loading-autohide" if auto_hide_seconds is not None and pct >= 100 else ""
+    try:
+        autohide_delay = max(0.2, float(auto_hide_seconds or 0.65))
+    except Exception:
+        autohide_delay = 0.65
+    markup = f"""
+    <style>
+    .tmg-global-loading-overlay {{
+        position: fixed;
+        inset: 0;
+        z-index: 2147483200;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background:
+            radial-gradient(circle at 50% 22%, rgba({THEME_PRIMARY_RGB}, .20), transparent 36%),
+            linear-gradient(135deg, rgba(2,14,36,.98), rgba(6,21,37,.97), rgba(13,43,69,.96));
+        backdrop-filter: blur(10px) saturate(145%);
+        -webkit-backdrop-filter: blur(10px) saturate(145%);
+        opacity: 1;
+        pointer-events: all;
+        transition: opacity .42s ease;
+    }}
+    .tmg-global-loading-card {{
+        width: min(480px, calc(100vw - 42px));
+        padding: 22px 24px;
+        border-radius: 20px;
+        border: 1px solid rgba({THEME_PRIMARY_RGB}, .64);
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.14), transparent 30%),
+            radial-gradient(circle at top left, rgba({THEME_PRIMARY_RGB}, .24), transparent 42%),
+            linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.84), rgba({THEME_PRIMARY_RGB}, .20));
+        box-shadow:
+            0 22px 48px rgba(0,0,0,.54),
+            0 0 36px rgba({THEME_PRIMARY_RGB}, .36),
+            inset 0 1px 0 rgba(255,255,255,.24),
+            inset 0 -12px 22px rgba(2,14,36,.40);
+        color: #fff;
+        font-family: 'Segoe UI', Arial, sans-serif;
+        text-align: center;
+    }}
+    .tmg-global-loading-logo {{
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 52px;
+        margin-bottom: 12px;
+    }}
+    .tmg-global-loading-logo .tmg-load-logo-img {{
+        max-width: 170px;
+        max-height: 58px;
+        object-fit: contain;
+        filter: drop-shadow(0 8px 14px rgba(0,0,0,.48)) drop-shadow(0 0 18px rgba({THEME_PRIMARY_RGB},.42));
+    }}
+    .tmg-global-loading-logo .tmg-load-logo-fallback {{
+        color:#fff;
+        font-weight:950;
+        letter-spacing:4px;
+        font-size:1.25rem;
+        text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba({THEME_PRIMARY_RGB},.62);
+    }}
+    .tmg-global-loading-text {{
+        color:#ffffff;
+        font-size:.95rem;
+        font-weight:950;
+        letter-spacing:.45px;
+        text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 12px rgba({THEME_PRIMARY_RGB},.42);
+    }}
+    .tmg-global-loading-track {{
+        position:relative;
+        height:26px;
+        margin-top:15px;
+        border-radius:999px;
+        overflow:hidden;
+        border:1px solid rgba({THEME_PRIMARY_RGB},.60);
+        background:linear-gradient(180deg,#020e24,#071a2c);
+        box-shadow:inset 0 3px 8px rgba(0,0,0,.70), 0 0 18px rgba({THEME_PRIMARY_RGB},.28);
+    }}
+    .tmg-global-loading-fill {{
+        width:{pct}%;
+        height:100%;
+        border-radius:999px;
+        background:{fill};
+        box-shadow:inset 0 1px 0 rgba(255,255,255,.46), 0 0 20px rgba({THEME_PRIMARY_RGB},.58);
+        transition:width .35s ease, background .35s ease;
+        position:relative;
+    }}
+    .tmg-global-loading-fill:after {{
+        content:"";
+        position:absolute;
+        inset:0;
+        background:linear-gradient(120deg, transparent 0%, rgba(255,255,255,.40) 45%, transparent 75%);
+        transform:translateX(-100%);
+        animation:tmgGlobalLoadingShine 1.25s ease-in-out infinite;
+    }}
+    .tmg-global-loading-percent {{
+        position:absolute;
+        inset:0;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        color:#fff;
+        font-weight:950;
+        font-size:.80rem;
+        text-shadow:0 1px 4px rgba(0,0,0,.86);
+    }}
+    .tmg-global-loading-status {{
+        margin-top:9px;
+        color:{'#5ff2b1' if pct >= 100 else '#dffbff'};
+        font-size:.78rem;
+        font-weight:850;
+        text-shadow:0 1px 0 rgba(0,0,0,.80);
+    }}
+    .tmg-global-loading-overlay.tmg-global-loading-autohide {{
+        animation:tmgGlobalLoadingFade .42s ease forwards;
+        animation-delay:{autohide_delay:.2f}s;
+    }}
+    @keyframes tmgGlobalLoadingShine {{
+        0% {{ transform:translateX(-100%); }}
+        100% {{ transform:translateX(180%); }}
+    }}
+    @keyframes tmgGlobalLoadingFade {{
+        to {{ opacity:0; visibility:hidden; }}
+    }}
+    </style>
+    <div class="tmg-global-loading-overlay{autohide_class}">
+        <div class="tmg-global-loading-card">
+            <div class="tmg-global-loading-logo">{logo_html}</div>
+            <div class="tmg-global-loading-text">{texto_seguro}</div>
+            <div class="tmg-global-loading-track">
+                <div class="tmg-global-loading-fill"></div>
+                <div class="tmg-global-loading-percent">{pct}%</div>
+            </div>
+            <div class="tmg-global-loading-status">{html.escape(status)}</div>
+        </div>
+    </div>
+    """
+    target = container if container is not None else st
+    target.markdown(markup, unsafe_allow_html=True)
+    return container
+
+def finish_tmg_global_loading_overlay(container, texto: str = "Carregamento concluído com sucesso.", hold_seconds: float = 0.35):
+    if container is None:
+        return
+    try:
+        render_tmg_global_loading_overlay(100, texto, container=container, auto_hide_seconds=max(0.35, float(hold_seconds or 0.35)))
+    except Exception:
+        pass
+
 TMG_PAGE_LABELS = {
+    "Login": "Login",
+    "Home": "Tela inicial",
     "Checklist": "Notas Rápidas",
     "Grid": "Marcador de Grid",
     "AnaliseMarcacaoGrid": "Análise de Marcação de Grid",
@@ -547,8 +713,8 @@ def render_tmg_page_transition_loading(container=None):
     target = container if container is not None else st.empty()
     label = _tmg_page_label(transition.get("to"))
     elapsed = max(0.0, time.time() - float(transition.get("started_at") or time.time()))
-    progress = min(88, 18 + int(elapsed * 420))
-    render_tmg_loading_bar(progress, f"Carregando janela: {label}", container=target)
+    progress = min(96, int(elapsed * 520))
+    render_tmg_global_loading_overlay(progress, f"Carregando módulo: {label}", container=target)
     return target
 
 def render_tmg_visualizador_transition_loading(container=None):
@@ -558,8 +724,8 @@ def render_tmg_visualizador_transition_loading(container=None):
     target = container if container is not None else st.empty()
     label = str(transition.get("to") or "visualizador")
     elapsed = max(0.0, time.time() - float(transition.get("started_at") or time.time()))
-    progress = min(90, 22 + int(elapsed * 420))
-    render_tmg_loading_bar(progress, f"Preparando visualizador: {label}", container=target)
+    progress = min(96, int(elapsed * 520))
+    render_tmg_global_loading_overlay(progress, f"Preparando visualizador: {label}", container=target)
     return target
 
 def clear_tmg_page_transition_loading(container=None) -> None:
@@ -567,7 +733,7 @@ def clear_tmg_page_transition_loading(container=None) -> None:
         return
     try:
         if container is not None:
-            finish_tmg_loading_and_clear(container, "Janela carregada com sucesso.", hold_seconds=0.03)
+            finish_tmg_global_loading_overlay(container, "Módulo carregado com sucesso.", hold_seconds=0.25)
     finally:
         st.session_state.pop("_tmg_page_transition", None)
 
@@ -576,7 +742,7 @@ def clear_tmg_visualizador_transition_loading(container=None) -> None:
         return
     try:
         if container is not None:
-            finish_tmg_loading_and_clear(container, "Visualizador carregado com sucesso.", hold_seconds=0.03)
+            finish_tmg_global_loading_overlay(container, "Visualizador carregado com sucesso.", hold_seconds=0.25)
     finally:
         st.session_state.pop("_tmg_visualizador_transition", None)
 
@@ -3370,7 +3536,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         if viewer_mode_label not in base_message:
             base_message = f"{viewer_mode_label} · {base_message}"
         detail = f"{base_message} · {total_mb:.1f} MB" if total_mb else base_message
-        update_tmg_loading(loading_slot, pct, detail)
+        render_tmg_global_loading_overlay(pct, detail, container=loading_slot)
 
     try:
         params = (preview_max_dim, preview_jpeg_quality, preview_min_jpeg_quality, preview_max_payload_mb, preview_min_dim)
@@ -3441,7 +3607,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
             result[3]["viewer_mode_label"] = viewer_mode_label
         _progress(94, "Entregando ortofoto ao visualizador...")
         _progress(98, "Abrindo canvas e ferramentas do visualizador...")
-        finish_tmg_loading_and_clear(loading_slot, "Ortofoto carregada com sucesso.", hold_seconds=0.08)
+        finish_tmg_global_loading_overlay(loading_slot, "Ortofoto carregada com sucesso.", hold_seconds=0.2)
         return result
     except Exception:
         clear_tmg_loading(loading_slot)
@@ -5874,6 +6040,7 @@ if "cultura_selecionada" not in st.session_state:
     st.session_state.cultura_selecionada = None
 
 if not st.session_state.logged_in:
+    _tmg_login_transition_slot = render_tmg_page_transition_loading()
 
     if HAS_TMG_VIEWER_MANAGER and _tmg_get_viewer_runtime is not None:
         try:
@@ -6375,6 +6542,7 @@ if not st.session_state.logged_in:
         if st.button("⟶  ENTRAR", type="primary", key="btn_entrar"):
             auth_user = _auth_find_user(usuario, senha)
             if auth_user:
+                _mark_tmg_page_transition("Home")
                 st.session_state.logged_in = True
                 st.session_state.auth_user = auth_user
                 state_login = _partners_load_state()
@@ -6440,6 +6608,7 @@ if not st.session_state.logged_in:
                     st.success("Imagem de fundo removida.")
                     app_rerun()
 
+    clear_tmg_page_transition_loading(_tmg_login_transition_slot)
     st.stop()
 
 
@@ -6447,6 +6616,7 @@ if not st.session_state.logged_in:
 # TELA DE SELEÇÃO DE CULTURA (PÓS-LOGIN)[cite: 1]
 # ==========================================
 if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
+    _tmg_home_transition_slot = render_tmg_page_transition_loading()
     current_user = _auth_current_user()
     allowed_cultures = _auth_allowed_cultures(current_user)
     can_open_partners = _auth_can_partners(current_user)
@@ -6654,6 +6824,7 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
             unsafe_allow_html=True
         )
 
+    clear_tmg_page_transition_loading(_tmg_home_transition_slot)
     st.stop()
 
 
@@ -13803,6 +13974,7 @@ with st.sidebar:
             ir_para('Config')
 
     if st.button("🚪 Sair", key="btn_logout"):
+        _mark_tmg_page_transition("Login")
         st.session_state.logged_in = False
         st.session_state.auth_user = None
         st.session_state.cultura_selecionada = None
