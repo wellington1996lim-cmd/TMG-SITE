@@ -310,7 +310,7 @@ def _tmg_loading_logo_html() -> str:
         pass
     return "<div class='tmg-load-logo-fallback'>TMG</div>"
 
-def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", container=None):
+def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", container=None, auto_hide_seconds: float | None = None):
     try:
         pct = max(0, min(100, int(float(progress))))
     except Exception:
@@ -334,6 +334,11 @@ def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", conta
     fill_shadow = theme.get("fill_shadow", "inset 0 1px 0 rgba(255,255,255,.42), 0 0 18px rgba(66,165,245,.58)")
     status_color = theme.get("status_success" if pct >= 100 else "status_loading", "#5ff2b1" if pct >= 100 else "#ffb347")
     logo_html = _tmg_loading_logo_html()
+    autohide_class = " tmg-load-autohide" if auto_hide_seconds is not None and pct >= 100 else ""
+    try:
+        autohide_delay = max(0.2, float(auto_hide_seconds or 1.25))
+    except Exception:
+        autohide_delay = 1.25
     markup = f"""
     <style>
     .tmg-load-card {{
@@ -345,6 +350,8 @@ def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", conta
         background:{card_background};
         box-shadow:{card_shadow};
         font-family:'Segoe UI', Arial, sans-serif;
+        overflow:hidden;
+        max-height:190px;
     }}
     .tmg-load-head {{
         display:flex;
@@ -422,8 +429,22 @@ def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", conta
         0% {{ transform:translateX(-100%); }}
         100% {{ transform:translateX(180%); }}
     }}
+    .tmg-load-card.tmg-load-autohide {{
+        animation:tmgLoadAutoHide .45s ease forwards;
+        animation-delay:{autohide_delay:.2f}s;
+    }}
+    @keyframes tmgLoadAutoHide {{
+        to {{
+            opacity:0;
+            max-height:0;
+            margin:0;
+            padding-top:0;
+            padding-bottom:0;
+            border-width:0;
+        }}
+    }}
     </style>
-    <div class="tmg-load-card">
+    <div class="tmg-load-card{autohide_class}">
         <div class="tmg-load-head">{logo_html}<div class="tmg-load-text">{texto_seguro}</div></div>
         <div class="tmg-load-track">
             <div class="tmg-load-fill"></div>
@@ -477,12 +498,9 @@ def finish_tmg_loading_and_clear(container, texto: str = "Carregamento concluíd
     if container is None:
         return
     try:
-        update_tmg_loading(container, 100, texto)
-        if hold_seconds and hold_seconds > 0:
-            time.sleep(float(hold_seconds))
+        render_tmg_loading_bar(100, texto, container=container, auto_hide_seconds=max(0.8, float(hold_seconds or 0.45) + 0.75))
     except Exception:
         pass
-    clear_tmg_loading(container)
 
 TMG_PAGE_LABELS = {
     "Checklist": "Notas Rápidas",
@@ -1145,6 +1163,7 @@ def aplicar_estilo_titulos_3d():
 aplicar_estilo_titulos_3d()
 
 def _tmg_embedded_visualizer_theme_markup() -> str:
+    runtime_logo_html = json.dumps(_tmg_loading_logo_html())
     return f"""
 <style id="tmg-embedded-viewer-theme">
 :root {{
@@ -1362,9 +1381,21 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  min-width:82px;
-  min-height:34px;
+  min-width:92px;
+  min-height:42px;
   margin-bottom:10px;
+  color:#ffffff;
+  font-weight:950;
+  letter-spacing:4px;
+  text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba({THEME_PRIMARY_RGB},.62);
+}}
+.tmg-viewer-runtime-logo .tmg-load-logo-img {{
+  max-width:150px;
+  max-height:52px;
+  object-fit:contain;
+  filter:drop-shadow(0 8px 14px rgba(0,0,0,.48)) drop-shadow(0 0 18px rgba({THEME_PRIMARY_RGB},.42));
+}}
+.tmg-viewer-runtime-logo .tmg-load-logo-fallback {{
   color:#ffffff;
   font-weight:950;
   letter-spacing:4px;
@@ -1432,9 +1463,10 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
     var loader = document.createElement('div');
     loader.id = 'tmg-viewer-runtime-loader';
     loader.className = 'tmg-viewer-runtime-loader';
+    var logoHtml = {runtime_logo_html};
     loader.innerHTML =
       '<div class="tmg-viewer-runtime-card">' +
-      '<div class="tmg-viewer-runtime-logo">TMG</div>' +
+      '<div class="tmg-viewer-runtime-logo">' + logoHtml + '</div>' +
       '<div class="tmg-viewer-runtime-text">Carregando visualizador...</div>' +
       '<div class="tmg-viewer-runtime-track">' +
       '<div class="tmg-viewer-runtime-fill"></div>' +
@@ -1479,13 +1511,26 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
           [Math.floor(w * .25), Math.floor(h * .25)],
           [Math.floor(w * .75), Math.floor(h * .25)],
           [Math.floor(w * .25), Math.floor(h * .75)],
-          [Math.floor(w * .75), Math.floor(h * .75)]
+          [Math.floor(w * .75), Math.floor(h * .75)],
+          [Math.floor(w * .50), Math.floor(h * .18)],
+          [Math.floor(w * .18), Math.floor(h * .50)],
+          [Math.floor(w * .82), Math.floor(h * .50)],
+          [Math.floor(w * .50), Math.floor(h * .82)]
         ];
+        var first = null;
+        var brightOrImageLike = 0;
+        var varied = 0;
         for (var i = 0; i < points.length; i++) {{
           var p = points[i];
           var data = ctx.getImageData(Math.max(0, p[0]), Math.max(0, p[1]), 1, 1).data;
-          if (data[3] > 0 || data[0] > 8 || data[1] > 8 || data[2] > 8) return true;
+          if (!first) first = [data[0], data[1], data[2], data[3]];
+          var brightness = Math.max(data[0], data[1], data[2]);
+          var colorSpread = Math.max(data[0], data[1], data[2]) - Math.min(data[0], data[1], data[2]);
+          var delta = Math.abs(data[0] - first[0]) + Math.abs(data[1] - first[1]) + Math.abs(data[2] - first[2]);
+          if (data[3] > 0 && (brightness > 38 || colorSpread > 18)) brightOrImageLike++;
+          if (delta > 30) varied++;
         }}
+        return brightOrImageLike >= 2 || varied >= 3;
       }} catch(e) {{}}
       return false;
     }}
@@ -6943,7 +6988,7 @@ def _resettable_ortho_uploader(label: str, key: str, accept_multiple_files: bool
                 total_size = sum(int(getattr(file, "size", 0) or 0) for file in (uploaded or []))
                 size_label = _tv_human_size(total_size) if total_size else ""
                 update_tmg_loading(load_box, 12, f"Recebendo {total_files} ortofoto(s) do importador...")
-                update_tmg_loading(load_box, 32, "Validando lote de ortofotos" + (f" · {size_label}" if size_label else ""))
+                update_tmg_loading(load_box, 32, f"Validando lote de ortofotos" + (f" · {size_label}" if size_label else ""))
                 update_tmg_loading(load_box, 58, "Preparando arquivos para os visualizadores...")
                 update_tmg_loading(load_box, 86, "Ortofotos prontas para processamento no visualizador...")
                 finish_tmg_loading_and_clear(load_box, f"{total_files} arquivo(s) carregado(s) com sucesso.", hold_seconds=0.22)
