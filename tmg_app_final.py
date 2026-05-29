@@ -5909,12 +5909,10 @@ if not st.session_state.logged_in:
         left: 24px;
         z-index: 9999;
         display: inline-flex;
-        flex-direction: column;
-        align-items: flex-start;
+        align-items: center;
         justify-content: center;
-        gap: 2px;
-        min-width: 224px;
-        min-height: 48px;
+        min-width: 208px;
+        min-height: 44px;
         padding: 10px 18px;
         border-radius: 15px;
         border: 1.5px solid rgba(120, 220, 255, .88);
@@ -5970,15 +5968,6 @@ if not st.session_state.logged_in:
         display: block;
         color: #ffffff;
         line-height: 1.05;
-    }
-
-    .login-desktop-toggle-sub {
-        display: block;
-        color: #dffbff;
-        font-size: .68rem;
-        font-weight: 800;
-        line-height: 1.1;
-        opacity: .94;
     }
 
     @media (max-width: 720px) {
@@ -6259,18 +6248,17 @@ if not st.session_state.logged_in:
         desktop_active = active_mode == "desktop"
         toggle_target = "streamlit" if desktop_active else "desktop"
         toggle_class = "login-desktop-toggle-btn is-active" if desktop_active else "login-desktop-toggle-btn"
-        toggle_title = "Modo Desktop Local ativo" if desktop_active else "Ativar Modo Desktop Local"
         if is_deploy_viewer:
-            toggle_sub = "Deploy: usando Streamlit seguro"
-        elif desktop_available:
-            toggle_sub = "Tkinter + Pillow + cache local"
+            toggle_title = "Modo Streamlit Web"
+            toggle_target = "streamlit"
+        elif desktop_active:
+            toggle_title = "Desativar modo desktop local"
         else:
-            toggle_sub = "Disponível somente no PC local"
+            toggle_title = "Ativar modo desktop local"
         st.markdown(
             f"""
-            <a class="{toggle_class}" href="?tmg_viewer_mode={toggle_target}">
+            <a class="{toggle_class}" role="button" href="?tmg_viewer_mode={toggle_target}" onclick="window.location.href='?tmg_viewer_mode={toggle_target}'; return false;">
                 <span class="login-desktop-toggle-main">{html.escape(toggle_title)}</span>
-                <span class="login-desktop-toggle-sub">{html.escape(toggle_sub)}</span>
             </a>
             """,
             unsafe_allow_html=True,
@@ -6297,9 +6285,7 @@ if not st.session_state.logged_in:
         usuario = st.text_input("Usuário", placeholder="Digite seu login", key="login_user")
         senha   = st.text_input("Senha",   placeholder="Digite sua senha", type="password", key="login_pass")
 
-        viewer_notice = st.session_state.pop("_login_viewer_notice", "")
-        if viewer_notice:
-            st.info(viewer_notice)
+        st.session_state.pop("_login_viewer_notice", None)
 
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 

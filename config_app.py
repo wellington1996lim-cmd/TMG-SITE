@@ -13,8 +13,8 @@ VIEWER_CONFIG_PATH = CONFIG_DIR / "viewer_config.json"
 
 
 DEFAULT_VIEWER_CONFIG = {
-    "viewer_mode": "auto",
-    "enable_desktop_viewer_local": True,
+    "viewer_mode": "streamlit",
+    "enable_desktop_viewer_local": False,
     "force_streamlit_in_deploy": True,
     "desktop_viewer_max_dim": 12000,
     "desktop_viewer_cache_dir": "tmg_data/desktop_viewer",
@@ -99,7 +99,10 @@ def get_viewer_runtime() -> dict:
         mode = "auto"
 
     deploy = is_deploy_environment()
-    desktop_possible = has_desktop_session() and bool(config.get("enable_desktop_viewer_local", True))
+    desktop_session_available = has_desktop_session()
+    desktop_enabled = bool(config.get("enable_desktop_viewer_local", True))
+    desktop_possible = desktop_session_available and desktop_enabled
+    desktop_available = desktop_session_available and not deploy
     if deploy and bool(config.get("force_streamlit_in_deploy", True)):
         active_mode = "streamlit"
     elif mode == "desktop" and desktop_possible:
@@ -115,7 +118,8 @@ def get_viewer_runtime() -> dict:
         "configured_mode": mode,
         "active_mode": active_mode,
         "is_deploy": deploy,
-        "desktop_available": desktop_possible and not deploy,
+        "desktop_available": desktop_available,
+        "desktop_enabled": desktop_enabled,
         "streamlit_safe": True,
         "desktop_viewer_max_dim": int(config.get("desktop_viewer_max_dim") or 12000),
         "desktop_viewer_cache_dir": str((PROJECT_ROOT / str(config.get("desktop_viewer_cache_dir") or "tmg_data/desktop_viewer")).resolve()),

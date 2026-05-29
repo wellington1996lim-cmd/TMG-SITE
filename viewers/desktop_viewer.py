@@ -58,11 +58,68 @@ class DesktopOrthoViewer:
         self.root.after(100, self.fit)
 
     def _load_image(self) -> Image.Image:
+        raster_img = self._load_image_rasterio()
+        if raster_img is not None:
+            return raster_img
         img = Image.open(self.image_path)
         img = img.convert("RGB")
         if max(img.size) > self.max_dim:
             img.thumbnail((self.max_dim, self.max_dim), Image.Resampling.LANCZOS)
         return img
+
+    def _load_image_rasterio(self) -> Image.Image | None:
+        if self.image_path.suffix.lower() not in {".tif", ".tiff", ".geotiff", ".jp2"}:
+            return None
+        try:
+            import numpy as np
+            import rasterio
+            from rasterio.enums import Resampling
+        except Exception:
+            return None
+
+        def stretch_band(band):
+            arr = np.ma.asarray(band).astype(np.float32).filled(np.nan)
+            valid = arr[np.isfinite(arr)]
+            if valid.size == 0:
+                return np.zeros(arr.shape, dtype=np.uint8)
+            mn = np.nanpercentile(valid, 1)
+            mx = np.nanpercentile(valid, 99)
+            if not np.isfinite(mn) or not np.isfinite(mx) or mx <= mn:
+                mn = np.nanmin(valid)
+                mx = np.nanmax(valid)
+            if not np.isfinite(mn) or not np.isfinite(mx) or mx <= mn:
+                return np.zeros(arr.shape, dtype=np.uint8)
+            return np.nan_to_num(np.clip((arr - mn) / (mx - mn) * 255, 0, 255)).astype(np.uint8)
+
+        try:
+            with rasterio.open(str(self.image_path)) as src:
+                ratio = min(1.0, self.max_dim / max(src.width, src.height))
+                out_width = max(1, int(src.width * ratio))
+                out_height = max(1, int(src.height * ratio))
+                resampling = getattr(Resampling, "cubic", Resampling.bilinear)
+                if src.count >= 3:
+                    indexes = [1, 2, 3]
+                    data = src.read(
+                        indexes,
+                        out_shape=(3, out_height, out_width),
+                        resampling=resampling,
+                        masked=True,
+                    )
+                    dtypes = [np.dtype(src.dtypes[index - 1]) for index in indexes]
+                    if all(dtype == np.dtype("uint8") for dtype in dtypes):
+                        bands = [np.ma.asarray(data[i]).filled(0).astype(np.uint8, copy=False) for i in range(3)]
+                    else:
+                        bands = [stretch_band(data[i]) for i in range(3)]
+                    arr = np.transpose(np.stack(bands), (1, 2, 0))
+                    return Image.fromarray(arr, "RGB")
+                data = src.read(1, out_shape=(out_height, out_width), resampling=resampling, masked=True)
+                if np.dtype(src.dtypes[0]) == np.dtype("uint8"):
+                    gray = np.ma.asarray(data).filled(0).astype(np.uint8, copy=False)
+                else:
+                    gray = stretch_band(data)
+                return Image.fromarray(gray, "L").convert("RGB")
+        except Exception:
+            return None
 
     def fit(self) -> None:
         cw = max(1, self.canvas.winfo_width())
