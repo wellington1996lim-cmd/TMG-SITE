@@ -40,6 +40,7 @@ APP_MPLCONFIG_DIR = APP_ROOT / "tmg_data" / "matplotlib"
 
 try:
     from viewer_manager import render_desktop_viewer_controls as _tmg_render_desktop_viewer_controls
+    from viewer_manager import prepare_desktop_viewer_cache as _tmg_prepare_desktop_viewer_cache
     from config_app import (
         enable_desktop_viewer_mode as _tmg_enable_desktop_viewer_mode,
         enable_streamlit_viewer_mode as _tmg_enable_streamlit_viewer_mode,
@@ -48,6 +49,7 @@ try:
     HAS_TMG_VIEWER_MANAGER = True
 except Exception:
     _tmg_render_desktop_viewer_controls = None
+    _tmg_prepare_desktop_viewer_cache = None
     _tmg_enable_desktop_viewer_mode = None
     _tmg_enable_streamlit_viewer_mode = None
     _tmg_get_viewer_runtime = None
@@ -3191,6 +3193,13 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         session_cache = st.session_state.setdefault("_tmg_ortho_preview_cache", {})
         _progress(6, f"Iniciando carregamento da ortofoto: {file_name}")
         _progress(12, "Validando arquivo recebido pelo Streamlit...")
+        if HAS_TMG_VIEWER_MANAGER and _tmg_prepare_desktop_viewer_cache is not None:
+            try:
+                desktop_cache_path = _tmg_prepare_desktop_viewer_cache(file_bytes or b"", file_name, app_root=APP_ROOT)
+                if desktop_cache_path:
+                    _progress(15, "Preparando cache local para visualizador desktop...")
+            except Exception:
+                pass
         if cache_key in session_cache:
             _progress(36, "Preview já processado nesta sessão. Reaproveitando alta qualidade...")
             result = session_cache[cache_key]
@@ -5657,6 +5666,37 @@ if "cultura_selecionada" not in st.session_state:
 
 if not st.session_state.logged_in:
 
+    if HAS_TMG_VIEWER_MANAGER and _tmg_get_viewer_runtime is not None:
+        try:
+            viewer_mode_query = st.query_params.get("tmg_viewer_mode", "")
+        except Exception:
+            try:
+                legacy_params = st.experimental_get_query_params()
+                query_values = legacy_params.get("tmg_viewer_mode", [])
+                viewer_mode_query = query_values[-1] if query_values else ""
+            except Exception:
+                viewer_mode_query = ""
+        viewer_mode_query = str(viewer_mode_query or "").strip().lower()
+        if viewer_mode_query in ("desktop", "streamlit"):
+            try:
+                viewer_runtime_query = _tmg_get_viewer_runtime()
+                if viewer_mode_query == "desktop":
+                    if bool(viewer_runtime_query.get("is_deploy")) or not bool(viewer_runtime_query.get("desktop_available")):
+                        st.session_state["_login_viewer_notice"] = "Modo Desktop Local disponível somente no computador local."
+                    elif _tmg_enable_desktop_viewer_mode is not None:
+                        _tmg_enable_desktop_viewer_mode()
+                        st.session_state["_login_viewer_notice"] = "Modo Desktop Local ativado para os visualizadores."
+                elif _tmg_enable_streamlit_viewer_mode is not None:
+                    _tmg_enable_streamlit_viewer_mode()
+                    st.session_state["_login_viewer_notice"] = "Modo Streamlit Seguro ativado para os visualizadores."
+            except Exception:
+                st.session_state["_login_viewer_notice"] = "Não foi possível alterar o modo dos visualizadores."
+            try:
+                del st.query_params["tmg_viewer_mode"]
+            except Exception:
+                pass
+            app_rerun()
+
     if LOGIN_BG_PATH.exists():
         bg_css = _img_to_base64_css(LOGIN_BG_PATH)
         st.markdown(f"""
@@ -5737,6 +5777,84 @@ if not st.session_state.logged_in:
         transform: translateY(1px) scale(.99);
     }
 
+    .login-desktop-toggle-btn {
+        position: fixed;
+        bottom: 18px;
+        left: 24px;
+        z-index: 9999;
+        display: inline-flex;
+        flex-direction: column;
+        align-items: flex-start;
+        justify-content: center;
+        gap: 2px;
+        min-width: 224px;
+        min-height: 48px;
+        padding: 10px 18px;
+        border-radius: 15px;
+        border: 1.5px solid rgba(120, 220, 255, .88);
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.18), transparent 30%),
+            linear-gradient(145deg, rgba(2,14,36,.97), rgba(18,62,100,.90), rgba(0,212,255,.27));
+        color: #ffffff !important;
+        font-family: 'Segoe UI', Arial, sans-serif;
+        font-size: .82rem;
+        font-weight: 950;
+        letter-spacing: .35px;
+        text-decoration: none !important;
+        text-shadow: 0 1px 0 rgba(0,0,0,.95), 0 0 10px rgba(0,212,255,.58);
+        box-shadow:
+            0 14px 28px rgba(0,0,0,.46),
+            0 0 0 1px rgba(255,255,255,.10),
+            0 0 25px rgba(0,212,255,.34),
+            inset 0 1px 0 rgba(255,255,255,.30),
+            inset 0 -10px 18px rgba(2,14,36,.42);
+        backdrop-filter: blur(12px) saturate(145%);
+        -webkit-backdrop-filter: blur(12px) saturate(145%);
+        transition: transform .25s ease, box-shadow .30s ease, border-color .30s ease, filter .30s ease;
+    }
+
+    .login-desktop-toggle-btn:hover {
+        transform: translateY(-2px);
+        border-color: rgba(178, 240, 255, .98);
+        color: #ffffff !important;
+        filter: brightness(1.10);
+        box-shadow:
+            0 18px 34px rgba(0,0,0,.55),
+            0 0 0 1px rgba(255,255,255,.16),
+            0 0 35px rgba(0,212,255,.54),
+            inset 0 1px 0 rgba(255,255,255,.36),
+            inset 0 -10px 18px rgba(2,14,36,.34);
+    }
+
+    .login-desktop-toggle-btn:active {
+        transform: translateY(1px) scale(.99);
+    }
+
+    .login-desktop-toggle-btn.is-active {
+        border-color: rgba(95,242,177,.90);
+        box-shadow:
+            0 14px 28px rgba(0,0,0,.46),
+            0 0 0 1px rgba(255,255,255,.10),
+            0 0 26px rgba(95,242,177,.38),
+            inset 0 1px 0 rgba(255,255,255,.30),
+            inset 0 -10px 18px rgba(2,14,36,.42);
+    }
+
+    .login-desktop-toggle-main {
+        display: block;
+        color: #ffffff;
+        line-height: 1.05;
+    }
+
+    .login-desktop-toggle-sub {
+        display: block;
+        color: #dffbff;
+        font-size: .68rem;
+        font-weight: 800;
+        line-height: 1.1;
+        opacity: .94;
+    }
+
     @media (max-width: 720px) {
         .login-mobile-btn {
             bottom: 12px;
@@ -5745,6 +5863,15 @@ if not st.session_state.logged_in:
             min-height: 38px;
             padding: 8px 13px;
             font-size: .76rem;
+        }
+        .login-desktop-toggle-btn {
+            bottom: 60px;
+            left: 12px;
+            right: 12px;
+            min-width: 0;
+            min-height: 42px;
+            padding: 8px 13px;
+            font-size: .74rem;
         }
     }
 
@@ -5995,6 +6122,33 @@ if not st.session_state.logged_in:
     """, unsafe_allow_html=True)
 
     st.markdown("<a class='login-mobile-btn' href='?mobile=1'>Versão Mobile</a>", unsafe_allow_html=True)
+    if HAS_TMG_VIEWER_MANAGER and _tmg_get_viewer_runtime is not None:
+        try:
+            viewer_runtime = _tmg_get_viewer_runtime()
+        except Exception:
+            viewer_runtime = {"active_mode": "streamlit", "configured_mode": "auto", "desktop_available": False, "is_deploy": True}
+        active_mode = str(viewer_runtime.get("active_mode", "streamlit"))
+        desktop_available = bool(viewer_runtime.get("desktop_available"))
+        is_deploy_viewer = bool(viewer_runtime.get("is_deploy"))
+        desktop_active = active_mode == "desktop"
+        toggle_target = "streamlit" if desktop_active else "desktop"
+        toggle_class = "login-desktop-toggle-btn is-active" if desktop_active else "login-desktop-toggle-btn"
+        toggle_title = "Modo Desktop Local ativo" if desktop_active else "Ativar Modo Desktop Local"
+        if is_deploy_viewer:
+            toggle_sub = "Deploy: usando Streamlit seguro"
+        elif desktop_available:
+            toggle_sub = "Tkinter + Pillow + cache local"
+        else:
+            toggle_sub = "Disponível somente no PC local"
+        st.markdown(
+            f"""
+            <a class="{toggle_class}" href="?tmg_viewer_mode={toggle_target}">
+                <span class="login-desktop-toggle-main">{html.escape(toggle_title)}</span>
+                <span class="login-desktop-toggle-sub">{html.escape(toggle_sub)}</span>
+            </a>
+            """,
+            unsafe_allow_html=True,
+        )
 
     _, col_mid, _ = st.columns([1.25, 0.9, 1.25])
 
@@ -6017,48 +6171,9 @@ if not st.session_state.logged_in:
         usuario = st.text_input("Usuário", placeholder="Digite seu login", key="login_user")
         senha   = st.text_input("Senha",   placeholder="Digite sua senha", type="password", key="login_pass")
 
-        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-        if HAS_TMG_VIEWER_MANAGER and _tmg_get_viewer_runtime is not None:
-            try:
-                viewer_runtime = _tmg_get_viewer_runtime()
-            except Exception:
-                viewer_runtime = {"active_mode": "streamlit", "configured_mode": "auto", "desktop_available": False, "is_deploy": True}
-            active_mode = str(viewer_runtime.get("active_mode", "streamlit"))
-            configured_mode = str(viewer_runtime.get("configured_mode", "auto"))
-            is_deploy_viewer = bool(viewer_runtime.get("is_deploy"))
-            desktop_available = bool(viewer_runtime.get("desktop_available"))
-            modo_label = "Desktop Local" if active_mode == "desktop" else "Streamlit Seguro"
-            libs_label = "Tkinter + Pillow + cache local" if active_mode == "desktop" else "Visualizador navegador/Streamlit"
-            deploy_note = "Deploy detectado: modo desktop fica bloqueado por segurança." if is_deploy_viewer else "Ambiente local detectado: bibliotecas locais podem acelerar zoom, pan e carregamento."
-            st.markdown(
-                f"""
-                <div class="login-desktop-mode-card">
-                    <div class="login-desktop-mode-title">Modo dos Visualizadores</div>
-                    <div class="login-desktop-mode-status">
-                        Ativo: <b>{html.escape(modo_label)}</b><br>
-                        Configuração: {html.escape(configured_mode)} · {html.escape(libs_label)}<br>
-                        {html.escape(deploy_note)}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            btn_label = "⚡ Ativar Modo Desktop Local" if active_mode != "desktop" else "🌐 Usar Modo Streamlit Seguro"
-            if st.button(btn_label, key="btn_login_toggle_desktop_viewer", use_container_width=True):
-                if active_mode == "desktop":
-                    if _tmg_enable_streamlit_viewer_mode is not None:
-                        _tmg_enable_streamlit_viewer_mode()
-                    st.success("Modo Streamlit Seguro ativado para os visualizadores.")
-                    app_rerun()
-                else:
-                    if is_deploy_viewer or not desktop_available:
-                        st.warning("Modo Desktop Local só fica disponível no computador local com sessão gráfica.")
-                    else:
-                        if _tmg_enable_desktop_viewer_mode is not None:
-                            _tmg_enable_desktop_viewer_mode()
-                        st.success("Modo Desktop Local ativado. As ortofotos poderão abrir em visualizador externo mais rápido.")
-                        app_rerun()
+        viewer_notice = st.session_state.pop("_login_viewer_notice", "")
+        if viewer_notice:
+            st.info(viewer_notice)
 
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 

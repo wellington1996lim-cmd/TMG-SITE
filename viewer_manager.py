@@ -39,6 +39,12 @@ def is_desktop_viewer_enabled() -> bool:
     return runtime.get("active_mode") == "desktop" and bool(runtime.get("desktop_available"))
 
 
+def prepare_desktop_viewer_cache(file_bytes: bytes, filename: str, app_root: str | Path | None = None) -> Path | None:
+    if not is_desktop_viewer_enabled() or not file_bytes:
+        return None
+    return save_image_for_desktop_viewer(file_bytes, filename, app_root=app_root)
+
+
 def save_image_for_desktop_viewer(file_bytes: bytes, filename: str, app_root: str | Path | None = None) -> Path:
     root = Path(app_root or PROJECT_ROOT).resolve()
     runtime = get_viewer_runtime()
@@ -117,4 +123,3 @@ def render_desktop_viewer_controls(file_bytes: bytes, filename: str, key: str, a
                 st.success(message)
             else:
                 st.warning(message)
-
