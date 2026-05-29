@@ -1162,8 +1162,34 @@ def aplicar_estilo_titulos_3d():
 
 aplicar_estilo_titulos_3d()
 
+def _tmg_current_viewer_runtime() -> dict:
+    if HAS_TMG_VIEWER_MANAGER and _tmg_get_viewer_runtime is not None:
+        try:
+            runtime = _tmg_get_viewer_runtime()
+            if isinstance(runtime, dict):
+                return runtime
+        except Exception:
+            pass
+    return {
+        "active_mode": "streamlit",
+        "configured_mode": "streamlit",
+        "desktop_available": False,
+        "desktop_enabled": False,
+        "is_deploy": True,
+    }
+
+def _tmg_viewer_mode_label(runtime: dict | None = None) -> str:
+    info = runtime if isinstance(runtime, dict) else _tmg_current_viewer_runtime()
+    active_mode = str(info.get("active_mode") or "streamlit").strip().lower()
+    if active_mode == "desktop":
+        return "Modo Desktop Local"
+    if bool(info.get("is_deploy")):
+        return "Modo Streamlit Web"
+    return "Modo Streamlit Local"
+
 def _tmg_embedded_visualizer_theme_markup() -> str:
     runtime_logo_html = json.dumps(_tmg_loading_logo_html())
+    runtime_mode_label = json.dumps(_tmg_viewer_mode_label())
     return f"""
 <style id="tmg-embedded-viewer-theme">
 :root {{
@@ -1407,6 +1433,22 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
   letter-spacing:.45px;
   text-shadow:0 1px 0 rgba(0,0,0,.86), 0 0 12px rgba({THEME_PRIMARY_RGB},.42);
 }}
+.tmg-viewer-runtime-mode {{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  margin:2px auto 0 auto;
+  padding:5px 11px;
+  border-radius:999px;
+  border:1px solid rgba({THEME_PRIMARY_RGB},.56);
+  background:linear-gradient(145deg, rgba(2,14,36,.94), rgba(18,62,100,.76), rgba({THEME_PRIMARY_RGB},.16));
+  color:#ffffff;
+  font-size:.72rem;
+  font-weight:950;
+  letter-spacing:.45px;
+  text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 10px rgba({THEME_PRIMARY_RGB},.42);
+  box-shadow:0 0 15px rgba({THEME_PRIMARY_RGB},.25), inset 0 1px 0 rgba(255,255,255,.18);
+}}
 .tmg-viewer-runtime-track {{
   position:relative;
   height:24px;
@@ -1464,15 +1506,17 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
     loader.id = 'tmg-viewer-runtime-loader';
     loader.className = 'tmg-viewer-runtime-loader';
     var logoHtml = {runtime_logo_html};
+    var modeLabel = {runtime_mode_label};
     loader.innerHTML =
       '<div class="tmg-viewer-runtime-card">' +
       '<div class="tmg-viewer-runtime-logo">' + logoHtml + '</div>' +
       '<div class="tmg-viewer-runtime-text">Carregando visualizador...</div>' +
+      '<div class="tmg-viewer-runtime-mode">' + modeLabel + '</div>' +
       '<div class="tmg-viewer-runtime-track">' +
       '<div class="tmg-viewer-runtime-fill"></div>' +
       '<div class="tmg-viewer-runtime-percent">8%</div>' +
       '</div>' +
-      '<div class="tmg-viewer-runtime-status">Preparando ortofoto e ferramentas...</div>' +
+      '<div class="tmg-viewer-runtime-status">' + modeLabel + ' · Preparando ortofoto e ferramentas...</div>' +
       '</div>';
     document.body.appendChild(loader);
     var fill = loader.querySelector('.tmg-viewer-runtime-fill');
@@ -1485,11 +1529,11 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
       if (pctEl) pctEl.textContent = pct + '%';
       if (status && statusEl) statusEl.textContent = status;
     }}
-    setPct(12, 'Recebendo imagem no visualizador...');
+    setPct(12, modeLabel + ' · Recebendo imagem no visualizador...');
     var minReadyAt = Date.now() + 900;
     loader.__tmgTimer = setInterval(function() {{
       if (pct < 92) {{
-        setPct(pct + Math.max(1, Math.round((92 - pct) / 9)), pct < 55 ? 'Carregando ortofoto...' : 'Montando canvas e camadas...');
+        setPct(pct + Math.max(1, Math.round((92 - pct) / 9)), modeLabel + (pct < 55 ? ' · Carregando ortofoto...' : ' · Montando canvas e camadas...'));
       }}
     }}, 260);
     function allImagesReady() {{
@@ -1543,7 +1587,7 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
       if (loader.__tmgHidden) return;
       loader.__tmgHidden = true;
       clearInterval(loader.__tmgTimer);
-      setPct(100, 'Visualizador pronto.');
+      setPct(100, modeLabel + ' · Visualizador pronto.');
       setTimeout(function() {{
         loader.style.opacity = '0';
         setTimeout(function() {{ loader.style.display = 'none'; }}, 380);
@@ -1559,7 +1603,7 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
     window.addEventListener('load', function() {{ setTimeout(waitReady, 80); }});
     setTimeout(waitReady, 240);
     setTimeout(function() {{
-      setPct(96, 'Finalizando visualizador...');
+      setPct(96, modeLabel + ' · Finalizando visualizador...');
       hideLoader();
     }}, 18000);
   }}
@@ -3282,6 +3326,8 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
     file_name = Path(filename or "ortofoto").name
     total_mb = (len(file_bytes or b"") / (1024 * 1024)) if file_bytes is not None else 0
     loading_slot = st.empty()
+    viewer_runtime = _tmg_current_viewer_runtime()
+    viewer_mode_label = _tmg_viewer_mode_label(viewer_runtime)
     preview_max_dim = _preview_max_dim()
     preview_jpeg_quality = _preview_jpeg_quality()
     preview_min_jpeg_quality = _preview_min_jpeg_quality()
@@ -3289,7 +3335,10 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
     preview_min_dim = _preview_min_dim()
 
     def _progress(pct: int, message: str):
-        detail = f"{message} · {total_mb:.1f} MB" if total_mb else message
+        base_message = str(message or "Carregando ortofoto...")
+        if viewer_mode_label not in base_message:
+            base_message = f"{viewer_mode_label} · {base_message}"
+        detail = f"{base_message} · {total_mb:.1f} MB" if total_mb else base_message
         update_tmg_loading(loading_slot, pct, detail)
 
     try:
@@ -3299,13 +3348,10 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         _progress(3, f"Iniciando carregamento da ortofoto: {file_name}")
         _progress(8, "Ativando barra TMG do visualizador...")
         desktop_cache_path = None
-        if HAS_TMG_VIEWER_MANAGER and _tmg_get_viewer_runtime is not None:
-            try:
-                viewer_runtime = _tmg_get_viewer_runtime()
-            except Exception:
-                viewer_runtime = {}
-            if viewer_runtime.get("active_mode") == "desktop":
-                _progress(12, "Modo Desktop Local ativo. Preparando bibliotecas locais...")
+        if str(viewer_runtime.get("active_mode") or "").lower() == "desktop":
+            _progress(12, "Preparando bibliotecas locais rápidas para leitura da ortofoto...")
+        else:
+            _progress(12, "Preparando visualizador compatível com Streamlit...")
         if HAS_TMG_VIEWER_MANAGER and _tmg_prepare_desktop_viewer_cache is not None:
             try:
                 desktop_cache_path = _tmg_prepare_desktop_viewer_cache(file_bytes or b"", file_name, app_root=APP_ROOT)
@@ -3349,6 +3395,9 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                     progress_callback=_progress,
                     local_source_path=str(desktop_cache_path) if desktop_cache_path else None,
                 )
+                if result and len(result) >= 4 and isinstance(result[3], dict):
+                    result[3]["viewer_mode"] = str(viewer_runtime.get("active_mode") or "streamlit")
+                    result[3]["viewer_mode_label"] = viewer_mode_label
                 _write_ortho_preview_disk_cache(cache_key, result)
             if result and not result[2]:
                 session_cache[cache_key] = result
@@ -3356,6 +3405,9 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                     for old_key in list(session_cache.keys())[:-8]:
                         session_cache.pop(old_key, None)
                 st.session_state["_tmg_ortho_preview_cache"] = session_cache
+        if result and len(result) >= 4 and isinstance(result[3], dict):
+            result[3]["viewer_mode"] = str(viewer_runtime.get("active_mode") or "streamlit")
+            result[3]["viewer_mode_label"] = viewer_mode_label
         _progress(94, "Entregando ortofoto ao visualizador...")
         _progress(98, "Abrindo canvas e ferramentas do visualizador...")
         finish_tmg_loading_and_clear(loading_slot, "Ortofoto carregada com sucesso.", hold_seconds=0.08)
