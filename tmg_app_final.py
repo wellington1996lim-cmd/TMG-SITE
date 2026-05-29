@@ -1371,6 +1371,20 @@ td {{
 tr:nth-child(odd) {{ background:rgba(2,14,36,.48) !important; }}
 tr:nth-child(even) {{ background:rgba(13,43,69,.38) !important; }}
 tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
+html.tmg-viewer-loading,
+body.tmg-viewer-loading {{
+  background:
+    radial-gradient(circle at 50% 22%, rgba({THEME_PRIMARY_RGB},.16), transparent 36%),
+    linear-gradient(135deg,#020e24 0%,#061525 54%,#0d2b45 100%) !important;
+}}
+body.tmg-viewer-loading > *:not(#tmg-viewer-runtime-loader) {{
+  opacity:0 !important;
+  visibility:hidden !important;
+  pointer-events:none !important;
+}}
+body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
+  animation:tmgViewerReveal .36s ease both;
+}}
 .tmg-viewer-runtime-loader {{
   position:fixed;
   inset:0;
@@ -1378,11 +1392,13 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
   display:flex;
   align-items:center;
   justify-content:center;
-  background:rgba(2,14,36,.76);
-  backdrop-filter:blur(8px) saturate(135%);
-  -webkit-backdrop-filter:blur(8px) saturate(135%);
+  background:
+    radial-gradient(circle at 50% 24%, rgba({THEME_PRIMARY_RGB},.20), transparent 36%),
+    linear-gradient(135deg, rgba(2,14,36,.98), rgba(6,21,37,.97), rgba(13,43,69,.96));
+  backdrop-filter:blur(10px) saturate(145%);
+  -webkit-backdrop-filter:blur(10px) saturate(145%);
   opacity:1;
-  transition:opacity .35s ease;
+  transition:opacity .42s ease;
   pointer-events:none;
 }}
 .tmg-viewer-runtime-card {{
@@ -1496,12 +1512,19 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
   0% {{ transform:translateX(-100%); }}
   100% {{ transform:translateX(180%); }}
 }}
+@keyframes tmgViewerReveal {{
+  from {{ opacity:0; filter:blur(4px); transform:translateY(4px); }}
+  to {{ opacity:1; filter:blur(0); transform:translateY(0); }}
+}}
 </style>
 <script id="tmg-embedded-viewer-loading-autohide">
 (function() {{
   function ensureRuntimeLoader() {{
     if (document.getElementById('tmg-viewer-runtime-loader')) return;
     if (!document.body) return;
+    document.documentElement.classList.add('tmg-viewer-loading');
+    document.body.classList.add('tmg-viewer-loading');
+    document.body.classList.remove('tmg-viewer-ready');
     var loader = document.createElement('div');
     loader.id = 'tmg-viewer-runtime-loader';
     loader.className = 'tmg-viewer-runtime-loader';
@@ -1514,7 +1537,7 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
       '<div class="tmg-viewer-runtime-mode">' + modeLabel + '</div>' +
       '<div class="tmg-viewer-runtime-track">' +
       '<div class="tmg-viewer-runtime-fill"></div>' +
-      '<div class="tmg-viewer-runtime-percent">8%</div>' +
+      '<div class="tmg-viewer-runtime-percent">0%</div>' +
       '</div>' +
       '<div class="tmg-viewer-runtime-status">' + modeLabel + ' · Preparando ortofoto e ferramentas...</div>' +
       '</div>';
@@ -1522,18 +1545,20 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
     var fill = loader.querySelector('.tmg-viewer-runtime-fill');
     var pctEl = loader.querySelector('.tmg-viewer-runtime-percent');
     var statusEl = loader.querySelector('.tmg-viewer-runtime-status');
-    var pct = 8;
+    var pct = 0;
     function setPct(value, status) {{
       pct = Math.max(0, Math.min(100, Math.round(value)));
       if (fill) fill.style.width = pct + '%';
       if (pctEl) pctEl.textContent = pct + '%';
       if (status && statusEl) statusEl.textContent = status;
     }}
-    setPct(12, modeLabel + ' · Recebendo imagem no visualizador...');
+    setPct(0, modeLabel + ' · Iniciando carregamento do visualizador...');
+    setTimeout(function() {{ setPct(8, modeLabel + ' · Recebendo imagem no visualizador...'); }}, 80);
+    setTimeout(function() {{ if (pct < 18) setPct(18, modeLabel + ' · Preparando recursos da ortofoto...'); }}, 240);
     var minReadyAt = Date.now() + 900;
     loader.__tmgTimer = setInterval(function() {{
-      if (pct < 92) {{
-        setPct(pct + Math.max(1, Math.round((92 - pct) / 9)), modeLabel + (pct < 55 ? ' · Carregando ortofoto...' : ' · Montando canvas e camadas...'));
+      if (pct < 94) {{
+        setPct(pct + Math.max(1, Math.round((94 - pct) / 10)), modeLabel + (pct < 55 ? ' · Carregando ortofoto...' : ' · Montando canvas e camadas...'));
       }}
     }}, 260);
     function allImagesReady() {{
@@ -1589,9 +1614,15 @@ tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
       clearInterval(loader.__tmgTimer);
       setPct(100, modeLabel + ' · Visualizador pronto.');
       setTimeout(function() {{
+        document.documentElement.classList.remove('tmg-viewer-loading');
+        document.body.classList.remove('tmg-viewer-loading');
+        document.body.classList.add('tmg-viewer-ready');
         loader.style.opacity = '0';
-        setTimeout(function() {{ loader.style.display = 'none'; }}, 380);
-      }}, 360);
+        setTimeout(function() {{
+          loader.style.display = 'none';
+          document.body.classList.remove('tmg-viewer-ready');
+        }}, 460);
+      }}, 220);
     }}
     function waitReady() {{
       if (document.readyState === 'complete' && allImagesReady() && viewerHasContent() && Date.now() >= minReadyAt) {{
