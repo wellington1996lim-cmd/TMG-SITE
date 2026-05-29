@@ -11759,7 +11759,6 @@ def render_loading_camadas(progress, texto: str = "Carregando camada...", arquiv
     target = container if container is not None else st
     target.markdown(markup, unsafe_allow_html=True)
 
-@st.cache_data(show_spinner=False, max_entries=10)
 def carregar_preview_raster_otimizado(file_bytes: bytes, filename: str):
     return _processar_ortofoto_cached(
         file_bytes,
