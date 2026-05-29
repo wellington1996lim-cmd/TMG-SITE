@@ -6159,6 +6159,7 @@ if not st.session_state.logged_in:
         left: 24px;
         z-index: 9999;
         display: inline-flex;
+        flex-direction: column;
         align-items: center;
         justify-content: center;
         min-width: 208px;
@@ -6218,6 +6219,17 @@ if not st.session_state.logged_in:
         display: block;
         color: #ffffff;
         line-height: 1.05;
+    }
+
+    .login-desktop-toggle-status {
+        display: block;
+        margin-top: 4px;
+        color: #c9f7ff;
+        font-size: .66rem;
+        font-weight: 800;
+        line-height: 1.05;
+        letter-spacing: .25px;
+        opacity: .95;
     }
 
     @media (max-width: 720px) {
@@ -6498,17 +6510,22 @@ if not st.session_state.logged_in:
         desktop_active = active_mode == "desktop"
         toggle_target = "streamlit" if desktop_active else "desktop"
         toggle_class = "login-desktop-toggle-btn is-active" if desktop_active else "login-desktop-toggle-btn"
+        toggle_title = "Modo Desktop Local"
+        engine_status = str(viewer_runtime.get("desktop_engine") or "streamlit")
         if is_deploy_viewer:
-            toggle_title = "Modo Streamlit Web"
+            toggle_status = "Streamlit Web"
             toggle_target = "streamlit"
         elif desktop_active:
-            toggle_title = "Desativar modo desktop local"
+            toggle_status = f"Ativado · {engine_status}"
+        elif desktop_available:
+            toggle_status = "Desativado"
         else:
-            toggle_title = "Ativar modo desktop local"
+            toggle_status = "Indisponivel"
         st.markdown(
             f"""
             <a class="{toggle_class}" role="button" href="?tmg_viewer_mode={toggle_target}" onclick="window.location.href='?tmg_viewer_mode={toggle_target}'; return false;">
                 <span class="login-desktop-toggle-main">{html.escape(toggle_title)}</span>
+                <span class="login-desktop-toggle-status">{html.escape(toggle_status)}</span>
             </a>
             """,
             unsafe_allow_html=True,

@@ -97,6 +97,15 @@ def launch_desktop_viewer(image_path: str | Path, app_root: str | Path | None = 
         return False, "Visualizador local indisponivel neste ambiente. Usando visualizador Streamlit."
 
     root = Path(app_root or PROJECT_ROOT).resolve()
+    try:
+        from core.desktop_viewer_engine import launch_desktop_viewer as _launch_desktop_engine
+
+        ok, message = _launch_desktop_engine(image_path, app_root=root)
+        if ok:
+            return ok, message
+    except Exception:
+        pass
+
     script = root / "viewers" / "desktop_viewer.py"
     if not script.exists():
         return False, f"Arquivo do visualizador local nao encontrado: {script}"
@@ -127,7 +136,10 @@ def render_desktop_viewer_controls(file_bytes: bytes, filename: str, key: str, a
     image_path = save_image_for_desktop_viewer(file_bytes, filename, app_root=app_root)
     safe_name = html.escape(Path(filename or image_path.name).name)
     safe_path = html.escape(str(image_path))
-    with st.expander("Visualizador local rapido (opcional)", expanded=False):
+    engine_label = html.escape(str(runtime.get("desktop_engine") or "desktop"))
+    status_label = html.escape(str(runtime.get("desktop_status") or "Modo Desktop Local disponivel."))
+    accelerated_label = "Acelerado" if bool(runtime.get("desktop_accelerated")) else "Fallback seguro"
+    with st.expander("Modo Desktop Local (opcional)", expanded=False):
         st.markdown(
             f"""
             <div style="
@@ -140,7 +152,8 @@ def render_desktop_viewer_controls(file_bytes: bytes, filename: str, key: str, a
                 font-weight:800;">
                 Modo local detectado: voce pode abrir <b>{safe_name}</b> em uma janela externa mais fluida.
                 <div style="margin-top:6px;color:#dffbff;font-size:.78rem;word-break:break-word;">{safe_path}</div>
-                <div style="margin-top:4px;color:#9eefff;font-size:.75rem;">Modo ativo: {html.escape(str(runtime.get("active_mode", "streamlit")))}</div>
+                <div style="margin-top:4px;color:#9eefff;font-size:.75rem;">Motor: {engine_label} · {accelerated_label}</div>
+                <div style="margin-top:4px;color:#c9f7ff;font-size:.75rem;">{status_label}</div>
             </div>
             """,
             unsafe_allow_html=True,

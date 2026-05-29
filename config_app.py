@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_DIR = PROJECT_ROOT / "tmg_config"
 DATA_DIR = PROJECT_ROOT / "tmg_data"
 VIEWER_CONFIG_PATH = CONFIG_DIR / "viewer_config.json"
+LOCAL_MODE_CONFIG_PATH = PROJECT_ROOT / "config" / "local_mode.json"
 
 
 DEFAULT_VIEWER_CONFIG = {
@@ -24,15 +25,17 @@ DEFAULT_VIEWER_CONFIG = {
 def _read_viewer_config() -> dict:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not VIEWER_CONFIG_PATH.exists():
+    LOCAL_MODE_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not VIEWER_CONFIG_PATH.exists() and not LOCAL_MODE_CONFIG_PATH.exists():
         _write_viewer_config(DEFAULT_VIEWER_CONFIG)
         return dict(DEFAULT_VIEWER_CONFIG)
     try:
-        data = json.loads(VIEWER_CONFIG_PATH.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return dict(DEFAULT_VIEWER_CONFIG)
         merged = dict(DEFAULT_VIEWER_CONFIG)
-        merged.update(data)
+        for path in (VIEWER_CONFIG_PATH, LOCAL_MODE_CONFIG_PATH):
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    merged.update(data)
         return merged
     except Exception:
         return dict(DEFAULT_VIEWER_CONFIG)
@@ -41,7 +44,9 @@ def _read_viewer_config() -> dict:
 def _write_viewer_config(config: dict) -> None:
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        LOCAL_MODE_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         VIEWER_CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        LOCAL_MODE_CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
@@ -99,10 +104,15 @@ def get_viewer_runtime() -> dict:
         mode = "auto"
 
     deploy = is_deploy_environment()
+    try:
+        from core.mode_manager import desktop_runtime_status
+        desktop_status = desktop_runtime_status()
+    except Exception:
+        desktop_status = {"available": False, "engine": "streamlit", "message": "Motor desktop indisponível."}
     desktop_session_available = has_desktop_session()
     desktop_enabled = bool(config.get("enable_desktop_viewer_local", True))
-    desktop_possible = desktop_session_available and desktop_enabled
-    desktop_available = desktop_session_available and not deploy
+    desktop_available = desktop_session_available and not deploy and bool(desktop_status.get("available"))
+    desktop_possible = desktop_available and desktop_enabled
     if deploy and bool(config.get("force_streamlit_in_deploy", True)):
         active_mode = "streamlit"
     elif mode == "desktop" and desktop_possible:
@@ -120,6 +130,9 @@ def get_viewer_runtime() -> dict:
         "is_deploy": deploy,
         "desktop_available": desktop_available,
         "desktop_enabled": desktop_enabled,
+        "desktop_engine": str(desktop_status.get("engine", "streamlit")),
+        "desktop_status": str(desktop_status.get("message", "")),
+        "desktop_accelerated": bool(desktop_status.get("accelerated", False)),
         "streamlit_safe": True,
         "desktop_viewer_max_dim": int(config.get("desktop_viewer_max_dim") or 12000),
         "desktop_viewer_cache_dir": str((PROJECT_ROOT / str(config.get("desktop_viewer_cache_dir") or "tmg_data/desktop_viewer")).resolve()),
