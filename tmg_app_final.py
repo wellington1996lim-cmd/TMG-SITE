@@ -38,6 +38,15 @@ APP_TEMP_DIR = APP_ROOT / "tmg_data" / "tmp"
 APP_ULTRALYTICS_DIR = APP_ROOT / "Ultralytics"
 APP_MPLCONFIG_DIR = APP_ROOT / "tmg_data" / "matplotlib"
 
+try:
+    from viewer_manager import render_desktop_viewer_controls as _tmg_render_desktop_viewer_controls
+    HAS_TMG_VIEWER_MANAGER = True
+except Exception:
+    _tmg_render_desktop_viewer_controls = None
+    HAS_TMG_VIEWER_MANAGER = False
+
+_TMG_DESKTOP_VIEWER_RENDERED_KEYS = set()
+
 for _local_dir in (
     APP_ROOT / ".streamlit",
     APP_ROOT / "tmg_data",
@@ -3160,6 +3169,17 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
     try:
         params = (preview_max_dim, preview_jpeg_quality, preview_min_jpeg_quality, preview_max_payload_mb, preview_min_dim)
         cache_key = _ortho_preview_cache_key(file_bytes or b"", file_name, params)
+        if HAS_TMG_VIEWER_MANAGER and cache_key not in _TMG_DESKTOP_VIEWER_RENDERED_KEYS:
+            _TMG_DESKTOP_VIEWER_RENDERED_KEYS.add(cache_key)
+            try:
+                _tmg_render_desktop_viewer_controls(
+                    file_bytes or b"",
+                    file_name,
+                    key=f"tmg_desktop_viewer_{cache_key[:18]}",
+                    app_root=APP_ROOT,
+                )
+            except Exception:
+                pass
         session_cache = st.session_state.setdefault("_tmg_ortho_preview_cache", {})
         _progress(6, f"Iniciando carregamento da ortofoto: {file_name}")
         _progress(12, "Validando arquivo recebido pelo Streamlit...")

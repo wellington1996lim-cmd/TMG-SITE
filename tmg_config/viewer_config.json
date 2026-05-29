@@ -1,0 +1,7 @@
+{
+  "viewer_mode": "auto",
+  "enable_desktop_viewer_local": true,
+  "force_streamlit_in_deploy": true,
+  "desktop_viewer_max_dim": 12000,
+  "desktop_viewer_cache_dir": "tmg_data/desktop_viewer"
+}

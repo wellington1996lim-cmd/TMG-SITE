@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import hashlib
+import html
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from config_app import PROJECT_ROOT, get_viewer_runtime
+
+
+IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".geotiff",
+    ".jp2",
+    ".bmp",
+    ".webp",
+}
+
+
+def _safe_suffix(filename: str) -> str:
+    suffix = Path(filename or "").suffix.lower()
+    return suffix if suffix in IMAGE_EXTENSIONS else ".png"
+
+
+def _safe_stem(filename: str) -> str:
+    stem = Path(filename or "ortofoto").stem
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stem).strip("_")
+    return cleaned or "ortofoto"
+
+
+def is_desktop_viewer_enabled() -> bool:
+    runtime = get_viewer_runtime()
+    return runtime.get("active_mode") == "desktop" and bool(runtime.get("desktop_available"))
+
+
+def save_image_for_desktop_viewer(file_bytes: bytes, filename: str, app_root: str | Path | None = None) -> Path:
+    root = Path(app_root or PROJECT_ROOT).resolve()
+    runtime = get_viewer_runtime()
+    cache_dir = Path(runtime.get("desktop_viewer_cache_dir") or root / "tmg_data" / "desktop_viewer")
+    if not cache_dir.is_absolute():
+        cache_dir = root / cache_dir
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    digest = hashlib.sha1()
+    digest.update(str(filename or "").encode("utf-8", errors="ignore"))
+    digest.update(str(len(file_bytes or b"")).encode("ascii"))
+    digest.update((file_bytes or b"")[:1024 * 1024])
+    safe_name = f"{_safe_stem(filename)}_{digest.hexdigest()[:16]}{_safe_suffix(filename)}"
+    target = cache_dir / safe_name
+    if not target.exists() or target.stat().st_size != len(file_bytes or b""):
+        target.write_bytes(file_bytes or b"")
+    return target
+
+
+def launch_desktop_viewer(image_path: str | Path, app_root: str | Path | None = None) -> tuple[bool, str]:
+    if not is_desktop_viewer_enabled():
+        return False, "Visualizador local indisponivel neste ambiente. Usando visualizador Streamlit."
+
+    root = Path(app_root or PROJECT_ROOT).resolve()
+    script = root / "viewers" / "desktop_viewer.py"
+    if not script.exists():
+        return False, f"Arquivo do visualizador local nao encontrado: {script}"
+
+    try:
+        subprocess.Popen(
+            [sys.executable, str(script), str(Path(image_path).resolve())],
+            cwd=str(root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return True, "Visualizador local aberto em uma janela externa."
+    except Exception as exc:
+        return False, f"Nao foi possivel abrir o visualizador local: {exc}"
+
+
+def render_desktop_viewer_controls(file_bytes: bytes, filename: str, key: str, app_root: str | Path | None = None) -> None:
+    if not is_desktop_viewer_enabled() or not file_bytes:
+        return
+    try:
+        import streamlit as st
+    except Exception:
+        return
+
+    runtime = get_viewer_runtime()
+    image_path = save_image_for_desktop_viewer(file_bytes, filename, app_root=app_root)
+    safe_name = html.escape(Path(filename or image_path.name).name)
+    safe_path = html.escape(str(image_path))
+    with st.expander("Visualizador local rapido (opcional)", expanded=False):
+        st.markdown(
+            f"""
+            <div style="
+                border:1px solid rgba(0,229,255,.38);
+                border-radius:14px;
+                padding:12px 14px;
+                background:linear-gradient(145deg, rgba(2,14,36,.94), rgba(13,43,69,.82));
+                color:#ffffff;
+                box-shadow:0 12px 26px rgba(0,0,0,.30), 0 0 18px rgba(0,229,255,.16);
+                font-weight:800;">
+                Modo local detectado: voce pode abrir <b>{safe_name}</b> em uma janela externa mais fluida.
+                <div style="margin-top:6px;color:#dffbff;font-size:.78rem;word-break:break-word;">{safe_path}</div>
+                <div style="margin-top:4px;color:#9eefff;font-size:.75rem;">Modo ativo: {html.escape(str(runtime.get("active_mode", "streamlit")))}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("Abrir visualizador local", key=key, use_container_width=True):
+            ok, message = launch_desktop_viewer(image_path, app_root=app_root)
+            if ok:
+                st.success(message)
+            else:
+                st.warning(message)
+
