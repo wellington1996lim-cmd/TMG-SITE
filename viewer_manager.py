@@ -57,6 +57,8 @@ def save_image_for_desktop_viewer(file_bytes: bytes, filename: str, app_root: st
     digest.update(str(filename or "").encode("utf-8", errors="ignore"))
     digest.update(str(len(file_bytes or b"")).encode("ascii"))
     digest.update((file_bytes or b"")[:1024 * 1024])
+    if len(file_bytes or b"") > 1024 * 1024:
+        digest.update((file_bytes or b"")[-1024 * 1024:])
     safe_name = f"{_safe_stem(filename)}_{digest.hexdigest()[:16]}{_safe_suffix(filename)}"
     target = cache_dir / safe_name
     if not target.exists() or target.stat().st_size != len(file_bytes or b""):

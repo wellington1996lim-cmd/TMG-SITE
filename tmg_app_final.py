@@ -3179,6 +3179,24 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
     try:
         params = (preview_max_dim, preview_jpeg_quality, preview_min_jpeg_quality, preview_max_payload_mb, preview_min_dim)
         cache_key = _ortho_preview_cache_key(file_bytes or b"", file_name, params)
+        session_cache = st.session_state.setdefault("_tmg_ortho_preview_cache", {})
+        _progress(3, f"Iniciando carregamento da ortofoto: {file_name}")
+        _progress(8, "Ativando barra TMG do visualizador...")
+        desktop_cache_path = None
+        if HAS_TMG_VIEWER_MANAGER and _tmg_get_viewer_runtime is not None:
+            try:
+                viewer_runtime = _tmg_get_viewer_runtime()
+            except Exception:
+                viewer_runtime = {}
+            if viewer_runtime.get("active_mode") == "desktop":
+                _progress(12, "Modo Desktop Local ativo. Preparando bibliotecas locais...")
+        if HAS_TMG_VIEWER_MANAGER and _tmg_prepare_desktop_viewer_cache is not None:
+            try:
+                desktop_cache_path = _tmg_prepare_desktop_viewer_cache(file_bytes or b"", file_name, app_root=APP_ROOT)
+                if desktop_cache_path:
+                    _progress(16, "Ortofoto salva no cache local para leitura rápida...")
+            except Exception:
+                desktop_cache_path = None
         if HAS_TMG_VIEWER_MANAGER and cache_key not in _TMG_DESKTOP_VIEWER_RENDERED_KEYS:
             _TMG_DESKTOP_VIEWER_RENDERED_KEYS.add(cache_key)
             try:
@@ -3190,16 +3208,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                 )
             except Exception:
                 pass
-        session_cache = st.session_state.setdefault("_tmg_ortho_preview_cache", {})
-        _progress(6, f"Iniciando carregamento da ortofoto: {file_name}")
-        _progress(12, "Validando arquivo recebido pelo Streamlit...")
-        if HAS_TMG_VIEWER_MANAGER and _tmg_prepare_desktop_viewer_cache is not None:
-            try:
-                desktop_cache_path = _tmg_prepare_desktop_viewer_cache(file_bytes or b"", file_name, app_root=APP_ROOT)
-                if desktop_cache_path:
-                    _progress(15, "Preparando cache local para visualizador desktop...")
-            except Exception:
-                pass
+        _progress(18, "Validando arquivo recebido pelo Streamlit...")
         if cache_key in session_cache:
             _progress(36, "Preview já processado nesta sessão. Reaproveitando alta qualidade...")
             result = session_cache[cache_key]
