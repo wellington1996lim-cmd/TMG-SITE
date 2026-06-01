@@ -901,6 +901,146 @@ def finish_tmg_ortho_viewer_loading(container, texto: str = "Ortofoto carregada 
     except Exception:
         pass
 
+def render_tmg_ortho_empty_frame(
+    titulo: str = "Visualizador de Ortofoto",
+    mensagem: str = "Nenhuma ortofoto carregada",
+    detalhe: str = "PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW",
+    icone: str = "🗺️",
+    height: int = 706,
+):
+    try:
+        frame_height = max(360, int(height))
+    except Exception:
+        frame_height = 706
+    titulo_seguro = html.escape(str(titulo or "Visualizador de Ortofoto"))
+    mensagem_segura = html.escape(str(mensagem or "Nenhuma ortofoto carregada"))
+    detalhe_seguro = html.escape(str(detalhe or ""))
+    icone_seguro = html.escape(str(icone or "🗺️"))
+    st.markdown(
+        f"""
+        <div class="tmg-ortho-empty-frame" style="min-height:{frame_height}px;">
+            <div class="tmg-ortho-empty-toolbar">
+                <span>{titulo_seguro}</span>
+                <span>{_tmg_viewer_mode_label()}</span>
+            </div>
+            <div class="tmg-ortho-empty-body">
+                <div class="tmg-ortho-empty-card">
+                    <div class="tmg-ortho-empty-icon">{icone_seguro}</div>
+                    <div class="tmg-ortho-empty-message">{mensagem_segura}</div>
+                    <div class="tmg-ortho-empty-detail">{detalhe_seguro}</div>
+                </div>
+            </div>
+        </div>
+        <style>
+        .tmg-ortho-empty-frame {{
+            width:100%;
+            margin:10px 0 16px 0;
+            border-radius:18px;
+            border:1px solid rgba(0,212,255,.42);
+            background:
+                linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
+                radial-gradient(circle at 20% 10%, rgba(0,212,255,.13), transparent 32%),
+                linear-gradient(145deg,#020e24,#061525,#0d2b45);
+            background-size:34px 34px,34px 34px,100% 100%,100% 100%;
+            box-shadow:
+                0 18px 42px rgba(0,0,0,.46),
+                0 0 28px rgba(0,212,255,.18),
+                inset 0 1px 0 rgba(255,255,255,.10),
+                inset 0 0 0 2px rgba(0,212,255,.18);
+            overflow:hidden;
+            color:#fff;
+            font-family:'Segoe UI', Arial, sans-serif;
+        }}
+        .tmg-ortho-empty-toolbar {{
+            height:46px;
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:12px;
+            padding:0 16px;
+            border-bottom:1px solid rgba(0,212,255,.22);
+            background:linear-gradient(90deg, rgba(2,14,36,.92), rgba(12,57,98,.78), rgba(2,14,36,.92));
+            color:#dffaff;
+            font-size:.78rem;
+            font-weight:950;
+            letter-spacing:.4px;
+            text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 14px rgba(0,212,255,.48);
+        }}
+        .tmg-ortho-empty-toolbar span:last-child {{
+            font-size:.70rem;
+            padding:5px 10px;
+            border-radius:999px;
+            border:1px solid rgba(0,212,255,.34);
+            background:rgba(0,212,255,.07);
+        }}
+        .tmg-ortho-empty-body {{
+            min-height:calc({frame_height}px - 46px);
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            padding:28px;
+        }}
+        .tmg-ortho-empty-card {{
+            width:min(480px, 94%);
+            text-align:center;
+            padding:24px 26px;
+            border-radius:20px;
+            border:1px solid rgba(0,212,255,.35);
+            background:
+                linear-gradient(120deg, rgba(255,255,255,.10), transparent 34%),
+                radial-gradient(circle at top left, rgba(0,212,255,.18), transparent 44%),
+                linear-gradient(145deg, rgba(2,14,36,.88), rgba(12,57,98,.76), rgba(0,212,255,.12));
+            box-shadow:0 22px 48px rgba(0,0,0,.42), 0 0 28px rgba(0,212,255,.22), inset 0 1px 0 rgba(255,255,255,.18);
+        }}
+        .tmg-ortho-empty-icon {{
+            font-size:2.9rem;
+            margin-bottom:10px;
+            filter:drop-shadow(0 0 16px rgba(0,212,255,.35));
+        }}
+        .tmg-ortho-empty-message {{
+            color:#ffffff;
+            font-size:.92rem;
+            font-weight:950;
+            letter-spacing:1.4px;
+            text-transform:uppercase;
+            text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 14px rgba(0,212,255,.42);
+        }}
+        .tmg-ortho-empty-detail {{
+            margin-top:8px;
+            color:#d9fbff;
+            font-size:.76rem;
+            font-weight:800;
+            text-shadow:0 1px 0 rgba(0,0,0,.72);
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def _set_tmg_ortho_loading_state(
+    filename: str = "",
+    progress: int = 0,
+    etapa: str = "Aguardando ortofoto...",
+    status: str = "idle",
+    error: str = "",
+) -> None:
+    try:
+        pct = max(0, min(100, int(float(progress))))
+    except Exception:
+        pct = 0
+    try:
+        st.session_state["_tmg_ortho_viewer_state"] = {
+            "filename": str(filename or ""),
+            "progress": pct,
+            "etapa": str(etapa or ""),
+            "status": str(status or "idle"),
+            "error": str(error or ""),
+            "updated_at": time.time(),
+        }
+    except Exception:
+        pass
+
 TMG_PAGE_LABELS = {
     "Login": "Login",
     "Home": "Tela inicial",
@@ -1930,12 +2070,15 @@ body.tmg-viewer-loading {{
     linear-gradient(135deg,#020e24 0%,#061525 54%,#0d2b45 100%) !important;
 }}
 body.tmg-viewer-loading > *:not(#tmg-viewer-runtime-loader) {{
-  opacity:0 !important;
-  visibility:hidden !important;
-  pointer-events:none !important;
+  opacity:1 !important;
+  visibility:visible !important;
 }}
 body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
   animation:tmgViewerReveal .36s ease both;
+}}
+.tmg-viewer-loading-host {{
+  position:relative !important;
+  overflow:hidden !important;
 }}
 .tmg-viewer-runtime-loader {{
   position:fixed;
@@ -1952,6 +2095,14 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
   opacity:1;
   transition:opacity .42s ease;
   pointer-events:none;
+}}
+.tmg-viewer-runtime-loader.tmg-viewer-runtime-embedded {{
+  position:absolute;
+  z-index:80;
+  border-radius:inherit;
+  background:
+    radial-gradient(circle at 50% 26%, rgba({THEME_PRIMARY_RGB},.18), transparent 40%),
+    linear-gradient(135deg, rgba(2,14,36,.88), rgba(6,21,37,.84), rgba(13,43,69,.78));
 }}
 .tmg-viewer-runtime-card {{
   width:min(440px, calc(100vw - 36px));
@@ -2071,15 +2222,27 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
 </style>
 <script id="tmg-embedded-viewer-loading-autohide">
 (function() {{
+  function findViewerHost() {{
+    var selectors = ['#vc', '#viewer', '#cronViewer', '#qgisViewer', '#wrap', '#vdv', '.viewer', '.canvas-wrap', '.map-wrap', '.image-stage', '.ortho-stage'];
+    for (var i = 0; i < selectors.length; i++) {{
+      var el = document.querySelector(selectors[i]);
+      if (el) return el;
+    }}
+    return null;
+  }}
   function ensureRuntimeLoader() {{
     if (document.getElementById('tmg-viewer-runtime-loader')) return;
     if (!document.body) return;
+    var host = findViewerHost();
+    var target = host || document.body;
     document.documentElement.classList.add('tmg-viewer-loading');
     document.body.classList.add('tmg-viewer-loading');
     document.body.classList.remove('tmg-viewer-ready');
     var loader = document.createElement('div');
     loader.id = 'tmg-viewer-runtime-loader';
-    loader.className = 'tmg-viewer-runtime-loader';
+    loader.className = 'tmg-viewer-runtime-loader' + (host ? ' tmg-viewer-runtime-embedded' : '');
+    loader.__tmgHost = host || null;
+    if (host) host.classList.add('tmg-viewer-loading-host');
     var logoHtml = {runtime_logo_html};
     var modeLabel = {runtime_mode_label};
     loader.innerHTML =
@@ -2093,7 +2256,7 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
       '</div>' +
       '<div class="tmg-viewer-runtime-status">' + modeLabel + ' · Preparando ortofoto e ferramentas...</div>' +
       '</div>';
-    document.body.appendChild(loader);
+    target.appendChild(loader);
     var fill = loader.querySelector('.tmg-viewer-runtime-fill');
     var pctEl = loader.querySelector('.tmg-viewer-runtime-percent');
     var statusEl = loader.querySelector('.tmg-viewer-runtime-status');
@@ -2115,7 +2278,8 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
     }}, 260);
     function allImagesReady() {{
       try {{
-        var images = Array.prototype.slice.call(document.images || []);
+        var root = loader.__tmgHost || document;
+        var images = Array.prototype.slice.call(root.querySelectorAll ? root.querySelectorAll('img') : (document.images || []));
         return images.every(function(img) {{ return img.complete && img.naturalWidth !== 0; }});
       }} catch(e) {{
         return true;
@@ -2156,7 +2320,8 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
       return false;
     }}
     function viewerHasContent() {{
-      var canvases = Array.prototype.slice.call(document.querySelectorAll('canvas') || []);
+      var root = loader.__tmgHost || document;
+      var canvases = Array.prototype.slice.call((root.querySelectorAll ? root.querySelectorAll('canvas') : document.querySelectorAll('canvas')) || []);
       if (!canvases.length) return allImagesReady();
       return canvases.some(canvasHasContent);
     }}
@@ -2169,6 +2334,7 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
         document.documentElement.classList.remove('tmg-viewer-loading');
         document.body.classList.remove('tmg-viewer-loading');
         document.body.classList.add('tmg-viewer-ready');
+        if (loader.__tmgHost) loader.__tmgHost.classList.remove('tmg-viewer-loading-host');
         loader.style.opacity = '0';
         setTimeout(function() {{
           loader.style.display = 'none';
@@ -2186,9 +2352,11 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
     window.addEventListener('load', function() {{ setTimeout(waitReady, 80); }});
     setTimeout(waitReady, 240);
     setTimeout(function() {{
-      setPct(96, modeLabel + ' · Finalizando visualizador...');
-      hideLoader();
+      if (!loader.__tmgHidden) setPct(96, modeLabel + ' · Aguardando renderização completa da ortofoto...');
     }}, 18000);
+    setTimeout(function() {{
+      if (!loader.__tmgHidden) setPct(98, modeLabel + ' · Ainda preparando a imagem no visualizador...');
+    }}, 36000);
   }}
   function setProgressVisibility(bar) {{
     if (!bar) return;
@@ -4029,6 +4197,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         if viewer_mode_label not in base_message:
             base_message = f"{viewer_mode_label} · {base_message}"
         detail = f"Arquivo: {file_name} · {total_mb:.1f} MB" if total_mb else f"Arquivo: {file_name}"
+        _set_tmg_ortho_loading_state(file_name, pct, base_message, "loading")
         render_tmg_ortho_viewer_loading(
             pct,
             base_message,
@@ -4113,9 +4282,14 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
             result[3]["viewer_mode_label"] = viewer_mode_label
         _progress(94, "Entregando ortofoto ao visualizador...")
         _progress(98, "Abrindo canvas e ferramentas do visualizador...")
+        if result and result[2]:
+            _set_tmg_ortho_loading_state(file_name, 100, str(result[2]), "error", str(result[2]))
+        else:
+            _set_tmg_ortho_loading_state(file_name, 100, "Ortofoto entregue ao visualizador.", "ready")
         finish_tmg_ortho_viewer_loading(loading_slot, "Ortofoto carregada com sucesso.", modo=viewer_mode_label, hold_seconds=0.2)
         return result
-    except Exception:
+    except Exception as exc:
+        _set_tmg_ortho_loading_state(file_name, 100, f"Falha ao carregar ortofoto: {exc}", "error", str(exc))
         clear_tmg_loading(loading_slot)
         raise
 
@@ -15750,19 +15924,13 @@ updateGridSelect();
                 components.html(chk_viewer, height=980, scrolling=True)
 
         else:
-            st.markdown("""
-            <div style='height:706px;border:1px dashed #2e2e2e;border-radius:12px;background:#0d0d0d;
-                        display:flex;flex-direction:column;align-items:center;justify-content:center;
-                        gap:12px;color:#333;'>
-                <div style='font-size:3rem;'>🗺️</div>
-                <div style='font-size:0.9rem;letter-spacing:2px;text-transform:uppercase;'>
-                    Nenhuma ortofoto carregada
-                </div>
-                <div style='font-size:0.75rem;color:#2a2a2a;'>
-                    PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            render_tmg_ortho_empty_frame(
+                "Visualizador de Ortofoto · Anotação de Parcelas",
+                "Nenhuma ortofoto carregada",
+                "PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW",
+                "🗺️",
+                706,
+            )
 
     # ==========================================
     # GRID COM OPÇÕES DE EXPORTAÇÃO E SHAPEFILE[cite: 1]
@@ -16563,28 +16731,13 @@ window.addEventListener('resize', resize);
                     st.info("Aguardando desenho do Grid e clique em Exportar Shapefile no visualizador...")
 
         else:
-            st.markdown("""
-            <div style='
-                height: 706px;
-                border: 1px dashed #2e2e2e;
-                border-radius: 12px;
-                background: #0d0d0d;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                gap: 12px;
-                color: #333;
-            '>
-                <div style='font-size:3rem;'>🗺️</div>
-                <div style='font-size:0.9rem;letter-spacing:2px;text-transform:uppercase;'>
-                    Nenhuma ortofoto carregada
-                </div>
-                <div style='font-size:0.75rem;color:#2a2a2a;'>
-                    PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            render_tmg_ortho_empty_frame(
+                "Visualizador de Ortofoto",
+                "Nenhuma ortofoto carregada",
+                "PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW",
+                "🗺️",
+                706,
+            )
 
     # ==========================================
     # ANALISE DE MARCACAO DE GRID
@@ -18049,18 +18202,13 @@ new ResizeObserver(() => {{
                     components.html(cnt_viewer, height=720, scrolling=False)
 
             else:
-                st.markdown("""
-                <div style='height:706px;border:1px dashed #2e2e2e;border-radius:12px;background:#0d0d0d;
-                            display:flex;flex-direction:column;align-items:center;justify-content:center;
-                            gap:12px;color:#333;'>
-                    <div style='font-size:3rem;'>🌱</div>
-                    <div style='font-size:0.85rem;letter-spacing:2px;text-transform:uppercase;color:#555;'>
-                        Carregue uma ortofoto para iniciar a contagem
-                    </div>
-                    <div style='font-size:0.75rem;color:#444;'>
-                        Marque 4 pontos do grid → Clique em Contar → Exporte CSV
-                    </div>
-                </div>""", unsafe_allow_html=True)
+                render_tmg_ortho_empty_frame(
+                    "Contagem de Plantas por Parcela",
+                    "Carregue uma ortofoto para iniciar a contagem",
+                    "Marque 4 pontos do grid → Clique em Contar → Exporte CSV",
+                    "🌱",
+                    706,
+                )
             # FIM NOVO - MÓDULO CONTAGEM DE PLANTAS
 
         elif st.session_state.visualizador_sub == "Maturação":
@@ -23818,18 +23966,13 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                     components.html(qual_viewer, height=740, scrolling=False)
 
             else:
-                st.markdown("""
-                <div style='height:740px;border:1px dashed #2e2e2e;border-radius:12px;background:#0d0d0d;
-                            display:flex;flex-direction:column;align-items:center;justify-content:center;
-                            gap:12px;color:#333;'>
-                    <div style='font-size:3rem;'>✅</div>
-                    <div style='font-size:0.85rem;letter-spacing:2px;text-transform:uppercase;color:#555;'>
-                        Carregue uma ortofoto para análise de qualidade
-                    </div>
-                    <div style='font-size:0.75rem;color:#444;'>
-                        Marque o grid → Detecte Falhas → Exporte relatório
-                    </div>
-                </div>""", unsafe_allow_html=True)
+                render_tmg_ortho_empty_frame(
+                    "Qualidade de Parcelas",
+                    "Carregue uma ortofoto para análise de qualidade",
+                    "Marque o grid → Detecte Falhas → Exporte relatório",
+                    "✅",
+                    740,
+                )
             # FIM NOVO - MÓDULO QUALIDADE DE PARCELA
 
         else:
