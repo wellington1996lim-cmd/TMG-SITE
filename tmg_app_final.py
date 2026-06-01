@@ -1021,6 +1021,142 @@ def render_tmg_ortho_error_frame(
         modo=_tmg_viewer_mode_label(),
     )
 
+def _tmg_ortho_viewer_theme_patch_css() -> str:
+    return """
+<style id="tmg-ortho-viewer-theme-patch">
+:root {
+    --tmg-view-bg:#061525;
+    --tmg-view-bg-2:#0d2b45;
+    --tmg-view-cyan:#00d4ff;
+    --tmg-view-blue:#42a5f5;
+    --tmg-view-green:#5ff2b1;
+    --tmg-view-text:#ffffff;
+    --tmg-view-muted:#d9fbff;
+    --tmg-view-glass:rgba(3,18,38,.84);
+    --tmg-view-panel:linear-gradient(145deg, rgba(2,14,36,.94), rgba(12,57,98,.86), rgba(0,212,255,.15));
+}
+html, body {
+    background:
+        radial-gradient(circle at 20% 10%, rgba(0,212,255,.14), transparent 34%),
+        linear-gradient(145deg,#020e24,#061525,#0d2b45) !important;
+    color:var(--tmg-view-text) !important;
+}
+#vc, #wrap, #viewer, #map, #mapWrap, #canvasWrap, #orthoViewer,
+.viewer, .viewer-wrap, .viewer-shell, .canvas-wrap, .map-wrap, .stage, .viewport {
+    background:
+        linear-gradient(rgba(255,255,255,.028) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.028) 1px, transparent 1px),
+        radial-gradient(circle at center, rgba(0,212,255,.10), transparent 38%),
+        linear-gradient(145deg,#020e24,#061525,#0d2b45) !important;
+    background-size:34px 34px,34px 34px,100% 100%,100% 100% !important;
+    border-color:rgba(0,212,255,.46) !important;
+    box-shadow:
+        0 18px 42px rgba(0,0,0,.46),
+        0 0 28px rgba(0,212,255,.20),
+        inset 0 1px 0 rgba(255,255,255,.10),
+        inset 0 0 0 1px rgba(0,212,255,.18) !important;
+}
+.toolbar, .grid-panel, .panel, .side-panel, .control-panel, .controls,
+.assessment-panel, .count-panel, .legend, .status-panel, #annotPopup,
+.zoom-badge, .crosshair, .hint, .info-panel, .summary-panel {
+    color:var(--tmg-view-text) !important;
+    border-color:rgba(0,212,255,.40) !important;
+    background:var(--tmg-view-panel) !important;
+    box-shadow:
+        0 12px 28px rgba(0,0,0,.42),
+        0 0 22px rgba(0,212,255,.18),
+        inset 0 1px 0 rgba(255,255,255,.13) !important;
+}
+.toolbar {
+    background:transparent !important;
+    border-color:transparent !important;
+    box-shadow:none !important;
+}
+button, .tb-btn, .grid-btn, .btn, .tool-btn, #btnExport,
+input[type="button"], input[type="submit"] {
+    color:#ffffff !important;
+    border-color:rgba(0,212,255,.52) !important;
+    background:
+        linear-gradient(145deg, rgba(2,14,36,.96), rgba(12,57,98,.90), rgba(0,212,255,.22)) !important;
+    box-shadow:
+        0 8px 18px rgba(0,0,0,.38),
+        0 0 18px rgba(0,212,255,.20),
+        inset 0 1px 0 rgba(255,255,255,.18) !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.82), 0 0 10px rgba(0,212,255,.45) !important;
+}
+button:hover, .tb-btn:hover, .grid-btn:hover, .btn:hover, .tool-btn:hover, #btnExport:hover,
+input[type="button"]:hover, input[type="submit"]:hover {
+    border-color:rgba(95,242,177,.72) !important;
+    box-shadow:
+        0 10px 22px rgba(0,0,0,.42),
+        0 0 24px rgba(0,212,255,.36),
+        inset 0 1px 0 rgba(255,255,255,.22) !important;
+    transform:translateY(-1px);
+}
+button:active, .tb-btn:active, .grid-btn:active, .btn:active, .tool-btn:active {
+    transform:translateY(1px) scale(.99);
+}
+.active, .sel, .selected, button.active, .grid-btn.active, .grid-btn.annot.active, .quick-active {
+    color:#ffffff !important;
+    border-color:rgba(95,242,177,.80) !important;
+    background:
+        linear-gradient(145deg, rgba(0,94,128,.96), rgba(0,212,255,.34), rgba(95,242,177,.24)) !important;
+    box-shadow:
+        0 0 26px rgba(0,212,255,.35),
+        inset 0 1px 0 rgba(255,255,255,.24) !important;
+}
+input, select, textarea {
+    color:#ffffff !important;
+    border-color:rgba(0,212,255,.42) !important;
+    background:rgba(2,14,36,.78) !important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.10), 0 0 12px rgba(0,212,255,.12) !important;
+}
+input:focus, select:focus, textarea:focus {
+    outline:none !important;
+    border-color:rgba(95,242,177,.72) !important;
+    box-shadow:0 0 18px rgba(0,212,255,.30), inset 0 1px 0 rgba(255,255,255,.16) !important;
+}
+label, h1, h2, h3, h4, .title, .panel-title, .assessment-panel-title,
+.grid-panel label, .zoom-badge {
+    color:#ffffff !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.86), 0 0 14px rgba(0,212,255,.48) !important;
+}
+.crosshair, .hint, .status, .grid-status, .grid-all-status,
+.assessment-empty, .small, .muted {
+    color:var(--tmg-view-muted) !important;
+}
+table, th, td {
+    color:#ffffff !important;
+    border-color:rgba(0,212,255,.24) !important;
+    background-color:rgba(2,14,36,.72) !important;
+}
+th {
+    background:linear-gradient(145deg, rgba(0,70,108,.92), rgba(0,212,255,.18)) !important;
+    color:#ffffff !important;
+    text-shadow:0 1px 0 rgba(0,0,0,.82) !important;
+}
+canvas, img {
+    image-rendering:auto;
+}
+::-webkit-scrollbar { width:10px; height:10px; }
+::-webkit-scrollbar-track { background:#04101f; border-radius:999px; }
+::-webkit-scrollbar-thumb {
+    background:linear-gradient(180deg,#42a5f5,#00d4ff,#5ff2b1);
+    border-radius:999px;
+    border:2px solid #04101f;
+}
+</style>
+"""
+
+def _inject_tmg_ortho_viewer_theme(viewer_html: str) -> str:
+    markup = str(viewer_html or "")
+    if "tmg-ortho-viewer-theme-patch" in markup:
+        return markup
+    patch = _tmg_ortho_viewer_theme_patch_css()
+    if re.search(r"</head\s*>", markup, flags=re.IGNORECASE):
+        return re.sub(r"</head\s*>", patch + "\n</head>", markup, count=1, flags=re.IGNORECASE)
+    return patch + "\n" + markup
+
 def _wrap_tmg_ortho_viewer_component_html(viewer_html: str, height: int = 720, scrolling: bool = False) -> str:
     try:
         frame_height = max(360, int(height or 720))
@@ -1040,6 +1176,7 @@ def _wrap_tmg_ortho_viewer_component_html(viewer_html: str, height: int = 720, s
         "const parentWin = window.parent || window;",
         "const parentWin = (window.parent && window.parent.parent) || window.parent || window;"
     )
+    patched_viewer_html = _inject_tmg_ortho_viewer_theme(patched_viewer_html)
     srcdoc_json = json.dumps(patched_viewer_html).replace("</", "<\\/")
     iframe_scroll = "yes" if scrolling else "no"
     return f"""<!DOCTYPE html>
