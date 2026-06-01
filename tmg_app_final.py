@@ -1021,10 +1021,264 @@ def render_tmg_ortho_error_frame(
         modo=_tmg_viewer_mode_label(),
     )
 
+def _wrap_tmg_ortho_viewer_component_html(viewer_html: str, height: int = 720, scrolling: bool = False) -> str:
+    try:
+        frame_height = max(360, int(height or 720))
+    except Exception:
+        frame_height = 720
+    logo_html = _tmg_loading_logo_html()
+    patched_viewer_html = str(viewer_html or "")
+    patched_viewer_html = patched_viewer_html.replace(
+        "const parentDoc = window.parent && window.parent.document;",
+        "const parentDoc = (window.parent && window.parent.parent && window.parent.parent.document) || (window.parent && window.parent.document);"
+    )
+    patched_viewer_html = patched_viewer_html.replace(
+        "Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype, 'value').set",
+        "Object.getOwnPropertyDescriptor((parentDoc && parentDoc.defaultView ? parentDoc.defaultView : window.parent).HTMLInputElement.prototype, 'value').set"
+    )
+    patched_viewer_html = patched_viewer_html.replace(
+        "const parentWin = window.parent || window;",
+        "const parentWin = (window.parent && window.parent.parent) || window.parent || window;"
+    )
+    srcdoc_json = json.dumps(patched_viewer_html).replace("</", "<\\/")
+    iframe_scroll = "yes" if scrolling else "no"
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* {{ box-sizing:border-box; }}
+html, body {{
+    width:100%;
+    height:{frame_height}px;
+    margin:0;
+    padding:0;
+    overflow:hidden;
+    background:#061525;
+    font-family:'Segoe UI', Arial, sans-serif;
+}}
+.tmg-component-fixed-shell {{
+    width:100%;
+    height:{frame_height}px;
+    min-height:{frame_height}px;
+    position:relative;
+    overflow:hidden;
+    border-radius:18px;
+    border:1px solid rgba(0,212,255,.48);
+    background:
+        linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
+        radial-gradient(circle at 20% 10%, rgba(0,212,255,.14), transparent 32%),
+        linear-gradient(145deg,#020e24,#061525,#0d2b45);
+    background-size:34px 34px,34px 34px,100% 100%,100% 100%;
+    box-shadow:
+        0 18px 42px rgba(0,0,0,.46),
+        0 0 28px rgba(0,212,255,.18),
+        inset 0 1px 0 rgba(255,255,255,.10),
+        inset 0 0 0 2px rgba(0,212,255,.18);
+}}
+.tmg-component-viewer-frame {{
+    width:100%;
+    height:100%;
+    border:0;
+    display:block;
+    opacity:0;
+    transition:opacity .28s ease;
+    background:transparent;
+}}
+.tmg-component-fixed-shell.ready .tmg-component-viewer-frame {{
+    opacity:1;
+}}
+.tmg-component-overlay {{
+    position:absolute;
+    inset:0;
+    z-index:5;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:26px;
+    background:
+        radial-gradient(circle at center, rgba(0,212,255,.14), transparent 38%),
+        linear-gradient(45deg, rgba(255,255,255,.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.025) 75%),
+        linear-gradient(45deg, rgba(255,255,255,.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.025) 75%);
+    background-size:34px 34px;
+    background-position:0 0,17px 17px;
+    transition:opacity .32s ease, visibility .32s ease;
+}}
+.tmg-component-fixed-shell.ready .tmg-component-overlay {{
+    opacity:0;
+    visibility:hidden;
+    pointer-events:none;
+}}
+.tmg-component-card {{
+    width:min(520px, 94%);
+    padding:24px 26px 22px 26px;
+    border-radius:20px;
+    border:1px solid rgba(0,212,255,.46);
+    background:
+        linear-gradient(120deg, rgba(255,255,255,.12), transparent 34%),
+        radial-gradient(circle at top left, rgba(0,212,255,.24), transparent 44%),
+        linear-gradient(145deg, rgba(2,14,36,.94), rgba(12,57,98,.84), rgba(0,212,255,.16));
+    box-shadow:
+        0 22px 48px rgba(0,0,0,.52),
+        0 0 34px rgba(0,212,255,.30),
+        inset 0 1px 0 rgba(255,255,255,.22),
+        inset 0 -9px 18px rgba(2,14,36,.46);
+    text-align:center;
+    color:#fff;
+}}
+.tmg-component-logo {{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    min-height:54px;
+    margin-bottom:12px;
+    animation:tmgComponentLogoPulse 1.8s ease-in-out infinite;
+}}
+.tmg-component-logo .tmg-load-logo-img {{
+    max-width:170px;
+    max-height:58px;
+    object-fit:contain;
+    filter:drop-shadow(0 8px 14px rgba(0,0,0,.50)) drop-shadow(0 0 18px rgba(0,212,255,.42));
+}}
+.tmg-component-logo .tmg-load-logo-fallback {{
+    color:#fff;
+    font-weight:950;
+    letter-spacing:4px;
+    font-size:1.25rem;
+    text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba(0,212,255,.60);
+}}
+.tmg-component-message {{
+    color:#ffffff;
+    font-size:.96rem;
+    font-weight:950;
+    letter-spacing:.35px;
+    text-transform:uppercase;
+    text-shadow:0 1px 0 rgba(0,0,0,.86);
+}}
+.tmg-component-detail {{
+    margin-top:7px;
+    color:#d9fbff;
+    font-size:.78rem;
+    font-weight:800;
+}}
+.tmg-component-track {{
+    position:relative;
+    height:28px;
+    margin-top:17px;
+    overflow:hidden;
+    border-radius:999px;
+    border:1px solid rgba(255,255,255,.14);
+    background:linear-gradient(180deg,#04101f,#0b2540);
+    box-shadow:inset 0 3px 8px rgba(0,0,0,.58), 0 0 16px rgba(0,212,255,.16);
+}}
+.tmg-component-fill {{
+    width:0%;
+    height:100%;
+    border-radius:999px;
+    background:linear-gradient(90deg,#42a5f5,#00d4ff,#5ff2b1);
+    box-shadow:0 0 18px rgba(0,212,255,.55), inset 0 1px 0 rgba(255,255,255,.36);
+    transition:width .22s ease;
+    position:relative;
+}}
+.tmg-component-fill:after {{
+    content:"";
+    position:absolute;
+    inset:0;
+    background:linear-gradient(120deg, transparent 0%, rgba(255,255,255,.38) 45%, transparent 75%);
+    transform:translateX(-100%);
+    animation:tmgComponentShine 1.25s ease-in-out infinite;
+}}
+.tmg-component-percent {{
+    position:absolute;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    color:#ffffff;
+    font-weight:950;
+    font-size:.82rem;
+    text-shadow:0 1px 4px rgba(0,0,0,.88);
+}}
+.tmg-component-status {{
+    margin-top:10px;
+    color:#d9fbff;
+    font-size:.80rem;
+    font-weight:900;
+    text-shadow:0 1px 0 rgba(0,0,0,.82);
+}}
+@keyframes tmgComponentShine {{
+    0% {{ transform:translateX(-100%); }}
+    100% {{ transform:translateX(180%); }}
+}}
+@keyframes tmgComponentLogoPulse {{
+    0%, 100% {{ transform:scale(1); opacity:.94; }}
+    50% {{ transform:scale(1.025); opacity:1; }}
+}}
+</style>
+</head>
+<body>
+<div id="tmgShell" class="tmg-component-fixed-shell">
+    <iframe id="tmgInnerViewer" class="tmg-component-viewer-frame" scrolling="{iframe_scroll}" title="Visualizador TMG"></iframe>
+    <div id="tmgOverlay" class="tmg-component-overlay">
+        <div class="tmg-component-card">
+            <div class="tmg-component-logo">{logo_html}</div>
+            <div class="tmg-component-message">Preparando visualizador...</div>
+            <div class="tmg-component-detail" id="tmgComponentStatus">Montando ortofoto na moldura fixa</div>
+            <div class="tmg-component-track">
+                <div class="tmg-component-fill" id="tmgComponentFill"></div>
+                <div class="tmg-component-percent" id="tmgComponentPercent">0%</div>
+            </div>
+            <div class="tmg-component-status">Aguarde até a ortofoto aparecer.</div>
+        </div>
+    </div>
+</div>
+<script>
+(function() {{
+    const shell = document.getElementById('tmgShell');
+    const inner = document.getElementById('tmgInnerViewer');
+    const fill = document.getElementById('tmgComponentFill');
+    const percent = document.getElementById('tmgComponentPercent');
+    const status = document.getElementById('tmgComponentStatus');
+    let progress = 3;
+    let done = false;
+    function setProgress(value, text) {{
+        progress = Math.max(progress, Math.min(100, Math.round(value || 0)));
+        fill.style.width = progress + '%';
+        percent.textContent = progress + '%';
+        if (text) status.textContent = text;
+    }}
+    const timer = window.setInterval(function() {{
+        if (done) return;
+        const next = progress < 55 ? progress + 7 : (progress < 86 ? progress + 3 : progress + 1);
+        setProgress(Math.min(next, 94), 'Renderizando ortofoto e ferramentas...');
+    }}, 180);
+    function finish() {{
+        if (done) return;
+        done = true;
+        window.clearInterval(timer);
+        setProgress(100, 'Visualizador pronto.');
+        window.setTimeout(function() {{
+            shell.classList.add('ready');
+        }}, 260);
+    }}
+    inner.addEventListener('load', function() {{
+        setProgress(96, 'Imagem carregada. Finalizando desenho...');
+        window.setTimeout(finish, 520);
+    }});
+    inner.srcdoc = {srcdoc_json};
+    setProgress(12, 'Abrindo visualizador...');
+    window.setTimeout(finish, 18000);
+}})();
+</script>
+</body>
+</html>"""
+
 def render_tmg_ortho_viewer_component(viewer_slot, viewer_html: str, height: int = 720, scrolling: bool = False):
     target = viewer_slot if viewer_slot is not None else st.empty()
+    wrapped_html = _wrap_tmg_ortho_viewer_component_html(viewer_html, height=height, scrolling=scrolling)
     with target.container():
-        components.html(viewer_html, height=height, scrolling=scrolling)
+        components.html(wrapped_html, height=height, scrolling=False)
     return target
 
 def _set_tmg_ortho_loading_state(
@@ -1187,7 +1441,7 @@ def _preview_max_dim() -> int:
 
 def _preview_jpeg_quality() -> int:
     # Qualidade alta e mais leve para reduzir tempo de conversao/renderizacao.
-    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 89, 82, 98)
+    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 87, 82, 98)
 
 def _preview_min_jpeg_quality() -> int:
     # Piso de qualidade para evitar perda visual agressiva nas ortofotos grandes.
@@ -1195,7 +1449,7 @@ def _preview_min_jpeg_quality() -> int:
 
 def _preview_max_payload_mb() -> int:
     # Limite do payload enviado ao navegador; a ortofoto original permanece intacta.
-    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 9, 6, 160)
+    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 7, 5, 160)
 
 def _preview_min_dim() -> int:
     return _int_setting("TMG_PREVIEW_MIN_DIM", 2400, 1200, 8192)
@@ -1222,9 +1476,9 @@ def _adaptive_ortho_preview_params(
 
     if not explicit_max_dim:
         if is_deploy:
-            max_dim = min(max_dim, 3600)
+            max_dim = min(max_dim, 3200)
         elif size_mb >= 12:
-            max_dim = min(max_dim, 4200)
+            max_dim = min(max_dim, 3600)
         elif size_mb >= 500:
             max_dim = min(max_dim, 4000)
         elif size_mb >= 250:
@@ -1232,7 +1486,9 @@ def _adaptive_ortho_preview_params(
         elif size_mb >= 100:
             max_dim = min(max_dim, 5200)
     if not explicit_quality:
-        if is_deploy or size_mb >= 250:
+        if is_deploy or size_mb >= 12:
+            quality = min(quality, 87)
+        elif size_mb >= 250:
             quality = min(quality, 89)
         elif size_mb >= 100:
             quality = min(quality, 90)
@@ -1241,9 +1497,9 @@ def _adaptive_ortho_preview_params(
             min_quality = min(min_quality, 80)
     if not explicit_payload:
         if is_deploy:
-            payload_mb = min(payload_mb, 8)
+            payload_mb = min(payload_mb, 6)
         elif size_mb >= 12:
-            payload_mb = min(payload_mb, 9)
+            payload_mb = min(payload_mb, 7)
         elif size_mb >= 500:
             payload_mb = min(payload_mb, 10)
         elif size_mb >= 250:
