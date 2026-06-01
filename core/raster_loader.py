@@ -47,7 +47,9 @@ class RasterLoader:
             try:
                 import rasterio
 
-                self.src = rasterio.open(str(self.path))
+                self._rasterio_env = rasterio.Env(GDAL_CACHEMAX=512, NUM_THREADS="ALL_CPUS")
+                self._rasterio_env.__enter__()
+                self.src = rasterio.open(str(self.path), sharing=True)
                 self.backend = "rasterio"
                 self.width = int(self.src.width)
                 self.height = int(self.src.height)
@@ -72,7 +74,14 @@ class RasterLoader:
                 self.src.close()
         except Exception:
             pass
+        try:
+            env = getattr(self, "_rasterio_env", None)
+            if env is not None:
+                env.__exit__(None, None, None)
+        except Exception:
+            pass
         self.src = None
+        self._rasterio_env = None
         self.image = None
         self.cache.clear()
 
@@ -160,4 +169,3 @@ class RasterLoader:
             else:
                 out.append(np.nan_to_num(np.clip((band - mn) / (mx - mn) * 255, 0, 255)).astype(np.uint8))
         return np.stack(out)
-

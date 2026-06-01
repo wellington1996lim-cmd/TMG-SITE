@@ -793,11 +793,11 @@ def _preview_max_dim() -> int:
     # Ajuste solicitado: visualização de ortofotos com mais qualidade no Streamlit.
     # Pode ser configurado por variável/secret TMG_PREVIEW_MAX_DIM.
     # Mantém compatibilidade com Streamlit Cloud evitando carregar a imagem original inteira no navegador.
-    return _int_setting("TMG_PREVIEW_MAX_DIM", 9000, 2048, 14000)
+    return _int_setting("TMG_PREVIEW_MAX_DIM", 7200, 2048, 14000)
 
 def _preview_jpeg_quality() -> int:
     # Qualidade alta para preservar detalhes de TIF/GeoTIFF/RGB no visualizador.
-    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 96, 82, 98)
+    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 94, 82, 98)
 
 def _preview_min_jpeg_quality() -> int:
     # Piso de qualidade para evitar perda visual agressiva nas ortofotos grandes.
@@ -805,10 +805,10 @@ def _preview_min_jpeg_quality() -> int:
 
 def _preview_max_payload_mb() -> int:
     # Limite alto para preservar mais detalhes no preview sem alterar o arquivo original.
-    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 28, 8, 160)
+    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 22, 8, 160)
 
 def _preview_min_dim() -> int:
-    return _int_setting("TMG_PREVIEW_MIN_DIM", 3600, 1200, 8192)
+    return _int_setting("TMG_PREVIEW_MIN_DIM", 3200, 1200, 8192)
 
 def _upload_limit_mb() -> int:
     # Valor informativo mostrado na interface; o limite real do Streamlit Cloud é definido em .streamlit/config.toml.
@@ -3231,10 +3231,11 @@ def _processar_ortofoto_core(
             _set_progress(14, f"Lendo ortofoto pelo cache local: {Path(filename).name}")
         else:
             spatial_meta["preview_backend"] = "memoryfile_rasterio"
-            _set_progress(14, f"Lendo ortofoto: {Path(filename).name}")
+        _set_progress(14, f"Lendo ortofoto: {Path(filename).name}")
         import rasterio
         from rasterio.enums import Resampling
         with ExitStack() as stack:
+            stack.enter_context(rasterio.Env(GDAL_CACHEMAX=512, NUM_THREADS="ALL_CPUS"))
             if local_source:
                 src = stack.enter_context(rasterio.open(str(local_source)))
             else:
@@ -3433,6 +3434,30 @@ def _processar_ortofoto_cached(
         progress_callback=None,
     )
 
+@st.cache_data(show_spinner=False, max_entries=18)
+def _processar_ortofoto_file_cached(
+    local_source_path: str,
+    filename: str,
+    source_size: int,
+    source_mtime_ns: int,
+    preview_max_dim: int,
+    preview_jpeg_quality: int,
+    preview_min_jpeg_quality: int,
+    preview_max_payload_mb: int,
+    preview_min_dim: int,
+):
+    return _processar_ortofoto_core(
+        b"",
+        filename,
+        preview_max_dim,
+        preview_jpeg_quality,
+        preview_min_jpeg_quality,
+        preview_max_payload_mb,
+        preview_min_dim,
+        progress_callback=None,
+        local_source_path=local_source_path,
+    )
+
 def _ortho_preview_cache_key(file_bytes: bytes, filename: str, params: tuple) -> str:
     hasher = hashlib.sha1()
     hasher.update(str(filename or "").encode("utf-8", errors="ignore"))
@@ -3445,6 +3470,13 @@ def _ortho_preview_cache_key(file_bytes: bytes, filename: str, params: tuple) ->
     return hasher.hexdigest()
 
 ORTHO_PREVIEW_CACHE_DIR = SYSTEM_DATABASE_DIR / "ortho_preview_cache"
+ORTHO_SOURCE_CACHE_DIR = SYSTEM_DATABASE_DIR / "ortho_source_cache"
+
+def _safe_ortho_cache_suffix(filename: str) -> str:
+    suffix = Path(filename or "").suffix.lower()
+    if suffix in {".tif", ".tiff", ".geotiff", ".png", ".jpg", ".jpeg", ".jp2", ".bmp", ".webp"}:
+        return suffix
+    return ".img"
 
 def _ortho_preview_disk_paths(cache_key: str) -> tuple[Path, Path]:
     safe_key = re.sub(r"[^a-fA-F0-9]+", "", str(cache_key or ""))[:64] or "preview"
@@ -3477,6 +3509,52 @@ def _cleanup_ortho_preview_disk_cache(max_files: int = 10, max_bytes: int = 260 
                     pass
     except Exception:
         pass
+
+def _cleanup_ortho_source_cache(keep_path: Path | None = None, max_files: int = 3, max_bytes: int = 1200 * 1024 * 1024) -> None:
+    try:
+        ORTHO_SOURCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        keep = keep_path.resolve() if keep_path else None
+        files = sorted(
+            [p for p in ORTHO_SOURCE_CACHE_DIR.iterdir() if p.is_file()],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        total = sum(p.stat().st_size for p in files)
+        for idx, path in enumerate(files):
+            try:
+                if keep and path.resolve() == keep:
+                    continue
+                if idx >= max_files or total > max_bytes:
+                    size = path.stat().st_size
+                    path.unlink(missing_ok=True)
+                    total -= size
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _save_ortho_source_cache(file_bytes: bytes, filename: str, cache_key: str) -> Path | None:
+    try:
+        if not file_bytes:
+            return None
+        suffix = _safe_ortho_cache_suffix(filename)
+        should_cache_source = suffix in {".tif", ".tiff", ".geotiff", ".jp2"} or len(file_bytes) >= 5 * 1024 * 1024
+        if not should_cache_source:
+            return None
+        ORTHO_SOURCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        target = ORTHO_SOURCE_CACHE_DIR / f"{str(cache_key or 'ortho')[:40]}{suffix}"
+        if not target.exists() or target.stat().st_size != len(file_bytes):
+            target.write_bytes(file_bytes)
+        else:
+            try:
+                now = time.time()
+                os.utime(target, (now, now))
+            except Exception:
+                pass
+        _cleanup_ortho_source_cache(keep_path=target)
+        return target
+    except Exception:
+        return None
 
 def _read_ortho_preview_disk_cache(cache_key: str):
     jpg_path, meta_path = _ortho_preview_disk_paths(cache_key)
@@ -3545,6 +3623,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         _progress(3, f"Iniciando carregamento da ortofoto: {file_name}")
         _progress(8, "Ativando barra TMG do visualizador...")
         desktop_cache_path = None
+        local_source_path = None
         if str(viewer_runtime.get("active_mode") or "").lower() == "desktop":
             _progress(12, "Preparando bibliotecas locais rápidas para leitura da ortofoto...")
         else:
@@ -3556,6 +3635,11 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                     _progress(16, "Ortofoto salva no cache local para leitura rápida...")
             except Exception:
                 desktop_cache_path = None
+        if desktop_cache_path:
+            local_source_path = desktop_cache_path
+        else:
+            _progress(16, "Preparando cache local da ortofoto para acelerar a leitura...")
+            local_source_path = _save_ortho_source_cache(file_bytes or b"", file_name, cache_key)
         if HAS_TMG_VIEWER_MANAGER and cache_key not in _TMG_DESKTOP_VIEWER_RENDERED_KEYS:
             _TMG_DESKTOP_VIEWER_RENDERED_KEYS.add(cache_key)
             try:
@@ -3590,7 +3674,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
                     preview_max_payload_mb,
                     preview_min_dim,
                     progress_callback=_progress,
-                    local_source_path=str(desktop_cache_path) if desktop_cache_path else None,
+                    local_source_path=str(local_source_path) if local_source_path else None,
                 )
                 if result and len(result) >= 4 and isinstance(result[3], dict):
                     result[3]["viewer_mode"] = str(viewer_runtime.get("active_mode") or "streamlit")
@@ -12280,15 +12364,35 @@ def render_loading_camadas(progress, texto: str = "Carregando camada...", arquiv
     target.markdown(markup, unsafe_allow_html=True)
 
 def carregar_preview_raster_otimizado(file_bytes: bytes, filename: str):
-    return _processar_ortofoto_cached(
-        file_bytes,
-        filename,
+    params = (
         _preview_max_dim(),
         _preview_jpeg_quality(),
         _preview_min_jpeg_quality(),
         _preview_max_payload_mb(),
         _preview_min_dim(),
     )
+    cache_key = _ortho_preview_cache_key(file_bytes or b"", filename, params)
+    disk_result = _read_ortho_preview_disk_cache(cache_key)
+    if disk_result:
+        return disk_result
+    source_path = _save_ortho_source_cache(file_bytes or b"", filename, cache_key)
+    if source_path and source_path.exists():
+        try:
+            stat = source_path.stat()
+            result = _processar_ortofoto_file_cached(
+                str(source_path),
+                filename,
+                int(stat.st_size),
+                int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+                *params,
+            )
+            _write_ortho_preview_disk_cache(cache_key, result)
+            return result
+        except Exception:
+            pass
+    result = _processar_ortofoto_cached(file_bytes, filename, *params)
+    _write_ortho_preview_disk_cache(cache_key, result)
+    return result
 
 def render_loading_visualizador_grid(progress=67, texto: str = "Carregando visualizador...", etapa: str = "Preparando camadas selecionadas...") -> str:
     try:

@@ -247,9 +247,118 @@ def _run_pyside_tile_viewer(image_path: Path) -> int:
 
 
 def _run_tk_fallback(image_path: Path) -> int:
-    from viewers.desktop_viewer import DesktopOrthoViewer
+    import tkinter as tk
+    from PIL import Image, ImageTk
 
-    viewer = DesktopOrthoViewer(image_path)
+    class TkTileViewer:
+        def __init__(self, path: Path):
+            self.path = path
+            self.loader = RasterLoader(path)
+            self.root = tk.Tk()
+            self.root.title(f"TMG Desktop Local - {path.name}")
+            self.root.geometry("1320x860")
+            self.root.configure(bg="#061525")
+            self.canvas = tk.Canvas(self.root, bg="#020e24", highlightthickness=0)
+            self.canvas.pack(fill=tk.BOTH, expand=True)
+            self.status = tk.Label(
+                self.root,
+                bg="#020e24",
+                fg="#e8fbff",
+                anchor="w",
+                font=("Segoe UI", 10, "bold"),
+                padx=10,
+                pady=7,
+            )
+            self.status.pack(fill=tk.X)
+            self.zoom = min(1.0, 1300 / max(1, max(self.loader.width, self.loader.height)))
+            self.zoom = max(self.zoom, 0.02)
+            self.center_x = self.loader.width / 2
+            self.center_y = self.loader.height / 2
+            self.dragging = False
+            self.last_x = 0
+            self.last_y = 0
+            self.photo = None
+            self.root.bind("<Configure>", lambda _event: self.root.after_idle(self.render))
+            self.canvas.bind("<ButtonPress-1>", self._start_pan)
+            self.canvas.bind("<B1-Motion>", self._pan)
+            self.canvas.bind("<ButtonRelease-1>", self._stop_pan)
+            self.canvas.bind("<MouseWheel>", self._wheel)
+            self.canvas.bind("<Button-4>", lambda event: self._zoom_at(1.18))
+            self.canvas.bind("<Button-5>", lambda event: self._zoom_at(0.84))
+            self.root.bind("<f>", lambda _event: self.fit())
+            self.root.bind("<r>", lambda _event: self.fit())
+            self.root.bind("<Escape>", lambda _event: self.root.destroy())
+            self.root.after(100, self.fit)
+
+        def fit(self):
+            cw = max(1, self.canvas.winfo_width())
+            ch = max(1, self.canvas.winfo_height())
+            self.zoom = min(1.0, cw / max(1, self.loader.width), ch / max(1, self.loader.height)) * 0.98
+            self.zoom = max(self.zoom, 0.02)
+            self.center_x = self.loader.width / 2
+            self.center_y = self.loader.height / 2
+            self.render()
+
+        def _start_pan(self, event):
+            self.dragging = True
+            self.last_x = event.x
+            self.last_y = event.y
+
+        def _pan(self, event):
+            if not self.dragging:
+                return
+            self.center_x -= (event.x - self.last_x) / max(self.zoom, 0.02)
+            self.center_y -= (event.y - self.last_y) / max(self.zoom, 0.02)
+            self.last_x = event.x
+            self.last_y = event.y
+            self._clamp_center()
+            self.render()
+
+        def _stop_pan(self, _event=None):
+            self.dragging = False
+
+        def _wheel(self, event):
+            self._zoom_at(1.18 if event.delta > 0 else 0.84)
+
+        def _zoom_at(self, factor: float):
+            self.zoom = max(0.02, min(20.0, self.zoom * float(factor or 1.0)))
+            self._clamp_center()
+            self.render()
+
+        def _clamp_center(self):
+            self.center_x = min(max(self.center_x, 0), self.loader.width)
+            self.center_y = min(max(self.center_y, 0), self.loader.height)
+
+        def render(self):
+            cw = max(240, self.canvas.winfo_width())
+            ch = max(180, self.canvas.winfo_height())
+            src_w = cw / max(self.zoom, 0.02)
+            src_h = ch / max(self.zoom, 0.02)
+            x = max(0, min(self.loader.width - 1, self.center_x - src_w / 2))
+            y = max(0, min(self.loader.height - 1, self.center_y - src_h / 2))
+            arr = self.loader.get_viewport(x, y, self.zoom, cw, ch)
+            image = Image.fromarray(arr, "RGB")
+            screen_w = max(1, int(arr.shape[1] * max(self.zoom, 0.02)))
+            screen_h = max(1, int(arr.shape[0] * max(self.zoom, 0.02)))
+            if screen_w < cw or screen_h < ch:
+                image = image.resize((cw, ch), Image.Resampling.BILINEAR)
+            self.photo = ImageTk.PhotoImage(image)
+            self.canvas.delete("all")
+            self.canvas.create_image(cw / 2, ch / 2, image=self.photo, anchor="center")
+            self.status.config(
+                text=(
+                    f"{self.path.name} | {self.loader.width} x {self.loader.height}px | "
+                    f"{self.loader.backend} | Zoom {self.zoom * 100:.0f}% | arrastar/pan, roda/zoom, F ajustar, ESC sair"
+                )
+            )
+
+        def run(self):
+            try:
+                self.root.mainloop()
+            finally:
+                self.loader.close()
+
+    viewer = TkTileViewer(image_path)
     viewer.run()
     return 0
 
