@@ -907,6 +907,7 @@ def render_tmg_ortho_empty_frame(
     detalhe: str = "PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW",
     icone: str = "🗺️",
     height: int = 706,
+    container=None,
 ):
     try:
         frame_height = max(360, int(height))
@@ -916,7 +917,8 @@ def render_tmg_ortho_empty_frame(
     mensagem_segura = html.escape(str(mensagem or "Nenhuma ortofoto carregada"))
     detalhe_seguro = html.escape(str(detalhe or ""))
     icone_seguro = html.escape(str(icone or "🗺️"))
-    st.markdown(
+    target = container if container is not None else st
+    target.markdown(
         f"""
         <div class="tmg-ortho-empty-frame" style="min-height:{frame_height}px;">
             <div class="tmg-ortho-empty-toolbar">
@@ -1017,6 +1019,28 @@ def render_tmg_ortho_empty_frame(
         """,
         unsafe_allow_html=True,
     )
+
+def render_tmg_ortho_error_frame(
+    titulo: str = "Visualizador de Ortofoto",
+    erro: str = "Não foi possível carregar a ortofoto.",
+    detalhe: str = "Tente importar outro arquivo.",
+    height: int = 706,
+    container=None,
+) -> None:
+    render_tmg_ortho_empty_frame(
+        titulo=titulo,
+        mensagem=erro,
+        detalhe=detalhe,
+        icone="⚠️",
+        height=height,
+        container=container,
+    )
+
+def render_tmg_ortho_viewer_component(viewer_slot, viewer_html: str, height: int = 720, scrolling: bool = False):
+    target = viewer_slot if viewer_slot is not None else st.empty()
+    with target.container():
+        components.html(viewer_html, height=height, scrolling=scrolling)
+    return target
 
 def _set_tmg_ortho_loading_state(
     filename: str = "",
@@ -4180,10 +4204,10 @@ def _write_ortho_preview_disk_cache(cache_key: str, result) -> None:
     except Exception:
         pass
 
-def processar_ortofoto(file_bytes: bytes, filename: str):
+def processar_ortofoto(file_bytes: bytes, filename: str, viewer_slot=None):
     file_name = Path(filename or "ortofoto").name
     total_mb = (len(file_bytes or b"") / (1024 * 1024)) if file_bytes is not None else 0
-    loading_slot = st.empty()
+    loading_slot = viewer_slot if viewer_slot is not None else st.empty()
     viewer_runtime = _tmg_current_viewer_runtime()
     viewer_mode_label = _tmg_viewer_mode_label(viewer_runtime)
     preview_max_dim = _preview_max_dim()
@@ -8585,14 +8609,14 @@ def _tv_render_grid_parcelas(manifest: dict) -> None:
             ortho_id = selected.split(" · ")[0]
             record = next((o for o in manifest.get("orthos", []) if o.get("ortho_id") == ortho_id), None)
             if record and Path(record.get("path", "")).exists():
-                with st.container():
-                    raw = Path(record["path"]).read_bytes()
-                    b64, dims, err, _ = processar_ortofoto(raw, record["nome"])
+                viewer_slot = st.empty()
+                raw = Path(record["path"]).read_bytes()
+                b64, dims, err, _ = processar_ortofoto(raw, record["nome"], viewer_slot=viewer_slot)
                 if err:
-                    st.error(err)
+                    render_tmg_ortho_error_frame("Visualizador GIS", err, "Tente abrir outra ortofoto.", 700, container=viewer_slot)
                 else:
                     st.markdown(f"<p style='color:#888;font-size:0.8rem;'>📐 {record['nome']} · {dims[0]}×{dims[1]} px · grid preservado em JSON</p>", unsafe_allow_html=True)
-                    components.html(_tv_grid_viewer_html(b64, int(rows), int(cols), record["nome"]), height=700, scrolling=False)
+                    render_tmg_ortho_viewer_component(viewer_slot, _tv_grid_viewer_html(b64, int(rows), int(cols), record["nome"]), height=700, scrolling=False)
 
     st.markdown("##### Versões de Grid")
     grid_rows = [{
@@ -9610,15 +9634,16 @@ def _vd_render_ortofotos(manifest: dict) -> None:
         st.info("Pré-visualização em espera. Clique em Abrir pré-visualização para carregar o mosaico no navegador.")
         return
 
+    viewer_slot = st.empty()
     raw = Path(ortho["path"]).read_bytes()
-    b64, dims, err, spatial_meta = processar_ortofoto(raw, ortho["nome"])
+    b64, dims, err, spatial_meta = processar_ortofoto(raw, ortho["nome"], viewer_slot=viewer_slot)
     if err:
-        st.error(f"Não foi possível abrir o preview: {err}")
+        render_tmg_ortho_error_frame("Pré-visualização de Ortofoto", f"Não foi possível abrir o preview: {err}", "Tente importar outra ortofoto.", 700, container=viewer_slot)
     else:
         ortho["spatial_meta"] = spatial_meta or ortho.get("spatial_meta", {})
         ortho["resolucao_preview"] = f"{dims[0]}x{dims[1]} px"
         _vd_save_manifest(manifest)
-        components.html(_vd_ortho_viewer_html(b64, ortho["nome"], dims[0], dims[1]), height=700, scrolling=False)
+        render_tmg_ortho_viewer_component(viewer_slot, _vd_ortho_viewer_html(b64, ortho["nome"], dims[0], dims[1]), height=700, scrolling=False)
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -9745,13 +9770,14 @@ def _vd_render_grid(manifest: dict) -> None:
             ortho_id = _vd_id_from_option(selected)
             ortho = _vd_find_ortho(manifest, ortho_id)
             if ortho and Path(ortho.get("path", "")).exists():
+                viewer_slot = st.empty()
                 raw = Path(ortho["path"]).read_bytes()
-                b64, dims, err, _ = processar_ortofoto(raw, ortho["nome"])
+                b64, dims, err, _ = processar_ortofoto(raw, ortho["nome"], viewer_slot=viewer_slot)
                 if err:
-                    st.error(err)
+                    render_tmg_ortho_error_frame("Marcador de Grid", err, "Tente selecionar outra ortofoto.", 700, container=viewer_slot)
                 else:
                     st.caption(f"{ortho['nome']} · {dims[0]}x{dims[1]} px")
-                    components.html(_tv_grid_viewer_html(b64, int(rows), int(cols), ortho["nome"]), height=700, scrolling=False)
+                    render_tmg_ortho_viewer_component(viewer_slot, _tv_grid_viewer_html(b64, int(rows), int(cols), ortho["nome"]), height=700, scrolling=False)
 
     st.markdown("#### Exportação Final")
     grid_options = [f"{g['grid_id']} · {g.get('ortho_nome','Ortofoto')}" for g in manifest.get("grids", [])]
@@ -11481,12 +11507,13 @@ def _orthomosaic_render_viewer(path: Path) -> None:
         )
     if st.session_state.get("ortho_view_file") == str(path):
         try:
+            viewer_slot = st.empty()
             raw = path.read_bytes()
-            b64, dims, err, _ = processar_ortofoto(raw, path.name)
+            b64, dims, err, _ = processar_ortofoto(raw, path.name, viewer_slot=viewer_slot)
             if err:
-                st.info("Não foi possível gerar a prévia no navegador. O arquivo continua disponível para download.")
+                render_tmg_ortho_error_frame("Gerador de Ortomosaico", "Não foi possível gerar a prévia no navegador.", "O arquivo continua disponível para download.", 680, container=viewer_slot)
                 return
-            components.html(_orthomosaic_simple_viewer_html(b64, path.name, dims[0], dims[1]), height=680, scrolling=False)
+            render_tmg_ortho_viewer_component(viewer_slot, _orthomosaic_simple_viewer_html(b64, path.name, dims[0], dims[1]), height=680, scrolling=False)
         except Exception:
             st.info("Não foi possível gerar a prévia no navegador. O arquivo continua disponível para download.")
 
@@ -14764,12 +14791,12 @@ with main_container:
         chk_bytes, chk_name = _uploaded_ortho_bytes(chk_file)
 
         if chk_bytes:
-            with st.container():
-                # Atualizado Unpack para o spatial_meta
-                chk_b64, chk_dims, chk_err, chk_spatial = processar_ortofoto(chk_bytes, chk_name)
+            chk_viewer_slot = st.empty()
+            # Atualizado Unpack para o spatial_meta
+            chk_b64, chk_dims, chk_err, chk_spatial = processar_ortofoto(chk_bytes, chk_name, viewer_slot=chk_viewer_slot)
 
             if chk_err:
-                st.error(f"Erro: {chk_err}")
+                render_tmg_ortho_error_frame("Visualizador de Ortofoto · Anotação de Parcelas", f"Erro: {chk_err}", "Tente importar outra ortofoto.", 980, container=chk_viewer_slot)
             else:
                 cw, ch = chk_dims
                 chk_storage_id = json.dumps(_tv_hash_bytes(chk_bytes)[:32])
@@ -15921,7 +15948,7 @@ updateGridSelect();
 </body>
 </html>
 """
-                components.html(chk_viewer, height=980, scrolling=True)
+                render_tmg_ortho_viewer_component(chk_viewer_slot, chk_viewer, height=980, scrolling=True)
 
         else:
             render_tmg_ortho_empty_frame(
@@ -15955,18 +15982,18 @@ updateGridSelect();
                 app_rerun()
 
         if orto_file or grid_prefill_available:
-            with st.container():
-                if orto_file:
-                    file_bytes, orto_nome_exibicao = _uploaded_ortho_bytes(orto_file)
-                else:
-                    file_bytes = Path(grid_prefill_path).read_bytes()
-                    orto_nome_exibicao = grid_prefill_name or Path(grid_prefill_path).name
-                # Atualizado Unpack para obter Metadata Espacial para o SHP
-                b64, dims, err, spatial_meta = processar_ortofoto(file_bytes, orto_nome_exibicao)
-                st.session_state.spatial_meta = spatial_meta
+            grid_viewer_slot = st.empty()
+            if orto_file:
+                file_bytes, orto_nome_exibicao = _uploaded_ortho_bytes(orto_file)
+            else:
+                file_bytes = Path(grid_prefill_path).read_bytes()
+                orto_nome_exibicao = grid_prefill_name or Path(grid_prefill_path).name
+            # Atualizado Unpack para obter Metadata Espacial para o SHP
+            b64, dims, err, spatial_meta = processar_ortofoto(file_bytes, orto_nome_exibicao, viewer_slot=grid_viewer_slot)
+            st.session_state.spatial_meta = spatial_meta
 
             if err:
-                st.error(f"Erro ao processar imagem: {err}")
+                render_tmg_ortho_error_frame("Visualizador de Ortofoto", f"Erro ao processar imagem: {err}", "Tente importar outra ortofoto.", 720, container=grid_viewer_slot)
             else:
                 w, h = dims
                 st.markdown(
@@ -16621,7 +16648,7 @@ window.addEventListener('resize', resize);
 </body>
 </html>
 """
-                components.html(viewer_html, height=720, scrolling=False)
+                render_tmg_ortho_viewer_component(grid_viewer_slot, viewer_html, height=720, scrolling=False)
 
                 # ---------------------------------------------------------
                 # ADIÇÃO: MÓDULO ROBUSTO DE EXPORTAÇÃO SHAPEFILE (GEOPANDAS)
@@ -17041,11 +17068,11 @@ window.addEventListener('resize', resize);
             cnt_bytes, cnt_name = _uploaded_ortho_bytes(cnt_file)
 
             if cnt_bytes:
-                with st.container():
-                    cnt_b64, cnt_dims, cnt_err, cnt_spatial = processar_ortofoto(cnt_bytes, cnt_name)
+                cnt_viewer_slot = st.empty()
+                cnt_b64, cnt_dims, cnt_err, cnt_spatial = processar_ortofoto(cnt_bytes, cnt_name, viewer_slot=cnt_viewer_slot)
 
                 if cnt_err:
-                    st.error(f"Erro: {cnt_err}")
+                    render_tmg_ortho_error_frame("Contagem de Plantas por Parcela", f"Erro: {cnt_err}", "Tente importar outra ortofoto.", 720, container=cnt_viewer_slot)
                 else:
                     cw_cnt, ch_cnt = cnt_dims
                     cnt_storage_id = json.dumps(_tv_hash_bytes(cnt_bytes)[:32])
@@ -18199,7 +18226,7 @@ new ResizeObserver(() => {{
 </body>
 </html>
 """
-                    components.html(cnt_viewer, height=720, scrolling=False)
+                    render_tmg_ortho_viewer_component(cnt_viewer_slot, cnt_viewer, height=720, scrolling=False)
 
             else:
                 render_tmg_ortho_empty_frame(
@@ -18230,11 +18257,11 @@ new ResizeObserver(() => {{
             pend_bytes, pend_name = _uploaded_ortho_bytes(pend_file)
 
             if pend_bytes:
-                with st.container():
-                    pend_b64, pend_dims, pend_err, pend_spatial = processar_ortofoto(pend_bytes, pend_name)
+                pend_viewer_slot = st.empty()
+                pend_b64, pend_dims, pend_err, pend_spatial = processar_ortofoto(pend_bytes, pend_name, viewer_slot=pend_viewer_slot)
 
                 if pend_err:
-                    st.error(f"Erro: {pend_err}")
+                    render_tmg_ortho_error_frame("Pendoamento", f"Erro: {pend_err}", "Tente importar outra ortofoto.", 740, container=pend_viewer_slot)
                 else:
                     pw, ph = pend_dims
                     st.markdown(
@@ -19149,7 +19176,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                         .replace("__PEND_B64__", pend_b64)
                         .replace("__PEND_IMAGE_NAME__", json.dumps(pend_file.name, ensure_ascii=False))
                     )
-                    components.html(pend_viewer, height=740, scrolling=False)
+                    render_tmg_ortho_viewer_component(pend_viewer_slot, pend_viewer, height=740, scrolling=False)
 
             if False:
                 st.markdown("""
@@ -19514,68 +19541,68 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                 if "pend_yolo_apply_training" not in st.session_state:
                     st.session_state["pend_yolo_apply_training"] = bool(yolo_counts_for_viewer.get("total_images", 0))
                 apply_training_enabled = bool(st.session_state.get("pend_yolo_apply_training", False))
-                with st.container():
-                    total_cron_entries = max(1, len(cron_entries))
-                    for idx_cron, item in enumerate(cron_entries, start=1):
-                        cron_name = item["name"]
+                cron_viewer_slot = st.empty()
+                total_cron_entries = max(1, len(cron_entries))
+                for idx_cron, item in enumerate(cron_entries, start=1):
+                    cron_name = item["name"]
+                    try:
+                        raw = item["raw"]
+                        b64, dims, err, spatial = processar_ortofoto(raw, cron_name, viewer_slot=cron_viewer_slot)
+                        if err:
+                            cron_errors.append(f"{cron_name}: {err}")
+                            continue
                         try:
-                            raw = item["raw"]
-                            b64, dims, err, spatial = processar_ortofoto(raw, cron_name)
-                            if err:
-                                cron_errors.append(f"{cron_name}: {err}")
-                                continue
-                            try:
-                                detector_signature = f"{assinatura_modelo_yolo_pendao()}|{assinatura_referencias_treino_yolo()}|apply:{int(apply_training_enabled)}"
-                                pendao_result = preparar_deteccoes_pendoamento_hibrido(raw, cron_name, tuple(dims), detector_signature, apply_training_enabled)
-                                pendao_detections = pendao_result.get("detections", [])
-                                pendao_training_detections = pendao_result.get("training_detections", [])
-                                pendao_status = pendao_result.get("status", "")
-                                pendao_mode = pendao_result.get("mode", "OpenCV parametrizado TMG")
-                                pendao_counts = pendao_result.get("counts", {})
-                                pendao_training_status = pendao_result.get("training_status", "")
-                                pendao_training_counts = pendao_result.get("training_counts", {})
-                                pendao_backend_ready = bool(pendao_result.get("backend_ready", True))
-                                if pendao_status and any(token in pendao_status.lower() for token in ("não instalado", "nao instalado", "falhou", "instale opencv-python")):
-                                    cron_errors.append(f"{cron_name}: {pendao_status}")
-                            except Exception as det_exc:
-                                pendao_detections = []
-                                pendao_training_detections = []
-                                pendao_status = f"OpenCV indisponível ({det_exc}). Instale opencv-python."
-                                pendao_mode = "OpenCV indisponível"
-                                pendao_counts = {}
-                                pendao_training_status = ""
-                                pendao_training_counts = {}
-                                pendao_backend_ready = False
+                            detector_signature = f"{assinatura_modelo_yolo_pendao()}|{assinatura_referencias_treino_yolo()}|apply:{int(apply_training_enabled)}"
+                            pendao_result = preparar_deteccoes_pendoamento_hibrido(raw, cron_name, tuple(dims), detector_signature, apply_training_enabled)
+                            pendao_detections = pendao_result.get("detections", [])
+                            pendao_training_detections = pendao_result.get("training_detections", [])
+                            pendao_status = pendao_result.get("status", "")
+                            pendao_mode = pendao_result.get("mode", "OpenCV parametrizado TMG")
+                            pendao_counts = pendao_result.get("counts", {})
+                            pendao_training_status = pendao_result.get("training_status", "")
+                            pendao_training_counts = pendao_result.get("training_counts", {})
+                            pendao_backend_ready = bool(pendao_result.get("backend_ready", True))
+                            if pendao_status and any(token in pendao_status.lower() for token in ("não instalado", "nao instalado", "falhou", "instale opencv-python")):
                                 cron_errors.append(f"{cron_name}: {pendao_status}")
-                            orig_width = int(spatial.get("orig_width", dims[0]) or dims[0]) if spatial else int(dims[0])
-                            orig_height = int(spatial.get("orig_height", dims[1]) or dims[1]) if spatial else int(dims[1])
-                            training_marks = marcas_treinamento_yolo_preview(
-                                cron_name,
-                                item["date"],
-                                tuple(dims),
-                                (orig_width, orig_height),
-                            )
-                            cron_orthos.append({
-                                "order": int(item["idx"]),
-                                "name": cron_name,
-                                "date": item["date"],
-                                "b64": b64,
-                                "width": int(dims[0]),
-                                "height": int(dims[1]),
-                                "advanced_detections": pendao_detections,
-                                "training_detections": pendao_training_detections,
-                                "detector_status": pendao_status,
-                                "detector_mode": pendao_mode,
-                                "detector_counts": pendao_counts,
-                                "training_status": pendao_training_status,
-                                "training_counts": pendao_training_counts,
-                                "backend_ready": pendao_backend_ready,
-                                "training_marks": training_marks,
-                                "orig_width": orig_width,
-                                "orig_height": orig_height,
-                            })
-                        except Exception as exc:
-                            cron_errors.append(f"{cron_name}: {exc}")
+                        except Exception as det_exc:
+                            pendao_detections = []
+                            pendao_training_detections = []
+                            pendao_status = f"OpenCV indisponível ({det_exc}). Instale opencv-python."
+                            pendao_mode = "OpenCV indisponível"
+                            pendao_counts = {}
+                            pendao_training_status = ""
+                            pendao_training_counts = {}
+                            pendao_backend_ready = False
+                            cron_errors.append(f"{cron_name}: {pendao_status}")
+                        orig_width = int(spatial.get("orig_width", dims[0]) or dims[0]) if spatial else int(dims[0])
+                        orig_height = int(spatial.get("orig_height", dims[1]) or dims[1]) if spatial else int(dims[1])
+                        training_marks = marcas_treinamento_yolo_preview(
+                            cron_name,
+                            item["date"],
+                            tuple(dims),
+                            (orig_width, orig_height),
+                        )
+                        cron_orthos.append({
+                            "order": int(item["idx"]),
+                            "name": cron_name,
+                            "date": item["date"],
+                            "b64": b64,
+                            "width": int(dims[0]),
+                            "height": int(dims[1]),
+                            "advanced_detections": pendao_detections,
+                            "training_detections": pendao_training_detections,
+                            "detector_status": pendao_status,
+                            "detector_mode": pendao_mode,
+                            "detector_counts": pendao_counts,
+                            "training_status": pendao_training_status,
+                            "training_counts": pendao_training_counts,
+                            "backend_ready": pendao_backend_ready,
+                            "training_marks": training_marks,
+                            "orig_width": orig_width,
+                            "orig_height": orig_height,
+                        })
+                    except Exception as exc:
+                        cron_errors.append(f"{cron_name}: {exc}")
 
                 for message in cron_errors:
                     st.warning(message)
@@ -21699,7 +21726,7 @@ new ResizeObserver(() => drawAll()).observe(viewer);
                         .replace("__DEPLOY_FILL_ACTIVE__", DEPLOY_BAR_THEME.get("fill_active", "linear-gradient(90deg,#00e5ff 0%,#0E3A70 48%,#00ff9d 100%)"))
                         .replace("__DEPLOY_FILL_SHADOW__", DEPLOY_BAR_THEME.get("fill_shadow", "inset 0 1px 0 rgba(255,255,255,.46), 0 0 16px rgba(0,229,255,.56), 0 0 22px rgba(0,255,157,.22)"))
                     )
-                    components.html(cron_html, height=870, scrolling=False)
+                    render_tmg_ortho_viewer_component(cron_viewer_slot, cron_html, height=870, scrolling=False)
             else:
                 empty_cards = []
                 for slot_idx in range(10):
@@ -21741,11 +21768,11 @@ new ResizeObserver(() => drawAll()).observe(viewer);
             qual_bytes, qual_name = _uploaded_ortho_bytes(qual_file)
 
             if qual_bytes:
-                with st.container():
-                    qual_b64, qual_dims, qual_err, qual_spatial = processar_ortofoto(qual_bytes, qual_name)
+                qual_viewer_slot = st.empty()
+                qual_b64, qual_dims, qual_err, qual_spatial = processar_ortofoto(qual_bytes, qual_name, viewer_slot=qual_viewer_slot)
 
                 if qual_err:
-                    st.error(f"Erro: {qual_err}")
+                    render_tmg_ortho_error_frame("Qualidade de Parcelas", f"Erro: {qual_err}", "Tente importar outra ortofoto.", 740, container=qual_viewer_slot)
                 else:
                     qw, qh = qual_dims
                     st.markdown(
@@ -23963,7 +23990,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
 </body>
 </html>
 """
-                    components.html(qual_viewer, height=740, scrolling=False)
+                    render_tmg_ortho_viewer_component(qual_viewer_slot, qual_viewer, height=740, scrolling=False)
 
             else:
                 render_tmg_ortho_empty_frame(
