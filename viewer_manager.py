@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -39,18 +40,45 @@ def is_desktop_viewer_enabled() -> bool:
     return runtime.get("active_mode") == "desktop" and bool(runtime.get("desktop_available"))
 
 
-def prepare_desktop_viewer_cache(file_bytes: bytes, filename: str, app_root: str | Path | None = None) -> Path | None:
-    if not is_desktop_viewer_enabled() or not file_bytes:
-        return None
-    return save_image_for_desktop_viewer(file_bytes, filename, app_root=app_root)
+def desktop_viewer_file_cache_enabled() -> bool:
+    return os.getenv("TMG_ENABLE_DESKTOP_VIEWER_FILE_CACHE", "").strip().lower() in ("1", "true", "yes", "sim")
 
 
-def save_image_for_desktop_viewer(file_bytes: bytes, filename: str, app_root: str | Path | None = None) -> Path:
+def _desktop_viewer_cache_dir(app_root: str | Path | None = None) -> Path:
     root = Path(app_root or PROJECT_ROOT).resolve()
     runtime = get_viewer_runtime()
     cache_dir = Path(runtime.get("desktop_viewer_cache_dir") or root / "tmg_data" / "desktop_viewer")
     if not cache_dir.is_absolute():
         cache_dir = root / cache_dir
+    return cache_dir
+
+
+def purge_disabled_desktop_viewer_cache(app_root: str | Path | None = None) -> None:
+    if desktop_viewer_file_cache_enabled():
+        return
+    try:
+        root = Path(app_root or PROJECT_ROOT).resolve()
+        cache_dir = _desktop_viewer_cache_dir(root).resolve()
+        if cache_dir == root or not cache_dir.is_relative_to(root):
+            return
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def prepare_desktop_viewer_cache(file_bytes: bytes, filename: str, app_root: str | Path | None = None) -> Path | None:
+    if not desktop_viewer_file_cache_enabled() or not is_desktop_viewer_enabled() or not file_bytes:
+        purge_disabled_desktop_viewer_cache(app_root=app_root)
+        return None
+    return save_image_for_desktop_viewer(file_bytes, filename, app_root=app_root)
+
+
+def save_image_for_desktop_viewer(file_bytes: bytes, filename: str, app_root: str | Path | None = None) -> Path:
+    if not desktop_viewer_file_cache_enabled():
+        raise RuntimeError("Cache persistente do visualizador desktop desativado.")
+    root = Path(app_root or PROJECT_ROOT).resolve()
+    cache_dir = _desktop_viewer_cache_dir(root)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     digest = hashlib.sha1()

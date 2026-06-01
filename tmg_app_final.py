@@ -1,4 +1,5 @@
 import sys
+sys.dont_write_bytecode = True
 import streamlit as st
 import streamlit.components.v1 as components
 from pathlib import Path
@@ -3857,6 +3858,23 @@ def _ortho_preview_cache_key(file_bytes: bytes, filename: str, params: tuple) ->
 ORTHO_PREVIEW_CACHE_DIR = SYSTEM_DATABASE_DIR / "ortho_preview_cache"
 ORTHO_SOURCE_CACHE_DIR = SYSTEM_DATABASE_DIR / "ortho_source_cache"
 
+def _persistent_ortho_cache_enabled() -> bool:
+    return os.getenv("TMG_ENABLE_PERSISTENT_ORTHO_CACHE", "").strip().lower() in ("1", "true", "yes", "sim")
+
+def _purge_disabled_ortho_caches() -> None:
+    if _persistent_ortho_cache_enabled():
+        return
+    for path in (ORTHO_PREVIEW_CACHE_DIR, ORTHO_SOURCE_CACHE_DIR):
+        try:
+            resolved = Path(path).resolve()
+            root = SYSTEM_DATABASE_DIR.resolve()
+            if resolved == root or not resolved.is_relative_to(root):
+                continue
+            if resolved.exists():
+                shutil.rmtree(resolved, ignore_errors=True)
+        except Exception:
+            pass
+
 def _safe_ortho_cache_suffix(filename: str) -> str:
     suffix = Path(filename or "").suffix.lower()
     if suffix in {".tif", ".tiff", ".geotiff", ".png", ".jpg", ".jpeg", ".jp2", ".bmp", ".webp"}:
@@ -3869,6 +3887,9 @@ def _ortho_preview_disk_paths(cache_key: str) -> tuple[Path, Path]:
 
 def _cleanup_ortho_preview_disk_cache(max_files: int = 10, max_bytes: int = 260 * 1024 * 1024) -> None:
     try:
+        if not _persistent_ortho_cache_enabled():
+            _purge_disabled_ortho_caches()
+            return
         ORTHO_PREVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         files = sorted(
             [p for p in ORTHO_PREVIEW_CACHE_DIR.glob("*.jpg") if p.is_file()],
@@ -3897,6 +3918,9 @@ def _cleanup_ortho_preview_disk_cache(max_files: int = 10, max_bytes: int = 260 
 
 def _cleanup_ortho_source_cache(keep_path: Path | None = None, max_files: int = 3, max_bytes: int = 1200 * 1024 * 1024) -> None:
     try:
+        if not _persistent_ortho_cache_enabled():
+            _purge_disabled_ortho_caches()
+            return
         ORTHO_SOURCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         keep = keep_path.resolve() if keep_path else None
         files = sorted(
@@ -3920,6 +3944,8 @@ def _cleanup_ortho_source_cache(keep_path: Path | None = None, max_files: int = 
 
 def _save_ortho_source_cache(file_bytes: bytes, filename: str, cache_key: str) -> Path | None:
     try:
+        if not _persistent_ortho_cache_enabled():
+            return None
         if not file_bytes:
             return None
         suffix = _safe_ortho_cache_suffix(filename)
@@ -3942,6 +3968,8 @@ def _save_ortho_source_cache(file_bytes: bytes, filename: str, cache_key: str) -
         return None
 
 def _read_ortho_preview_disk_cache(cache_key: str):
+    if not _persistent_ortho_cache_enabled():
+        return None
     jpg_path, meta_path = _ortho_preview_disk_paths(cache_key)
     try:
         if not jpg_path.exists() or not meta_path.exists():
@@ -3967,6 +3995,8 @@ def _read_ortho_preview_disk_cache(cache_key: str):
 
 def _write_ortho_preview_disk_cache(cache_key: str, result) -> None:
     try:
+        if not _persistent_ortho_cache_enabled():
+            return
         if not result or result[2] or not result[0]:
             return
         jpg_path, meta_path = _ortho_preview_disk_paths(cache_key)
@@ -4008,6 +4038,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         )
 
     try:
+        _purge_disabled_ortho_caches()
         params = (preview_max_dim, preview_jpeg_quality, preview_min_jpeg_quality, preview_max_payload_mb, preview_min_dim)
         cache_key = _ortho_preview_cache_key(file_bytes or b"", file_name, params)
         session_cache = st.session_state.setdefault("_tmg_ortho_preview_cache", {})
@@ -4023,13 +4054,13 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
             try:
                 desktop_cache_path = _tmg_prepare_desktop_viewer_cache(file_bytes or b"", file_name, app_root=APP_ROOT)
                 if desktop_cache_path:
-                    _progress(16, "Ortofoto salva no cache local para leitura rápida...")
+                    _progress(16, "Leitura desktop local preparada para esta sessão...")
             except Exception:
                 desktop_cache_path = None
         if desktop_cache_path:
             local_source_path = desktop_cache_path
         else:
-            _progress(16, "Preparando cache local da ortofoto para acelerar a leitura...")
+            _progress(16, "Preparando leitura temporária da ortofoto sem salvar cache pesado...")
             local_source_path = _save_ortho_source_cache(file_bytes or b"", file_name, cache_key)
         if HAS_TMG_VIEWER_MANAGER and cache_key not in _TMG_DESKTOP_VIEWER_RENDERED_KEYS:
             _TMG_DESKTOP_VIEWER_RENDERED_KEYS.add(cache_key)
@@ -4048,7 +4079,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
             result = session_cache[cache_key]
             _progress(86, "Restaurando ortofoto no visualizador...")
         else:
-            _progress(18, "Buscando preview otimizado salvo na pasta do sistema...")
+            _progress(18, "Preparando preview otimizado sem gravar cache pesado na pasta...")
             disk_result = _read_ortho_preview_disk_cache(cache_key)
             if disk_result:
                 result = disk_result
