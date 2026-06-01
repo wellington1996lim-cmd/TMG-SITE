@@ -667,68 +667,112 @@ def finish_tmg_global_loading_overlay(container, texto: str = "Carregamento conc
     except Exception:
         pass
 
-def render_tmg_ortho_viewer_loading(
-    progress,
-    texto: str = "Carregando ortofoto...",
+def _render_fixed_ortho_viewer_frame(
+    state: str = "empty",
+    progress=0,
+    titulo: str = "Visualizador de Ortofoto",
+    mensagem: str = "Nenhuma ortofoto carregada",
+    detalhe: str = "PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW",
+    icone: str = "🗺️",
+    height: int = 720,
     container=None,
-    modo: str = "Visualizador Streamlit",
-    detalhe: str = "",
+    modo: str = "",
     auto_hide_seconds: float | None = None,
 ):
     try:
         pct = max(0, min(100, int(float(progress))))
     except Exception:
         pct = 0
-    texto_seguro = html.escape(str(texto or "Carregando ortofoto..."))
+    try:
+        frame_height = max(360, int(height or 720))
+    except Exception:
+        frame_height = 720
+    state_key = str(state or "empty").strip().lower()
+    titulo_seguro = html.escape(str(titulo or "Visualizador de Ortofoto"))
+    mensagem_segura = html.escape(str(mensagem or "Nenhuma ortofoto carregada"))
+    detalhe_seguro = html.escape(str(detalhe or ""))
+    icone_seguro = html.escape(str(icone or "🗺️"))
     modo_seguro = html.escape(str(modo or "Visualizador"))
-    detalhe_seguro = html.escape(str(detalhe or "Preparando visualização..."))
-    status = "Ortofoto pronta para exibição." if pct >= 100 else texto_seguro
+    status = "Ortofoto pronta para exibição." if state_key == "loading" and pct >= 100 else mensagem_segura
     logo_html = _tmg_loading_logo_html()
-    autohide_class = " tmg-ortho-loading-autohide" if auto_hide_seconds is not None and pct >= 100 else ""
+    autohide_class = " tmg-fixed-ortho-viewer-autohide" if state_key == "loading" and auto_hide_seconds is not None and pct >= 100 else ""
     try:
         autohide_delay = max(0.25, float(auto_hide_seconds or 0.65))
     except Exception:
         autohide_delay = 0.65
+    if state_key == "loading":
+        center_html = f"""
+            <div class="tmg-fixed-ortho-loading-card">
+                <div class="tmg-fixed-ortho-logo">{logo_html}</div>
+                <div class="tmg-fixed-ortho-message">{mensagem_segura}</div>
+                <div class="tmg-fixed-ortho-detail">{detalhe_seguro}</div>
+                <div class="tmg-fixed-ortho-track">
+                    <div class="tmg-fixed-ortho-fill"></div>
+                    <div class="tmg-fixed-ortho-percent">{pct}%</div>
+                </div>
+                <div class="tmg-fixed-ortho-status">{html.escape(status)}</div>
+            </div>
+        """
+    else:
+        status_class = " tmg-fixed-ortho-card-error" if state_key == "error" else ""
+        center_html = f"""
+            <div class="tmg-fixed-ortho-empty-card{status_class}">
+                <div class="tmg-fixed-ortho-empty-icon">{icone_seguro}</div>
+                <div class="tmg-fixed-ortho-empty-message">{mensagem_segura}</div>
+                <div class="tmg-fixed-ortho-empty-detail">{detalhe_seguro}</div>
+            </div>
+        """
     markup = f"""
     <style>
-    .tmg-ortho-loading-shell {{
+    .tmg-fixed-ortho-viewer-frame {{
         width:100%;
-        min-height:560px;
+        height:{frame_height}px;
+        min-height:{frame_height}px;
         margin:10px 0 16px 0;
         border-radius:18px;
         border:1px solid rgba(0,212,255,.42);
         background:
-            linear-gradient(120deg, rgba(255,255,255,.08), transparent 32%),
-            radial-gradient(circle at 15% 0%, rgba(0,212,255,.22), transparent 38%),
-            linear-gradient(145deg, rgba(2,14,36,.97), rgba(12,57,98,.88), rgba(0,212,255,.16));
+            linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
+            radial-gradient(circle at 20% 10%, rgba(0,212,255,.13), transparent 32%),
+            linear-gradient(145deg,#020e24,#061525,#0d2b45);
+        background-size:34px 34px,34px 34px,100% 100%,100% 100%;
         box-shadow:
-            0 18px 38px rgba(0,0,0,.48),
-            0 0 30px rgba(0,212,255,.28),
-            inset 0 1px 0 rgba(255,255,255,.20),
-            inset 0 -10px 20px rgba(2,14,36,.42);
+            0 18px 42px rgba(0,0,0,.46),
+            0 0 28px rgba(0,212,255,.18),
+            inset 0 1px 0 rgba(255,255,255,.10),
+            inset 0 0 0 2px rgba(0,212,255,.18);
         overflow:hidden;
         position:relative;
         font-family:'Segoe UI', Arial, sans-serif;
         color:#ffffff;
     }}
-    .tmg-ortho-loading-toolbar {{
-        height:46px;
+    .tmg-fixed-ortho-toolbar {{
+        position:absolute;
+        top:12px;
+        left:12px;
+        right:12px;
+        z-index:3;
         display:flex;
         align-items:center;
         justify-content:space-between;
         gap:12px;
-        padding:0 16px;
-        border-bottom:1px solid rgba(0,212,255,.22);
-        background:linear-gradient(90deg, rgba(2,14,36,.92), rgba(12,57,98,.78), rgba(2,14,36,.92));
+        padding:0;
+        pointer-events:none;
     }}
-    .tmg-ortho-loading-title {{
+    .tmg-fixed-ortho-title {{
         color:#ffffff;
-        font-size:.86rem;
+        font-size:.78rem;
         font-weight:950;
         letter-spacing:.4px;
+        padding:8px 10px;
+        border-radius:10px;
+        border:1px solid rgba(0,212,255,.28);
+        background:rgba(3,18,38,.72);
+        box-shadow:0 8px 20px rgba(0,0,0,.32);
         text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 14px rgba(0,212,255,.48);
     }}
-    .tmg-ortho-loading-mode {{
+    .tmg-fixed-ortho-mode {{
         color:#d9fbff;
         font-size:.72rem;
         font-weight:800;
@@ -737,8 +781,9 @@ def render_tmg_ortho_viewer_loading(
         border:1px solid rgba(0,212,255,.34);
         background:rgba(0,212,255,.07);
     }}
-    .tmg-ortho-loading-area {{
-        min-height:514px;
+    .tmg-fixed-ortho-body {{
+        height:100%;
+        min-height:100%;
         display:flex;
         align-items:center;
         justify-content:center;
@@ -750,7 +795,8 @@ def render_tmg_ortho_viewer_loading(
         background-size:34px 34px;
         background-position:0 0,17px 17px;
     }}
-    .tmg-ortho-loading-card {{
+    .tmg-fixed-ortho-loading-card,
+    .tmg-fixed-ortho-empty-card {{
         width:min(500px, 94%);
         padding:24px 26px 22px 26px;
         border-radius:20px;
@@ -767,7 +813,11 @@ def render_tmg_ortho_viewer_loading(
         text-align:center;
         transition:opacity .35s ease, transform .35s ease;
     }}
-    .tmg-ortho-loading-logo {{
+    .tmg-fixed-ortho-card-error {{
+        border-color:rgba(255,96,96,.55);
+        box-shadow:0 22px 48px rgba(0,0,0,.52), 0 0 32px rgba(255,96,96,.22), inset 0 1px 0 rgba(255,255,255,.18);
+    }}
+    .tmg-fixed-ortho-logo {{
         display:flex;
         justify-content:center;
         align-items:center;
@@ -775,34 +825,42 @@ def render_tmg_ortho_viewer_loading(
         margin-bottom:12px;
         animation:tmgOrthoLogoPulse 1.8s ease-in-out infinite;
     }}
-    .tmg-ortho-loading-logo .tmg-load-logo-img {{
+    .tmg-fixed-ortho-logo .tmg-load-logo-img {{
         max-width:170px;
         max-height:58px;
         object-fit:contain;
         filter:drop-shadow(0 8px 14px rgba(0,0,0,.50)) drop-shadow(0 0 18px rgba(0,212,255,.42));
     }}
-    .tmg-ortho-loading-logo .tmg-load-logo-fallback {{
+    .tmg-fixed-ortho-logo .tmg-load-logo-fallback {{
         color:#fff;
         font-weight:950;
         letter-spacing:4px;
         font-size:1.25rem;
         text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba(0,212,255,.60);
     }}
-    .tmg-ortho-loading-text {{
+    .tmg-fixed-ortho-message,
+    .tmg-fixed-ortho-empty-message {{
         color:#ffffff;
         font-size:.96rem;
         font-weight:950;
         letter-spacing:.35px;
+        text-transform:uppercase;
         text-shadow:0 1px 0 rgba(0,0,0,.86);
     }}
-    .tmg-ortho-loading-detail {{
+    .tmg-fixed-ortho-detail,
+    .tmg-fixed-ortho-empty-detail {{
         min-height:20px;
         margin-top:7px;
         color:#d9fbff;
         font-size:.77rem;
         font-weight:800;
     }}
-    .tmg-ortho-loading-track {{
+    .tmg-fixed-ortho-empty-icon {{
+        font-size:2.9rem;
+        margin-bottom:10px;
+        filter:drop-shadow(0 0 16px rgba(0,212,255,.35));
+    }}
+    .tmg-fixed-ortho-track {{
         position:relative;
         height:28px;
         margin-top:17px;
@@ -812,7 +870,7 @@ def render_tmg_ortho_viewer_loading(
         background:linear-gradient(180deg,#04101f,#0b2540);
         box-shadow:inset 0 3px 8px rgba(0,0,0,.58), 0 0 16px rgba(0,212,255,.16);
     }}
-    .tmg-ortho-loading-fill {{
+    .tmg-fixed-ortho-fill {{
         width:{pct}%;
         height:100%;
         border-radius:999px;
@@ -821,7 +879,7 @@ def render_tmg_ortho_viewer_loading(
         transition:width .35s ease;
         position:relative;
     }}
-    .tmg-ortho-loading-fill:after {{
+    .tmg-fixed-ortho-fill:after {{
         content:"";
         position:absolute;
         inset:0;
@@ -829,7 +887,7 @@ def render_tmg_ortho_viewer_loading(
         transform:translateX(-100%);
         animation:tmgOrthoLoadingShine 1.25s ease-in-out infinite;
     }}
-    .tmg-ortho-loading-percent {{
+    .tmg-fixed-ortho-percent {{
         position:absolute;
         inset:0;
         display:flex;
@@ -840,14 +898,14 @@ def render_tmg_ortho_viewer_loading(
         font-size:.82rem;
         text-shadow:0 1px 4px rgba(0,0,0,.88);
     }}
-    .tmg-ortho-loading-status {{
+    .tmg-fixed-ortho-status {{
         margin-top:10px;
         color:{'#5ff2b1' if pct >= 100 else '#d9fbff'};
         font-size:.80rem;
         font-weight:900;
         text-shadow:0 1px 0 rgba(0,0,0,.82);
     }}
-    .tmg-ortho-loading-shell.tmg-ortho-loading-autohide {{
+    .tmg-fixed-ortho-viewer-frame.tmg-fixed-ortho-viewer-autohide {{
         animation:tmgOrthoLoadingFade .42s ease forwards;
         animation-delay:{autohide_delay:.2f}s;
     }}
@@ -863,22 +921,13 @@ def render_tmg_ortho_viewer_loading(
         to {{ opacity:0; max-height:0; min-height:0; margin:0; visibility:hidden; }}
     }}
     </style>
-    <div class="tmg-ortho-loading-shell{autohide_class}">
-        <div class="tmg-ortho-loading-toolbar">
-            <div class="tmg-ortho-loading-title">Visualizador de Ortofoto</div>
-            <div class="tmg-ortho-loading-mode">{modo_seguro}</div>
+    <div class="tmg-fixed-ortho-viewer-frame FixedOrthoViewerFrame{autohide_class}" data-state="{html.escape(state_key)}">
+        <div class="tmg-fixed-ortho-toolbar">
+            <div class="tmg-fixed-ortho-title">{titulo_seguro}</div>
+            <div class="tmg-fixed-ortho-mode">{modo_seguro}</div>
         </div>
-        <div class="tmg-ortho-loading-area">
-            <div class="tmg-ortho-loading-card">
-                <div class="tmg-ortho-loading-logo">{logo_html}</div>
-                <div class="tmg-ortho-loading-text">{texto_seguro}</div>
-                <div class="tmg-ortho-loading-detail">{detalhe_seguro}</div>
-                <div class="tmg-ortho-loading-track">
-                    <div class="tmg-ortho-loading-fill"></div>
-                    <div class="tmg-ortho-loading-percent">{pct}%</div>
-                </div>
-                <div class="tmg-ortho-loading-status">{html.escape(status)}</div>
-            </div>
+        <div class="tmg-fixed-ortho-body">
+            {center_html}
         </div>
     </div>
     """
@@ -886,7 +935,36 @@ def render_tmg_ortho_viewer_loading(
     target.markdown(markup, unsafe_allow_html=True)
     return container
 
-def finish_tmg_ortho_viewer_loading(container, texto: str = "Ortofoto carregada com sucesso.", modo: str = "Visualizador Streamlit", hold_seconds: float = 0.25):
+def render_tmg_ortho_viewer_loading(
+    progress,
+    texto: str = "Carregando ortofoto...",
+    container=None,
+    modo: str = "Visualizador Streamlit",
+    detalhe: str = "",
+    auto_hide_seconds: float | None = None,
+    height: int = 720,
+    titulo: str = "Visualizador de Ortofoto",
+):
+    return _render_fixed_ortho_viewer_frame(
+        state="loading",
+        progress=progress,
+        titulo=titulo,
+        mensagem=texto,
+        detalhe=detalhe or "Preparando visualização...",
+        height=height,
+        container=container,
+        modo=modo,
+        auto_hide_seconds=auto_hide_seconds,
+    )
+
+def finish_tmg_ortho_viewer_loading(
+    container,
+    texto: str = "Ortofoto carregada com sucesso.",
+    modo: str = "Visualizador Streamlit",
+    hold_seconds: float = 0.25,
+    height: int = 720,
+    titulo: str = "Visualizador de Ortofoto",
+):
     if container is None:
         return
     try:
@@ -897,6 +975,8 @@ def finish_tmg_ortho_viewer_loading(container, texto: str = "Ortofoto carregada 
             modo=modo,
             detalhe="Abrindo imagem no visualizador...",
             auto_hide_seconds=max(0.25, float(hold_seconds or 0.25)),
+            height=height,
+            titulo=titulo,
         )
     except Exception:
         pass
@@ -909,115 +989,15 @@ def render_tmg_ortho_empty_frame(
     height: int = 706,
     container=None,
 ):
-    try:
-        frame_height = max(360, int(height))
-    except Exception:
-        frame_height = 706
-    titulo_seguro = html.escape(str(titulo or "Visualizador de Ortofoto"))
-    mensagem_segura = html.escape(str(mensagem or "Nenhuma ortofoto carregada"))
-    detalhe_seguro = html.escape(str(detalhe or ""))
-    icone_seguro = html.escape(str(icone or "🗺️"))
-    target = container if container is not None else st
-    target.markdown(
-        f"""
-        <div class="tmg-ortho-empty-frame" style="min-height:{frame_height}px;">
-            <div class="tmg-ortho-empty-toolbar">
-                <span>{titulo_seguro}</span>
-                <span>{_tmg_viewer_mode_label()}</span>
-            </div>
-            <div class="tmg-ortho-empty-body">
-                <div class="tmg-ortho-empty-card">
-                    <div class="tmg-ortho-empty-icon">{icone_seguro}</div>
-                    <div class="tmg-ortho-empty-message">{mensagem_segura}</div>
-                    <div class="tmg-ortho-empty-detail">{detalhe_seguro}</div>
-                </div>
-            </div>
-        </div>
-        <style>
-        .tmg-ortho-empty-frame {{
-            width:100%;
-            margin:10px 0 16px 0;
-            border-radius:18px;
-            border:1px solid rgba(0,212,255,.42);
-            background:
-                linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
-                radial-gradient(circle at 20% 10%, rgba(0,212,255,.13), transparent 32%),
-                linear-gradient(145deg,#020e24,#061525,#0d2b45);
-            background-size:34px 34px,34px 34px,100% 100%,100% 100%;
-            box-shadow:
-                0 18px 42px rgba(0,0,0,.46),
-                0 0 28px rgba(0,212,255,.18),
-                inset 0 1px 0 rgba(255,255,255,.10),
-                inset 0 0 0 2px rgba(0,212,255,.18);
-            overflow:hidden;
-            color:#fff;
-            font-family:'Segoe UI', Arial, sans-serif;
-        }}
-        .tmg-ortho-empty-toolbar {{
-            height:46px;
-            display:flex;
-            align-items:center;
-            justify-content:space-between;
-            gap:12px;
-            padding:0 16px;
-            border-bottom:1px solid rgba(0,212,255,.22);
-            background:linear-gradient(90deg, rgba(2,14,36,.92), rgba(12,57,98,.78), rgba(2,14,36,.92));
-            color:#dffaff;
-            font-size:.78rem;
-            font-weight:950;
-            letter-spacing:.4px;
-            text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 14px rgba(0,212,255,.48);
-        }}
-        .tmg-ortho-empty-toolbar span:last-child {{
-            font-size:.70rem;
-            padding:5px 10px;
-            border-radius:999px;
-            border:1px solid rgba(0,212,255,.34);
-            background:rgba(0,212,255,.07);
-        }}
-        .tmg-ortho-empty-body {{
-            min-height:calc({frame_height}px - 46px);
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            padding:28px;
-        }}
-        .tmg-ortho-empty-card {{
-            width:min(480px, 94%);
-            text-align:center;
-            padding:24px 26px;
-            border-radius:20px;
-            border:1px solid rgba(0,212,255,.35);
-            background:
-                linear-gradient(120deg, rgba(255,255,255,.10), transparent 34%),
-                radial-gradient(circle at top left, rgba(0,212,255,.18), transparent 44%),
-                linear-gradient(145deg, rgba(2,14,36,.88), rgba(12,57,98,.76), rgba(0,212,255,.12));
-            box-shadow:0 22px 48px rgba(0,0,0,.42), 0 0 28px rgba(0,212,255,.22), inset 0 1px 0 rgba(255,255,255,.18);
-        }}
-        .tmg-ortho-empty-icon {{
-            font-size:2.9rem;
-            margin-bottom:10px;
-            filter:drop-shadow(0 0 16px rgba(0,212,255,.35));
-        }}
-        .tmg-ortho-empty-message {{
-            color:#ffffff;
-            font-size:.92rem;
-            font-weight:950;
-            letter-spacing:1.4px;
-            text-transform:uppercase;
-            text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 14px rgba(0,212,255,.42);
-        }}
-        .tmg-ortho-empty-detail {{
-            margin-top:8px;
-            color:#d9fbff;
-            font-size:.76rem;
-            font-weight:800;
-            text-shadow:0 1px 0 rgba(0,0,0,.72);
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
+    return _render_fixed_ortho_viewer_frame(
+        state="empty",
+        titulo=titulo,
+        mensagem=mensagem,
+        detalhe=detalhe,
+        icone=icone,
+        height=height,
+        container=container,
+        modo=_tmg_viewer_mode_label(),
     )
 
 def render_tmg_ortho_error_frame(
@@ -1027,13 +1007,15 @@ def render_tmg_ortho_error_frame(
     height: int = 706,
     container=None,
 ) -> None:
-    render_tmg_ortho_empty_frame(
+    _render_fixed_ortho_viewer_frame(
+        state="error",
         titulo=titulo,
         mensagem=erro,
         detalhe=detalhe,
         icone="⚠️",
         height=height,
         container=container,
+        modo=_tmg_viewer_mode_label(),
     )
 
 def render_tmg_ortho_viewer_component(viewer_slot, viewer_html: str, height: int = 720, scrolling: bool = False):
@@ -4263,7 +4245,14 @@ def _write_ortho_preview_disk_cache(cache_key: str, result) -> None:
     except Exception:
         pass
 
-def processar_ortofoto(file_bytes: bytes, filename: str, viewer_slot=None, show_loading: bool = True):
+def processar_ortofoto(
+    file_bytes: bytes,
+    filename: str,
+    viewer_slot=None,
+    show_loading: bool = True,
+    viewer_height: int = 720,
+    viewer_title: str = "Visualizador de Ortofoto",
+):
     file_name = Path(filename or "ortofoto").name
     total_mb = (len(file_bytes or b"") / (1024 * 1024)) if file_bytes is not None else 0
     loading_slot = viewer_slot if viewer_slot is not None else (st.empty() if show_loading else None)
@@ -4290,6 +4279,8 @@ def processar_ortofoto(file_bytes: bytes, filename: str, viewer_slot=None, show_
                 container=loading_slot,
                 modo=viewer_mode_label,
                 detalhe=detail,
+                height=viewer_height,
+                titulo=viewer_title,
             )
 
     try:
@@ -4373,7 +4364,14 @@ def processar_ortofoto(file_bytes: bytes, filename: str, viewer_slot=None, show_
         else:
             _set_tmg_ortho_loading_state(file_name, 100, "Ortofoto entregue ao visualizador.", "ready")
         if show_loading and loading_slot is not None:
-            finish_tmg_ortho_viewer_loading(loading_slot, "Ortofoto carregada com sucesso.", modo=viewer_mode_label, hold_seconds=0.2)
+            finish_tmg_ortho_viewer_loading(
+                loading_slot,
+                "Ortofoto carregada com sucesso.",
+                modo=viewer_mode_label,
+                hold_seconds=0.2,
+                height=viewer_height,
+                titulo=viewer_title,
+            )
         return result
     except Exception as exc:
         _set_tmg_ortho_loading_state(file_name, 100, f"Falha ao carregar ortofoto: {exc}", "error", str(exc))
@@ -8675,7 +8673,7 @@ def _tv_render_grid_parcelas(manifest: dict) -> None:
             if record and Path(record.get("path", "")).exists():
                 viewer_slot = st.empty()
                 raw = Path(record["path"]).read_bytes()
-                b64, dims, err, _ = processar_ortofoto(raw, record["nome"], viewer_slot=viewer_slot)
+                b64, dims, err, _ = processar_ortofoto(raw, record["nome"], viewer_slot=viewer_slot, viewer_height=700, viewer_title="Visualizador GIS")
                 if err:
                     render_tmg_ortho_error_frame("Visualizador GIS", err, "Tente abrir outra ortofoto.", 700, container=viewer_slot)
                 else:
@@ -9700,7 +9698,7 @@ def _vd_render_ortofotos(manifest: dict) -> None:
 
     viewer_slot = st.empty()
     raw = Path(ortho["path"]).read_bytes()
-    b64, dims, err, spatial_meta = processar_ortofoto(raw, ortho["nome"], viewer_slot=viewer_slot)
+    b64, dims, err, spatial_meta = processar_ortofoto(raw, ortho["nome"], viewer_slot=viewer_slot, viewer_height=700, viewer_title="Pré-visualização de Ortofoto")
     if err:
         render_tmg_ortho_error_frame("Pré-visualização de Ortofoto", f"Não foi possível abrir o preview: {err}", "Tente importar outra ortofoto.", 700, container=viewer_slot)
     else:
@@ -9836,7 +9834,7 @@ def _vd_render_grid(manifest: dict) -> None:
             if ortho and Path(ortho.get("path", "")).exists():
                 viewer_slot = st.empty()
                 raw = Path(ortho["path"]).read_bytes()
-                b64, dims, err, _ = processar_ortofoto(raw, ortho["nome"], viewer_slot=viewer_slot)
+                b64, dims, err, _ = processar_ortofoto(raw, ortho["nome"], viewer_slot=viewer_slot, viewer_height=700, viewer_title="Marcador de Grid")
                 if err:
                     render_tmg_ortho_error_frame("Marcador de Grid", err, "Tente selecionar outra ortofoto.", 700, container=viewer_slot)
                 else:
@@ -11573,7 +11571,7 @@ def _orthomosaic_render_viewer(path: Path) -> None:
         try:
             viewer_slot = st.empty()
             raw = path.read_bytes()
-            b64, dims, err, _ = processar_ortofoto(raw, path.name, viewer_slot=viewer_slot)
+            b64, dims, err, _ = processar_ortofoto(raw, path.name, viewer_slot=viewer_slot, viewer_height=680, viewer_title="Gerador de Ortomosaico")
             if err:
                 render_tmg_ortho_error_frame("Gerador de Ortomosaico", "Não foi possível gerar a prévia no navegador.", "O arquivo continua disponível para download.", 680, container=viewer_slot)
                 return
@@ -14153,7 +14151,7 @@ if(data.raster && data.raster.data_url){
 """
     loading_html = render_loading_visualizador_grid(18, "Carregando visualizador...", "Preparando camadas selecionadas...")
     viewer_html = viewer_html.replace("__VIEWER_DATA__", data_json).replace("__GRIDMARK_LOADING__", loading_html)
-    components.html(viewer_html, height=780, scrolling=False)
+    render_tmg_ortho_viewer_component(st.empty(), viewer_html, height=780, scrolling=False)
     st.session_state["gridmark_zoom_layer_id"] = ""
     st.session_state["gridmark_zoom_selected"] = False
 
@@ -14851,7 +14849,7 @@ with main_container:
         if chk_bytes:
             chk_viewer_slot = st.empty()
             # Atualizado Unpack para o spatial_meta
-            chk_b64, chk_dims, chk_err, chk_spatial = processar_ortofoto(chk_bytes, chk_name, viewer_slot=chk_viewer_slot)
+            chk_b64, chk_dims, chk_err, chk_spatial = processar_ortofoto(chk_bytes, chk_name, viewer_slot=chk_viewer_slot, viewer_height=980, viewer_title="Visualizador de Ortofoto · Anotação de Parcelas")
 
             if chk_err:
                 render_tmg_ortho_error_frame("Visualizador de Ortofoto · Anotação de Parcelas", f"Erro: {chk_err}", "Tente importar outra ortofoto.", 980, container=chk_viewer_slot)
@@ -16047,7 +16045,7 @@ updateGridSelect();
                 file_bytes = Path(grid_prefill_path).read_bytes()
                 orto_nome_exibicao = grid_prefill_name or Path(grid_prefill_path).name
             # Atualizado Unpack para obter Metadata Espacial para o SHP
-            b64, dims, err, spatial_meta = processar_ortofoto(file_bytes, orto_nome_exibicao, viewer_slot=grid_viewer_slot)
+            b64, dims, err, spatial_meta = processar_ortofoto(file_bytes, orto_nome_exibicao, viewer_slot=grid_viewer_slot, viewer_height=720, viewer_title="Visualizador de Ortofoto")
             st.session_state.spatial_meta = spatial_meta
 
             if err:
@@ -17127,7 +17125,7 @@ window.addEventListener('resize', resize);
 
             if cnt_bytes:
                 cnt_viewer_slot = st.empty()
-                cnt_b64, cnt_dims, cnt_err, cnt_spatial = processar_ortofoto(cnt_bytes, cnt_name, viewer_slot=cnt_viewer_slot)
+                cnt_b64, cnt_dims, cnt_err, cnt_spatial = processar_ortofoto(cnt_bytes, cnt_name, viewer_slot=cnt_viewer_slot, viewer_height=720, viewer_title="Contagem de Plantas por Parcela")
 
                 if cnt_err:
                     render_tmg_ortho_error_frame("Contagem de Plantas por Parcela", f"Erro: {cnt_err}", "Tente importar outra ortofoto.", 720, container=cnt_viewer_slot)
@@ -18316,7 +18314,7 @@ new ResizeObserver(() => {{
 
             if pend_bytes:
                 pend_viewer_slot = st.empty()
-                pend_b64, pend_dims, pend_err, pend_spatial = processar_ortofoto(pend_bytes, pend_name, viewer_slot=pend_viewer_slot)
+                pend_b64, pend_dims, pend_err, pend_spatial = processar_ortofoto(pend_bytes, pend_name, viewer_slot=pend_viewer_slot, viewer_height=740, viewer_title="Pendoamento")
 
                 if pend_err:
                     render_tmg_ortho_error_frame("Pendoamento", f"Erro: {pend_err}", "Tente importar outra ortofoto.", 740, container=pend_viewer_slot)
@@ -19605,7 +19603,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                     cron_name = item["name"]
                     try:
                         raw = item["raw"]
-                        b64, dims, err, spatial = processar_ortofoto(raw, cron_name, viewer_slot=cron_viewer_slot)
+                        b64, dims, err, spatial = processar_ortofoto(raw, cron_name, viewer_slot=cron_viewer_slot, viewer_height=870, viewer_title="Pendoamento")
                         if err:
                             cron_errors.append(f"{cron_name}: {err}")
                             continue
@@ -21827,7 +21825,7 @@ new ResizeObserver(() => drawAll()).observe(viewer);
 
             if qual_bytes:
                 qual_viewer_slot = st.empty()
-                qual_b64, qual_dims, qual_err, qual_spatial = processar_ortofoto(qual_bytes, qual_name, viewer_slot=qual_viewer_slot)
+                qual_b64, qual_dims, qual_err, qual_spatial = processar_ortofoto(qual_bytes, qual_name, viewer_slot=qual_viewer_slot, viewer_height=740, viewer_title="Qualidade de Parcelas")
 
                 if qual_err:
                     render_tmg_ortho_error_frame("Qualidade de Parcelas", f"Erro: {qual_err}", "Tente importar outra ortofoto.", 740, container=qual_viewer_slot)
