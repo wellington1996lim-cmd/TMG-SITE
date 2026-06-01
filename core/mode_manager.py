@@ -70,11 +70,12 @@ def desktop_runtime_status() -> dict:
     has_pyside = _has_module("PySide6")
     has_pyqtgraph = _has_module("pyqtgraph")
 
-    if has_pyside and has_pyqtgraph and has_rasterio and has_numpy:
+    if has_pyside and has_rasterio and has_numpy:
+        engine = "desktop_pyside6_pyqtgraph" if has_pyqtgraph else "desktop_pyside6_rasterio"
         return {
             "available": True,
             "accelerated": True,
-            "engine": "desktop_pyqtgraph",
+            "engine": engine,
             "message": "Modo Desktop Local acelerado disponível.",
         }
     if has_pillow and has_tkinter:
@@ -123,4 +124,3 @@ def set_desktop_mode(enabled: bool) -> dict:
     config["enable_desktop_viewer_local"] = bool(enabled)
     write_local_mode(config)
     return config
-

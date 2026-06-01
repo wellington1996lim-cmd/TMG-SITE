@@ -4204,10 +4204,10 @@ def _write_ortho_preview_disk_cache(cache_key: str, result) -> None:
     except Exception:
         pass
 
-def processar_ortofoto(file_bytes: bytes, filename: str, viewer_slot=None):
+def processar_ortofoto(file_bytes: bytes, filename: str, viewer_slot=None, show_loading: bool = True):
     file_name = Path(filename or "ortofoto").name
     total_mb = (len(file_bytes or b"") / (1024 * 1024)) if file_bytes is not None else 0
-    loading_slot = viewer_slot if viewer_slot is not None else st.empty()
+    loading_slot = viewer_slot if viewer_slot is not None else (st.empty() if show_loading else None)
     viewer_runtime = _tmg_current_viewer_runtime()
     viewer_mode_label = _tmg_viewer_mode_label(viewer_runtime)
     preview_max_dim = _preview_max_dim()
@@ -4222,13 +4222,14 @@ def processar_ortofoto(file_bytes: bytes, filename: str, viewer_slot=None):
             base_message = f"{viewer_mode_label} · {base_message}"
         detail = f"Arquivo: {file_name} · {total_mb:.1f} MB" if total_mb else f"Arquivo: {file_name}"
         _set_tmg_ortho_loading_state(file_name, pct, base_message, "loading")
-        render_tmg_ortho_viewer_loading(
-            pct,
-            base_message,
-            container=loading_slot,
-            modo=viewer_mode_label,
-            detalhe=detail,
-        )
+        if show_loading and loading_slot is not None:
+            render_tmg_ortho_viewer_loading(
+                pct,
+                base_message,
+                container=loading_slot,
+                modo=viewer_mode_label,
+                detalhe=detail,
+            )
 
     try:
         _purge_disabled_ortho_caches()
@@ -4310,11 +4311,13 @@ def processar_ortofoto(file_bytes: bytes, filename: str, viewer_slot=None):
             _set_tmg_ortho_loading_state(file_name, 100, str(result[2]), "error", str(result[2]))
         else:
             _set_tmg_ortho_loading_state(file_name, 100, "Ortofoto entregue ao visualizador.", "ready")
-        finish_tmg_ortho_viewer_loading(loading_slot, "Ortofoto carregada com sucesso.", modo=viewer_mode_label, hold_seconds=0.2)
+        if show_loading and loading_slot is not None:
+            finish_tmg_ortho_viewer_loading(loading_slot, "Ortofoto carregada com sucesso.", modo=viewer_mode_label, hold_seconds=0.2)
         return result
     except Exception as exc:
         _set_tmg_ortho_loading_state(file_name, 100, f"Falha ao carregar ortofoto: {exc}", "error", str(exc))
-        clear_tmg_loading(loading_slot)
+        if show_loading and loading_slot is not None:
+            clear_tmg_loading(loading_slot)
         raise
 
 
@@ -9219,7 +9222,7 @@ def _vd_grid_shp_zip_bytes(grid: dict, ortho: dict) -> bytes:
 def _vd_grid_overlay_bytes(grid: dict, ortho: dict, image_format: str = "PNG") -> bytes:
     from PIL import ImageDraw
     raw = Path(ortho["path"]).read_bytes()
-    b64, _, err, _ = processar_ortofoto(raw, ortho.get("nome", "ortofoto"))
+    b64, _, err, _ = processar_ortofoto(raw, ortho.get("nome", "ortofoto"), show_loading=False)
     if err:
         raise RuntimeError(err)
     img = Image.open(BytesIO(base64.b64decode(b64))).convert("RGBA")
@@ -9887,7 +9890,7 @@ def _vd_render_projetos(manifest: dict) -> None:
     with c1:
         if ortho and Path(ortho.get("path", "")).exists():
             raw = Path(ortho["path"]).read_bytes()
-            b64, dims, err, _ = processar_ortofoto(raw, ortho["nome"])
+            b64, dims, err, _ = processar_ortofoto(raw, ortho["nome"], show_loading=False)
             if not err:
                 app_image(Image.open(BytesIO(base64.b64decode(b64))))
                 st.caption(f"Miniatura: {ortho['nome']} · {dims[0]}x{dims[1]}")

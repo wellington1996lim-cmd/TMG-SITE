@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OPTIMIZED_DIR = PROJECT_ROOT / "cache" / "optimized_orthos"
+
+
+def persistent_optimizer_cache_enabled() -> bool:
+    import os
+
+    return os.getenv("TMG_ENABLE_RASTER_OPTIMIZER_CACHE", "").strip().lower() in ("1", "true", "yes", "sim")
 
 
 def inspect_raster(path: str | Path) -> dict:
@@ -57,7 +64,10 @@ def has_overviews(path: str | Path) -> bool:
 
 def optimized_output_path(path: str | Path, cache_dir: str | Path | None = None) -> Path:
     raster_path = Path(path)
-    root = Path(cache_dir or OPTIMIZED_DIR)
+    if cache_dir is None and not persistent_optimizer_cache_enabled():
+        root = Path(tempfile.gettempdir()) / "tmg_optimized_orthos"
+    else:
+        root = Path(cache_dir or OPTIMIZED_DIR)
     root.mkdir(parents=True, exist_ok=True)
     return root / f"{raster_path.stem}_tmg_optimized.tif"
 
