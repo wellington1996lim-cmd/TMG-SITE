@@ -1188,26 +1188,85 @@ def _int_setting(name: str, default: int, min_value: int, max_value: int) -> int
         value = int(default)
     return max(min_value, min(max_value, value))
 
+def _setting_is_configured(name: str) -> bool:
+    try:
+        return bool(os.getenv(name, "").strip() or _streamlit_secret(name).strip())
+    except Exception:
+        return bool(os.getenv(name, "").strip())
+
 def _preview_max_dim() -> int:
-    # Ajuste solicitado: visualização de ortofotos com mais qualidade no Streamlit.
+    # Perfil padrao: alta qualidade com abertura mais rapida no navegador.
     # Pode ser configurado por variável/secret TMG_PREVIEW_MAX_DIM.
     # Mantém compatibilidade com Streamlit Cloud evitando carregar a imagem original inteira no navegador.
-    return _int_setting("TMG_PREVIEW_MAX_DIM", 7200, 2048, 14000)
+    return _int_setting("TMG_PREVIEW_MAX_DIM", 5600, 2048, 14000)
 
 def _preview_jpeg_quality() -> int:
-    # Qualidade alta para preservar detalhes de TIF/GeoTIFF/RGB no visualizador.
-    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 94, 82, 98)
+    # Qualidade alta e mais leve para reduzir tempo de conversao/renderizacao.
+    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 91, 82, 98)
 
 def _preview_min_jpeg_quality() -> int:
     # Piso de qualidade para evitar perda visual agressiva nas ortofotos grandes.
-    return _int_setting("TMG_PREVIEW_MIN_JPEG_QUALITY", 88, 70, 98)
+    return _int_setting("TMG_PREVIEW_MIN_JPEG_QUALITY", 82, 70, 98)
 
 def _preview_max_payload_mb() -> int:
-    # Limite alto para preservar mais detalhes no preview sem alterar o arquivo original.
-    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 22, 8, 160)
+    # Limite do payload enviado ao navegador; a ortofoto original permanece intacta.
+    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 14, 8, 160)
 
 def _preview_min_dim() -> int:
-    return _int_setting("TMG_PREVIEW_MIN_DIM", 3200, 1200, 8192)
+    return _int_setting("TMG_PREVIEW_MIN_DIM", 2400, 1200, 8192)
+
+def _adaptive_ortho_preview_params(
+    file_bytes: bytes | None,
+    filename: str = "",
+    viewer_runtime: dict | None = None,
+) -> tuple[int, int, int, int, int]:
+    """Ajusta o preview por tamanho de arquivo para abrir mais rapido sem alterar a ortofoto original."""
+    max_dim = _preview_max_dim()
+    quality = _preview_jpeg_quality()
+    min_quality = _preview_min_jpeg_quality()
+    payload_mb = _preview_max_payload_mb()
+    min_dim = _preview_min_dim()
+    explicit_max_dim = _setting_is_configured("TMG_PREVIEW_MAX_DIM")
+    explicit_quality = _setting_is_configured("TMG_PREVIEW_JPEG_QUALITY")
+    explicit_min_quality = _setting_is_configured("TMG_PREVIEW_MIN_JPEG_QUALITY")
+    explicit_payload = _setting_is_configured("TMG_PREVIEW_MAX_PAYLOAD_MB")
+    explicit_min_dim = _setting_is_configured("TMG_PREVIEW_MIN_DIM")
+    size_mb = (len(file_bytes or b"") / (1024 * 1024)) if file_bytes else 0.0
+    runtime = viewer_runtime if isinstance(viewer_runtime, dict) else {}
+    is_deploy = bool(runtime.get("is_deploy"))
+
+    if not explicit_max_dim:
+        if is_deploy:
+            max_dim = min(max_dim, 4200)
+        elif size_mb >= 500:
+            max_dim = min(max_dim, 4000)
+        elif size_mb >= 250:
+            max_dim = min(max_dim, 4600)
+        elif size_mb >= 100:
+            max_dim = min(max_dim, 5200)
+    if not explicit_quality:
+        if is_deploy or size_mb >= 250:
+            quality = min(quality, 89)
+        elif size_mb >= 100:
+            quality = min(quality, 90)
+    if not explicit_min_quality:
+        if is_deploy or size_mb >= 250:
+            min_quality = min(min_quality, 80)
+    if not explicit_payload:
+        if is_deploy:
+            payload_mb = min(payload_mb, 10)
+        elif size_mb >= 500:
+            payload_mb = min(payload_mb, 10)
+        elif size_mb >= 250:
+            payload_mb = min(payload_mb, 12)
+    if not explicit_min_dim:
+        if is_deploy or size_mb >= 250:
+            min_dim = min(min_dim, 1800)
+        elif size_mb >= 100:
+            min_dim = min(min_dim, 2200)
+    min_quality = min(min_quality, quality)
+    min_dim = min(min_dim, max_dim)
+    return int(max_dim), int(quality), int(min_quality), int(payload_mb), int(min_dim)
 
 def _upload_limit_mb() -> int:
     # Valor informativo mostrado na interface; o limite real do Streamlit Cloud é definido em .streamlit/config.toml.
@@ -3836,8 +3895,8 @@ def _processar_ortofoto_core(
             spatial_meta["preview_width"] = out_width
             spatial_meta["preview_height"] = out_height
 
-            # Cúbico mantém boa nitidez visual e é mais rápido que Lanczos em ortofotos grandes.
-            resampling_filter = getattr(Resampling, "cubic", Resampling.bilinear)
+            # Bilinear abre ortofotos grandes bem mais rapido no navegador mantendo boa leitura visual.
+            resampling_filter = getattr(Resampling, "bilinear", Resampling.nearest)
             bands = int(src.count)
 
             if bands >= 3:
@@ -3944,8 +4003,8 @@ def _processar_ortofoto_core(
     buf = BytesIO()
 
     try:
-        for step_idx in range(18):
-            _set_progress(min(92, 72 + int((step_idx / 18) * 20)), "Comprimindo preview sem perder qualidade visual...")
+        for step_idx in range(10):
+            _set_progress(min(92, 72 + int((step_idx / 10) * 20)), "Comprimindo preview sem perder qualidade visual...")
             buf = _save_preview_jpeg(preview_img, quality)
             payload_size = buf.tell()
             if payload_size <= max_payload_bytes:
@@ -4210,11 +4269,13 @@ def processar_ortofoto(file_bytes: bytes, filename: str, viewer_slot=None, show_
     loading_slot = viewer_slot if viewer_slot is not None else (st.empty() if show_loading else None)
     viewer_runtime = _tmg_current_viewer_runtime()
     viewer_mode_label = _tmg_viewer_mode_label(viewer_runtime)
-    preview_max_dim = _preview_max_dim()
-    preview_jpeg_quality = _preview_jpeg_quality()
-    preview_min_jpeg_quality = _preview_min_jpeg_quality()
-    preview_max_payload_mb = _preview_max_payload_mb()
-    preview_min_dim = _preview_min_dim()
+    (
+        preview_max_dim,
+        preview_jpeg_quality,
+        preview_min_jpeg_quality,
+        preview_max_payload_mb,
+        preview_min_dim,
+    ) = _adaptive_ortho_preview_params(file_bytes, file_name, viewer_runtime)
 
     def _progress(pct: int, message: str):
         base_message = str(message or "Carregando ortofoto...")
@@ -4280,7 +4341,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str, viewer_slot=None, show_
                 _progress(78, "Preview salvo encontrado. Abrindo ortofoto sem reprocessar...")
             else:
                 _progress(22, "Preparando parâmetros de alta qualidade...")
-                _progress(30, f"Processando preview até {preview_max_dim}px com qualidade {preview_jpeg_quality}...")
+                _progress(30, f"Processando preview otimizado até {preview_max_dim}px com qualidade {preview_jpeg_quality}...")
                 result = _processar_ortofoto_core(
                     file_bytes,
                     filename,
@@ -12990,13 +13051,7 @@ def render_loading_camadas(progress, texto: str = "Carregando camada...", arquiv
     target.markdown(markup, unsafe_allow_html=True)
 
 def carregar_preview_raster_otimizado(file_bytes: bytes, filename: str):
-    params = (
-        _preview_max_dim(),
-        _preview_jpeg_quality(),
-        _preview_min_jpeg_quality(),
-        _preview_max_payload_mb(),
-        _preview_min_dim(),
-    )
+    params = _adaptive_ortho_preview_params(file_bytes, filename, _tmg_current_viewer_runtime())
     cache_key = _ortho_preview_cache_key(file_bytes or b"", filename, params)
     disk_result = _read_ortho_preview_disk_cache(cache_key)
     if disk_result:
