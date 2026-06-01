@@ -317,7 +317,7 @@ def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", conta
         pct = 0
     texto_seguro = html.escape(str(texto or "Carregando arquivo..."))
     status = "Carregamento concluído com sucesso." if pct >= 100 else texto_seguro
-    fill = get_progress_color(pct)
+    fill = "linear-gradient(90deg, #1f75ff 0%, #18c7ff 34%, #ff8c00 72%, #5ff2b1 100%)"
     theme = globals().get("DEPLOY_BAR_THEME", {})
     card_background = theme.get(
         "card_background",
@@ -514,7 +514,7 @@ def render_tmg_global_loading_overlay(
         pct = 0
     texto_seguro = html.escape(str(texto or "Carregando módulo..."))
     status = "Carregamento concluído com sucesso." if pct >= 100 else texto_seguro
-    fill = get_progress_color(pct)
+    fill = "linear-gradient(90deg, #1f75ff 0%, #18c7ff 34%, #ff8c00 72%, #5ff2b1 100%)"
     logo_html = _tmg_loading_logo_html()
     autohide_class = " tmg-global-loading-autohide" if auto_hide_seconds is not None and pct >= 100 else ""
     try:
@@ -544,14 +544,14 @@ def render_tmg_global_loading_overlay(
         width: min(480px, calc(100vw - 42px));
         padding: 22px 24px;
         border-radius: 20px;
-        border: 1px solid rgba({THEME_PRIMARY_RGB}, .64);
+        border: 1px solid rgba(255,140,0,.42);
         background:
             linear-gradient(120deg, rgba(255,255,255,.14), transparent 30%),
             radial-gradient(circle at top left, rgba({THEME_PRIMARY_RGB}, .24), transparent 42%),
             linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.84), rgba({THEME_PRIMARY_RGB}, .20));
         box-shadow:
             0 22px 48px rgba(0,0,0,.54),
-            0 0 36px rgba({THEME_PRIMARY_RGB}, .36),
+            0 0 36px rgba(255,140,0,.20),
             inset 0 1px 0 rgba(255,255,255,.24),
             inset 0 -12px 22px rgba(2,14,36,.40);
         color: #fff;
@@ -591,7 +591,7 @@ def render_tmg_global_loading_overlay(
         margin-top:15px;
         border-radius:999px;
         overflow:hidden;
-        border:1px solid rgba({THEME_PRIMARY_RGB},.60);
+        border:1px solid rgba(255,140,0,.46);
         background:linear-gradient(180deg,#020e24,#071a2c);
         box-shadow:inset 0 3px 8px rgba(0,0,0,.70), 0 0 18px rgba({THEME_PRIMARY_RGB},.28);
     }}
@@ -663,6 +663,236 @@ def finish_tmg_global_loading_overlay(container, texto: str = "Carregamento conc
         return
     try:
         render_tmg_global_loading_overlay(100, texto, container=container, auto_hide_seconds=max(0.35, float(hold_seconds or 0.35)))
+    except Exception:
+        pass
+
+def render_tmg_ortho_viewer_loading(
+    progress,
+    texto: str = "Carregando ortofoto...",
+    container=None,
+    modo: str = "Visualizador Streamlit",
+    detalhe: str = "",
+    auto_hide_seconds: float | None = None,
+):
+    try:
+        pct = max(0, min(100, int(float(progress))))
+    except Exception:
+        pct = 0
+    texto_seguro = html.escape(str(texto or "Carregando ortofoto..."))
+    modo_seguro = html.escape(str(modo or "Visualizador"))
+    detalhe_seguro = html.escape(str(detalhe or "Preparando visualização..."))
+    status = "Ortofoto pronta para exibição." if pct >= 100 else texto_seguro
+    logo_html = _tmg_loading_logo_html()
+    autohide_class = " tmg-ortho-loading-autohide" if auto_hide_seconds is not None and pct >= 100 else ""
+    try:
+        autohide_delay = max(0.25, float(auto_hide_seconds or 0.65))
+    except Exception:
+        autohide_delay = 0.65
+    markup = f"""
+    <style>
+    .tmg-ortho-loading-shell {{
+        width:100%;
+        min-height:560px;
+        margin:10px 0 16px 0;
+        border-radius:18px;
+        border:1px solid rgba(255,140,0,.30);
+        background:
+            linear-gradient(145deg, rgba(6,21,37,.96), rgba(18,24,32,.94), rgba(34,39,48,.86)),
+            radial-gradient(circle at 50% 18%, rgba(255,140,0,.13), transparent 35%),
+            radial-gradient(circle at 12% 0%, rgba(0,140,210,.17), transparent 30%);
+        box-shadow:
+            0 18px 38px rgba(0,0,0,.42),
+            0 0 24px rgba(255,140,0,.13),
+            inset 0 1px 0 rgba(255,255,255,.10);
+        overflow:hidden;
+        position:relative;
+        font-family:'Segoe UI', Arial, sans-serif;
+        color:#ffffff;
+    }}
+    .tmg-ortho-loading-toolbar {{
+        height:46px;
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:12px;
+        padding:0 16px;
+        border-bottom:1px solid rgba(255,255,255,.08);
+        background:linear-gradient(90deg, rgba(2,14,36,.86), rgba(34,39,48,.72), rgba(2,14,36,.86));
+    }}
+    .tmg-ortho-loading-title {{
+        color:#ffffff;
+        font-size:.86rem;
+        font-weight:950;
+        letter-spacing:.4px;
+        text-shadow:0 1px 0 rgba(0,0,0,.82), 0 0 12px rgba(255,140,0,.20);
+    }}
+    .tmg-ortho-loading-mode {{
+        color:#d9e5f2;
+        font-size:.72rem;
+        font-weight:800;
+        padding:5px 10px;
+        border-radius:999px;
+        border:1px solid rgba(255,140,0,.28);
+        background:rgba(255,255,255,.04);
+    }}
+    .tmg-ortho-loading-area {{
+        min-height:514px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        padding:26px;
+        background:
+            linear-gradient(45deg, rgba(255,255,255,.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.025) 75%),
+            linear-gradient(45deg, rgba(255,255,255,.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.025) 75%);
+        background-size:34px 34px;
+        background-position:0 0,17px 17px;
+    }}
+    .tmg-ortho-loading-card {{
+        width:min(500px, 94%);
+        padding:24px 26px 22px 26px;
+        border-radius:20px;
+        border:1px solid rgba(255,140,0,.38);
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.12), transparent 34%),
+            linear-gradient(145deg, rgba(8,13,20,.88), rgba(22,30,42,.82), rgba(42,44,49,.70));
+        box-shadow:
+            0 22px 48px rgba(0,0,0,.52),
+            0 0 28px rgba(255,140,0,.18),
+            inset 0 1px 0 rgba(255,255,255,.16);
+        text-align:center;
+        transition:opacity .35s ease, transform .35s ease;
+    }}
+    .tmg-ortho-loading-logo {{
+        display:flex;
+        justify-content:center;
+        align-items:center;
+        min-height:54px;
+        margin-bottom:12px;
+        animation:tmgOrthoLogoPulse 1.8s ease-in-out infinite;
+    }}
+    .tmg-ortho-loading-logo .tmg-load-logo-img {{
+        max-width:170px;
+        max-height:58px;
+        object-fit:contain;
+        filter:drop-shadow(0 8px 14px rgba(0,0,0,.50)) drop-shadow(0 0 18px rgba(255,140,0,.28));
+    }}
+    .tmg-ortho-loading-logo .tmg-load-logo-fallback {{
+        color:#fff;
+        font-weight:950;
+        letter-spacing:4px;
+        font-size:1.25rem;
+        text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba(255,140,0,.45);
+    }}
+    .tmg-ortho-loading-text {{
+        color:#ffffff;
+        font-size:.96rem;
+        font-weight:950;
+        letter-spacing:.35px;
+        text-shadow:0 1px 0 rgba(0,0,0,.86);
+    }}
+    .tmg-ortho-loading-detail {{
+        min-height:20px;
+        margin-top:7px;
+        color:#cdd8e5;
+        font-size:.77rem;
+        font-weight:800;
+    }}
+    .tmg-ortho-loading-track {{
+        position:relative;
+        height:28px;
+        margin-top:17px;
+        overflow:hidden;
+        border-radius:999px;
+        border:1px solid rgba(255,140,0,.42);
+        background:linear-gradient(180deg, #07101d, #1a2029);
+        box-shadow:inset 0 3px 8px rgba(0,0,0,.72), 0 0 18px rgba(255,140,0,.12);
+    }}
+    .tmg-ortho-loading-fill {{
+        width:{pct}%;
+        height:100%;
+        border-radius:999px;
+        background:linear-gradient(90deg, #1f75ff 0%, #18c7ff 36%, #ff8c00 72%, #5ff2b1 100%);
+        box-shadow:inset 0 1px 0 rgba(255,255,255,.42), 0 0 18px rgba(255,140,0,.38);
+        transition:width .35s ease;
+        position:relative;
+    }}
+    .tmg-ortho-loading-fill:after {{
+        content:"";
+        position:absolute;
+        inset:0;
+        background:linear-gradient(120deg, transparent 0%, rgba(255,255,255,.38) 45%, transparent 75%);
+        transform:translateX(-100%);
+        animation:tmgOrthoLoadingShine 1.25s ease-in-out infinite;
+    }}
+    .tmg-ortho-loading-percent {{
+        position:absolute;
+        inset:0;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        color:#ffffff;
+        font-weight:950;
+        font-size:.82rem;
+        text-shadow:0 1px 4px rgba(0,0,0,.88);
+    }}
+    .tmg-ortho-loading-status {{
+        margin-top:10px;
+        color:{'#5ff2b1' if pct >= 100 else '#ffb347'};
+        font-size:.80rem;
+        font-weight:900;
+        text-shadow:0 1px 0 rgba(0,0,0,.82);
+    }}
+    .tmg-ortho-loading-shell.tmg-ortho-loading-autohide {{
+        animation:tmgOrthoLoadingFade .42s ease forwards;
+        animation-delay:{autohide_delay:.2f}s;
+    }}
+    @keyframes tmgOrthoLoadingShine {{
+        0% {{ transform:translateX(-100%); }}
+        100% {{ transform:translateX(180%); }}
+    }}
+    @keyframes tmgOrthoLogoPulse {{
+        0%, 100% {{ transform:scale(1); opacity:.94; }}
+        50% {{ transform:scale(1.025); opacity:1; }}
+    }}
+    @keyframes tmgOrthoLoadingFade {{
+        to {{ opacity:0; max-height:0; min-height:0; margin:0; visibility:hidden; }}
+    }}
+    </style>
+    <div class="tmg-ortho-loading-shell{autohide_class}">
+        <div class="tmg-ortho-loading-toolbar">
+            <div class="tmg-ortho-loading-title">Visualizador de Ortofoto</div>
+            <div class="tmg-ortho-loading-mode">{modo_seguro}</div>
+        </div>
+        <div class="tmg-ortho-loading-area">
+            <div class="tmg-ortho-loading-card">
+                <div class="tmg-ortho-loading-logo">{logo_html}</div>
+                <div class="tmg-ortho-loading-text">{texto_seguro}</div>
+                <div class="tmg-ortho-loading-detail">{detalhe_seguro}</div>
+                <div class="tmg-ortho-loading-track">
+                    <div class="tmg-ortho-loading-fill"></div>
+                    <div class="tmg-ortho-loading-percent">{pct}%</div>
+                </div>
+                <div class="tmg-ortho-loading-status">{html.escape(status)}</div>
+            </div>
+        </div>
+    </div>
+    """
+    target = container if container is not None else st
+    target.markdown(markup, unsafe_allow_html=True)
+    return container
+
+def finish_tmg_ortho_viewer_loading(container, texto: str = "Ortofoto carregada com sucesso.", modo: str = "Visualizador Streamlit", hold_seconds: float = 0.25):
+    if container is None:
+        return
+    try:
+        render_tmg_ortho_viewer_loading(
+            100,
+            texto,
+            container=container,
+            modo=modo,
+            detalhe="Abrindo imagem no visualizador...",
+            auto_hide_seconds=max(0.25, float(hold_seconds or 0.25)),
+        )
     except Exception:
         pass
 
@@ -3613,8 +3843,14 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
         base_message = str(message or "Carregando ortofoto...")
         if viewer_mode_label not in base_message:
             base_message = f"{viewer_mode_label} · {base_message}"
-        detail = f"{base_message} · {total_mb:.1f} MB" if total_mb else base_message
-        render_tmg_global_loading_overlay(pct, detail, container=loading_slot)
+        detail = f"Arquivo: {file_name} · {total_mb:.1f} MB" if total_mb else f"Arquivo: {file_name}"
+        render_tmg_ortho_viewer_loading(
+            pct,
+            base_message,
+            container=loading_slot,
+            modo=viewer_mode_label,
+            detalhe=detail,
+        )
 
     try:
         params = (preview_max_dim, preview_jpeg_quality, preview_min_jpeg_quality, preview_max_payload_mb, preview_min_dim)
@@ -3691,7 +3927,7 @@ def processar_ortofoto(file_bytes: bytes, filename: str):
             result[3]["viewer_mode_label"] = viewer_mode_label
         _progress(94, "Entregando ortofoto ao visualizador...")
         _progress(98, "Abrindo canvas e ferramentas do visualizador...")
-        finish_tmg_global_loading_overlay(loading_slot, "Ortofoto carregada com sucesso.", hold_seconds=0.2)
+        finish_tmg_ortho_viewer_loading(loading_slot, "Ortofoto carregada com sucesso.", modo=viewer_mode_label, hold_seconds=0.2)
         return result
     except Exception:
         clear_tmg_loading(loading_slot)
