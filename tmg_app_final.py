@@ -1707,6 +1707,10 @@ textarea::placeholder {{
 #viewer,
 #vc,
 #cronViewer,
+#wrap,
+#vdv,
+#qgisViewer,
+#mapCanvas,
 .canvas-wrap,
 .map-wrap,
 .image-stage,
@@ -1717,6 +1721,149 @@ textarea::placeholder {{
     linear-gradient(145deg,#020e24,#061525) !important;
   border:1px solid rgba({THEME_PRIMARY_RGB},.36) !important;
   box-shadow:0 16px 34px rgba(0,0,0,.42), 0 0 24px rgba({THEME_PRIMARY_RGB},.18) !important;
+}}
+#wrap,
+#vdv,
+#qgisViewer,
+#viewer,
+#vc,
+#cronViewer {{
+  min-height:640px !important;
+  border-radius:14px !important;
+  border:1px solid rgba(0,212,255,.42) !important;
+  background:
+    linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
+    radial-gradient(circle at 20% 10%, rgba(0,212,255,.13), transparent 32%),
+    #071525 !important;
+  background-size:34px 34px,34px 34px,100% 100%,100% 100% !important;
+  box-shadow:
+    0 18px 42px rgba(0,0,0,.46),
+    0 0 28px rgba(0,212,255,.18),
+    inset 0 1px 0 rgba(255,255,255,.10) !important;
+}}
+#wrap:before,
+#vdv:before,
+#viewer:before,
+#vc:before,
+#cronViewer:before {{
+  content:"Visualizador de Ortofoto";
+  position:absolute;
+  left:12px;
+  top:12px;
+  z-index:2;
+  color:#dffaff;
+  font-size:12px;
+  font-weight:850;
+  padding:8px 10px;
+  border-radius:10px;
+  border:1px solid rgba(0,212,255,.28);
+  background:rgba(3,18,38,.72);
+  box-shadow:0 8px 20px rgba(0,0,0,.32);
+  text-shadow:0 1px 0 rgba(0,0,0,.78), 0 0 10px rgba(0,212,255,.32);
+  pointer-events:none;
+}}
+#wrap:empty:after,
+#vdv:empty:after,
+#viewer:empty:after,
+#vc:empty:after,
+#cronViewer:empty:after {{
+  content:"Adicione uma camada raster para iniciar o visualizador.";
+  position:absolute;
+  inset:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color:#d9fbff;
+  font-weight:850;
+  letter-spacing:.25px;
+  text-shadow:0 1px 0 rgba(0,0,0,.78), 0 0 14px rgba(0,212,255,.38);
+}}
+#wrap canvas,
+#vdv canvas,
+#viewer canvas,
+#vc canvas,
+#cronViewer canvas,
+#qgisViewer canvas {{
+  background:transparent !important;
+  animation:tmgViewerReveal .36s ease both;
+}}
+.bar,
+.vdtop,
+.toolbar,
+.topbar,
+.controls {{
+  z-index:6 !important;
+}}
+#wrap .bar {{
+  top:12px !important;
+  right:12px !important;
+  left:auto !important;
+  bottom:auto !important;
+  display:flex !important;
+  flex-direction:column !important;
+  gap:7px !important;
+  max-width:168px !important;
+}}
+#wrap .bar button,
+#vdv .panel button,
+#viewer button,
+#vc button,
+#cronViewer button,
+.qgisBtn {{
+  min-height:34px !important;
+  border-radius:9px !important;
+  border:1px solid rgba(0,212,255,.42) !important;
+  color:#ffffff !important;
+  background:linear-gradient(145deg, rgba(5,30,58,.95), rgba(0,128,176,.62)) !important;
+  font-weight:900 !important;
+  box-shadow:0 8px 18px rgba(0,0,0,.42), 0 0 16px rgba(0,212,255,.20), inset 0 1px 0 rgba(255,255,255,.18) !important;
+  text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 10px rgba(0,212,255,.42) !important;
+}}
+#wrap .bar button:hover,
+#vdv .panel button:hover,
+#viewer button:hover,
+#vc button:hover,
+#cronViewer button:hover,
+.qgisBtn:hover {{
+  border-color:rgba(142,234,255,.86) !important;
+  box-shadow:0 10px 24px rgba(0,0,0,.48), 0 0 24px rgba(0,212,255,.42), inset 0 1px 0 rgba(255,255,255,.25) !important;
+  transform:translateY(-1px) !important;
+}}
+.badge,
+.hint,
+.scale,
+.coord,
+.qgisStatus,
+.qgisInfo,
+#vdv .panel,
+#wrap .hint,
+#viewer .hint,
+#vc .hint,
+#cronViewer .hint {{
+  border-radius:12px !important;
+  border:1px solid rgba(0,212,255,.34) !important;
+  color:#eafcff !important;
+  background:linear-gradient(145deg, rgba(3,18,38,.92), rgba(8,45,82,.78)) !important;
+  box-shadow:0 12px 26px rgba(0,0,0,.45), 0 0 22px rgba(0,212,255,.20), inset 0 1px 0 rgba(255,255,255,.10) !important;
+  text-shadow:0 1px 0 rgba(0,0,0,.72) !important;
+}}
+.badge,
+.qgisStatus {{
+  color:#dffaff !important;
+  font-weight:850 !important;
+}}
+.hint:before,
+.scale:before {{
+  content:"Identificação de parcela";
+  display:block;
+  color:#ffffff;
+  font-weight:900;
+  margin-bottom:3px;
+  text-shadow:0 0 10px rgba(0,212,255,.45);
+}}
+input[type=range] {{
+  accent-color:#00d4ff !important;
 }}
 .title,
 .panel-title,
