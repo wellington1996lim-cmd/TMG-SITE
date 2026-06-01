@@ -125,42 +125,6 @@ def launch_desktop_viewer(image_path: str | Path, app_root: str | Path | None = 
 
 
 def render_desktop_viewer_controls(file_bytes: bytes, filename: str, key: str, app_root: str | Path | None = None) -> None:
-    if not is_desktop_viewer_enabled() or not file_bytes:
-        return
-    try:
-        import streamlit as st
-    except Exception:
-        return
-
-    runtime = get_viewer_runtime()
-    image_path = save_image_for_desktop_viewer(file_bytes, filename, app_root=app_root)
-    safe_name = html.escape(Path(filename or image_path.name).name)
-    safe_path = html.escape(str(image_path))
-    engine_label = html.escape(str(runtime.get("desktop_engine") or "desktop"))
-    status_label = html.escape(str(runtime.get("desktop_status") or "Modo Desktop Local disponivel."))
-    accelerated_label = "Acelerado" if bool(runtime.get("desktop_accelerated")) else "Fallback seguro"
-    with st.expander("Modo Desktop Local (opcional)", expanded=False):
-        st.markdown(
-            f"""
-            <div style="
-                border:1px solid rgba(0,229,255,.38);
-                border-radius:14px;
-                padding:12px 14px;
-                background:linear-gradient(145deg, rgba(2,14,36,.94), rgba(13,43,69,.82));
-                color:#ffffff;
-                box-shadow:0 12px 26px rgba(0,0,0,.30), 0 0 18px rgba(0,229,255,.16);
-                font-weight:800;">
-                Modo local detectado: voce pode abrir <b>{safe_name}</b> em uma janela externa mais fluida.
-                <div style="margin-top:6px;color:#dffbff;font-size:.78rem;word-break:break-word;">{safe_path}</div>
-                <div style="margin-top:4px;color:#9eefff;font-size:.75rem;">Motor: {engine_label} · {accelerated_label}</div>
-                <div style="margin-top:4px;color:#c9f7ff;font-size:.75rem;">{status_label}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        if st.button("Abrir visualizador local", key=key, use_container_width=True):
-            ok, message = launch_desktop_viewer(image_path, app_root=app_root)
-            if ok:
-                st.success(message)
-            else:
-                st.warning(message)
+    # O modo desktop local continua existindo internamente, mas nao deve ocupar
+    # espaco visual dentro dos visualizadores de ortofoto.
+    return
