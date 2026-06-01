@@ -695,15 +695,16 @@ def render_tmg_ortho_viewer_loading(
         min-height:560px;
         margin:10px 0 16px 0;
         border-radius:18px;
-        border:1px solid rgba(255,140,0,.30);
+        border:1px solid rgba(0,212,255,.42);
         background:
-            linear-gradient(145deg, rgba(6,21,37,.96), rgba(18,24,32,.94), rgba(34,39,48,.86)),
-            radial-gradient(circle at 50% 18%, rgba(255,140,0,.13), transparent 35%),
-            radial-gradient(circle at 12% 0%, rgba(0,140,210,.17), transparent 30%);
+            linear-gradient(120deg, rgba(255,255,255,.08), transparent 32%),
+            radial-gradient(circle at 15% 0%, rgba(0,212,255,.22), transparent 38%),
+            linear-gradient(145deg, rgba(2,14,36,.97), rgba(12,57,98,.88), rgba(0,212,255,.16));
         box-shadow:
-            0 18px 38px rgba(0,0,0,.42),
-            0 0 24px rgba(255,140,0,.13),
-            inset 0 1px 0 rgba(255,255,255,.10);
+            0 18px 38px rgba(0,0,0,.48),
+            0 0 30px rgba(0,212,255,.28),
+            inset 0 1px 0 rgba(255,255,255,.20),
+            inset 0 -10px 20px rgba(2,14,36,.42);
         overflow:hidden;
         position:relative;
         font-family:'Segoe UI', Arial, sans-serif;
@@ -716,24 +717,24 @@ def render_tmg_ortho_viewer_loading(
         justify-content:space-between;
         gap:12px;
         padding:0 16px;
-        border-bottom:1px solid rgba(255,255,255,.08);
-        background:linear-gradient(90deg, rgba(2,14,36,.86), rgba(34,39,48,.72), rgba(2,14,36,.86));
+        border-bottom:1px solid rgba(0,212,255,.22);
+        background:linear-gradient(90deg, rgba(2,14,36,.92), rgba(12,57,98,.78), rgba(2,14,36,.92));
     }}
     .tmg-ortho-loading-title {{
         color:#ffffff;
         font-size:.86rem;
         font-weight:950;
         letter-spacing:.4px;
-        text-shadow:0 1px 0 rgba(0,0,0,.82), 0 0 12px rgba(255,140,0,.20);
+        text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 14px rgba(0,212,255,.48);
     }}
     .tmg-ortho-loading-mode {{
-        color:#d9e5f2;
+        color:#d9fbff;
         font-size:.72rem;
         font-weight:800;
         padding:5px 10px;
         border-radius:999px;
-        border:1px solid rgba(255,140,0,.28);
-        background:rgba(255,255,255,.04);
+        border:1px solid rgba(0,212,255,.34);
+        background:rgba(0,212,255,.07);
     }}
     .tmg-ortho-loading-area {{
         min-height:514px;
@@ -742,6 +743,7 @@ def render_tmg_ortho_viewer_loading(
         justify-content:center;
         padding:26px;
         background:
+            radial-gradient(circle at center, rgba(0,212,255,.10), transparent 36%),
             linear-gradient(45deg, rgba(255,255,255,.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.025) 75%),
             linear-gradient(45deg, rgba(255,255,255,.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.025) 75%);
         background-size:34px 34px;
@@ -751,14 +753,16 @@ def render_tmg_ortho_viewer_loading(
         width:min(500px, 94%);
         padding:24px 26px 22px 26px;
         border-radius:20px;
-        border:1px solid rgba(255,140,0,.38);
+        border:1px solid rgba(0,212,255,.42);
         background:
             linear-gradient(120deg, rgba(255,255,255,.12), transparent 34%),
-            linear-gradient(145deg, rgba(8,13,20,.88), rgba(22,30,42,.82), rgba(42,44,49,.70));
+            radial-gradient(circle at top left, rgba(0,212,255,.22), transparent 44%),
+            linear-gradient(145deg, rgba(2,14,36,.94), rgba(12,57,98,.84), rgba(0,212,255,.16));
         box-shadow:
             0 22px 48px rgba(0,0,0,.52),
-            0 0 28px rgba(255,140,0,.18),
-            inset 0 1px 0 rgba(255,255,255,.16);
+            0 0 34px rgba(0,212,255,.30),
+            inset 0 1px 0 rgba(255,255,255,.22),
+            inset 0 -9px 18px rgba(2,14,36,.46);
         text-align:center;
         transition:opacity .35s ease, transform .35s ease;
     }}
@@ -774,14 +778,14 @@ def render_tmg_ortho_viewer_loading(
         max-width:170px;
         max-height:58px;
         object-fit:contain;
-        filter:drop-shadow(0 8px 14px rgba(0,0,0,.50)) drop-shadow(0 0 18px rgba(255,140,0,.28));
+        filter:drop-shadow(0 8px 14px rgba(0,0,0,.50)) drop-shadow(0 0 18px rgba(0,212,255,.42));
     }}
     .tmg-ortho-loading-logo .tmg-load-logo-fallback {{
         color:#fff;
         font-weight:950;
         letter-spacing:4px;
         font-size:1.25rem;
-        text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba(255,140,0,.45);
+        text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba(0,212,255,.60);
     }}
     .tmg-ortho-loading-text {{
         color:#ffffff;
@@ -793,7 +797,7 @@ def render_tmg_ortho_viewer_loading(
     .tmg-ortho-loading-detail {{
         min-height:20px;
         margin-top:7px;
-        color:#cdd8e5;
+        color:#d9fbff;
         font-size:.77rem;
         font-weight:800;
     }}
@@ -803,16 +807,16 @@ def render_tmg_ortho_viewer_loading(
         margin-top:17px;
         overflow:hidden;
         border-radius:999px;
-        border:1px solid rgba(255,140,0,.42);
-        background:linear-gradient(180deg, #07101d, #1a2029);
-        box-shadow:inset 0 3px 8px rgba(0,0,0,.72), 0 0 18px rgba(255,140,0,.12);
+        border:1px solid rgba(255,255,255,.14);
+        background:linear-gradient(180deg,#04101f,#0b2540);
+        box-shadow:inset 0 3px 8px rgba(0,0,0,.58), 0 0 16px rgba(0,212,255,.16);
     }}
     .tmg-ortho-loading-fill {{
         width:{pct}%;
         height:100%;
         border-radius:999px;
-        background:linear-gradient(90deg, #1f75ff 0%, #18c7ff 36%, #ff8c00 72%, #5ff2b1 100%);
-        box-shadow:inset 0 1px 0 rgba(255,255,255,.42), 0 0 18px rgba(255,140,0,.38);
+        background:linear-gradient(90deg,#42a5f5,#00d4ff,#5ff2b1);
+        box-shadow:0 0 18px rgba(0,212,255,.55), inset 0 1px 0 rgba(255,255,255,.36);
         transition:width .35s ease;
         position:relative;
     }}
@@ -837,7 +841,7 @@ def render_tmg_ortho_viewer_loading(
     }}
     .tmg-ortho-loading-status {{
         margin-top:10px;
-        color:{'#5ff2b1' if pct >= 100 else '#ffb347'};
+        color:{'#5ff2b1' if pct >= 100 else '#d9fbff'};
         font-size:.80rem;
         font-weight:900;
         text-shadow:0 1px 0 rgba(0,0,0,.82);
