@@ -977,7 +977,7 @@ def finish_tmg_ortho_viewer_loading(
             container=container,
             modo=modo,
             detalhe="Abrindo imagem no visualizador...",
-            auto_hide_seconds=max(0.25, float(hold_seconds or 0.25)),
+            auto_hide_seconds=None,
             height=height,
             titulo=titulo,
         )
@@ -1183,11 +1183,11 @@ def _preview_max_dim() -> int:
     # Perfil padrao: alta qualidade com abertura mais rapida no navegador.
     # Pode ser configurado por variável/secret TMG_PREVIEW_MAX_DIM.
     # Mantém compatibilidade com Streamlit Cloud evitando carregar a imagem original inteira no navegador.
-    return _int_setting("TMG_PREVIEW_MAX_DIM", 5600, 2048, 14000)
+    return _int_setting("TMG_PREVIEW_MAX_DIM", 4200, 2048, 14000)
 
 def _preview_jpeg_quality() -> int:
     # Qualidade alta e mais leve para reduzir tempo de conversao/renderizacao.
-    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 91, 82, 98)
+    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 89, 82, 98)
 
 def _preview_min_jpeg_quality() -> int:
     # Piso de qualidade para evitar perda visual agressiva nas ortofotos grandes.
@@ -1195,7 +1195,7 @@ def _preview_min_jpeg_quality() -> int:
 
 def _preview_max_payload_mb() -> int:
     # Limite do payload enviado ao navegador; a ortofoto original permanece intacta.
-    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 14, 8, 160)
+    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 9, 6, 160)
 
 def _preview_min_dim() -> int:
     return _int_setting("TMG_PREVIEW_MIN_DIM", 2400, 1200, 8192)
@@ -1222,6 +1222,8 @@ def _adaptive_ortho_preview_params(
 
     if not explicit_max_dim:
         if is_deploy:
+            max_dim = min(max_dim, 3600)
+        elif size_mb >= 12:
             max_dim = min(max_dim, 4200)
         elif size_mb >= 500:
             max_dim = min(max_dim, 4000)
@@ -1239,7 +1241,9 @@ def _adaptive_ortho_preview_params(
             min_quality = min(min_quality, 80)
     if not explicit_payload:
         if is_deploy:
-            payload_mb = min(payload_mb, 10)
+            payload_mb = min(payload_mb, 8)
+        elif size_mb >= 12:
+            payload_mb = min(payload_mb, 9)
         elif size_mb >= 500:
             payload_mb = min(payload_mb, 10)
         elif size_mb >= 250:
