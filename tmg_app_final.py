@@ -1710,12 +1710,10 @@ textarea::placeholder {{
 #wrap,
 #vdv,
 #qgisViewer,
-#mapCanvas,
 .canvas-wrap,
 .map-wrap,
 .image-stage,
-.ortho-stage,
-[class*="viewer"] {{
+.ortho-stage {{
   background:
     radial-gradient(circle at 50% 0%, rgba({THEME_PRIMARY_RGB},.10), transparent 42%),
     linear-gradient(145deg,#020e24,#061525) !important;
@@ -1731,6 +1729,8 @@ textarea::placeholder {{
   min-height:640px !important;
   border-radius:14px !important;
   border:1px solid rgba(0,212,255,.42) !important;
+  outline:1px solid rgba(142,234,255,.34) !important;
+  outline-offset:-2px !important;
   background:
     linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
@@ -1740,7 +1740,10 @@ textarea::placeholder {{
   box-shadow:
     0 18px 42px rgba(0,0,0,.46),
     0 0 28px rgba(0,212,255,.18),
-    inset 0 1px 0 rgba(255,255,255,.10) !important;
+    inset 0 1px 0 rgba(255,255,255,.10),
+    inset 0 0 0 2px rgba(0,212,255,.18) !important;
+  overflow:hidden !important;
+  position:relative !important;
 }}
 #wrap:before,
 #vdv:before,
@@ -1787,6 +1790,7 @@ textarea::placeholder {{
 #qgisViewer canvas {{
   background:transparent !important;
   animation:tmgViewerReveal .36s ease both;
+  z-index:1 !important;
 }}
 .bar,
 .vdtop,
