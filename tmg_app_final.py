@@ -18,6 +18,7 @@ import cv2
 import warnings
 import hashlib
 import html
+import textwrap
 import re
 import subprocess
 import sqlite3
@@ -692,7 +693,6 @@ def _render_fixed_ortho_viewer_frame(
     mensagem_segura = html.escape(str(mensagem or "Nenhuma ortofoto carregada"))
     detalhe_seguro = html.escape(str(detalhe or ""))
     icone_seguro = html.escape(str(icone or "🗺️"))
-    modo_seguro = html.escape(str(modo or "Visualizador"))
     status = "Ortofoto pronta para exibição." if state_key == "loading" and pct >= 100 else mensagem_segura
     logo_html = _tmg_loading_logo_html()
     autohide_class = " tmg-fixed-ortho-viewer-autohide" if state_key == "loading" and auto_hide_seconds is not None and pct >= 100 else ""
@@ -722,7 +722,8 @@ def _render_fixed_ortho_viewer_frame(
                 <div class="tmg-fixed-ortho-empty-detail">{detalhe_seguro}</div>
             </div>
         """
-    markup = f"""
+    center_html = textwrap.indent(textwrap.dedent(center_html).strip(), "            ")
+    markup = textwrap.dedent(f"""
     <style>
     .tmg-fixed-ortho-viewer-frame {{
         width:100%;
@@ -924,15 +925,17 @@ def _render_fixed_ortho_viewer_frame(
     <div class="tmg-fixed-ortho-viewer-frame FixedOrthoViewerFrame{autohide_class}" data-state="{html.escape(state_key)}">
         <div class="tmg-fixed-ortho-toolbar">
             <div class="tmg-fixed-ortho-title">{titulo_seguro}</div>
-            <div class="tmg-fixed-ortho-mode">{modo_seguro}</div>
         </div>
         <div class="tmg-fixed-ortho-body">
-            {center_html}
+{center_html}
         </div>
     </div>
-    """
+    """).strip()
     target = container if container is not None else st
-    target.markdown(markup, unsafe_allow_html=True)
+    try:
+        target.html(markup)
+    except Exception:
+        target.markdown(markup, unsafe_allow_html=True)
     return container
 
 def render_tmg_ortho_viewer_loading(
