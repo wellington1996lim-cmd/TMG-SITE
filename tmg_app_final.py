@@ -2031,8 +2031,10 @@ def _themed_components_html(html, *args, **kwargs):
 _themed_markdown.__tmg_original_callable__ = _ORIGINAL_ST_MARKDOWN
 _themed_components_html.__tmg_original_callable__ = _ORIGINAL_COMPONENTS_HTML
 
-st.markdown = _themed_markdown
-components.html = _themed_components_html
+# Nao substitua globalmente os renderizadores do Streamlit. Em producao,
+# transformar/injetar HTML em todos os componentes pode conflitar com o React
+# do Streamlit Cloud e gerar NotFoundError em removeChild ao trocar telas.
+# As funcoes acima ficam disponiveis para uso pontual, sem alterar o core.
 
 # ==========================================
 # MODULO ISOLADO - USUARIOS E PARCEIROS
