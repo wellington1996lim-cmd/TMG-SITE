@@ -1,9 +1,8 @@
 import sys
-sys.dont_write_bytecode = True
 import streamlit as st
 import streamlit.components.v1 as components
 from pathlib import Path
-from PIL import Image, ImageFile, ImageDraw
+from PIL import Image, ImageFile, ImageDraw, ImageFilter
 import os
 import shutil
 import base64
@@ -18,13 +17,11 @@ import cv2
 import warnings
 import hashlib
 import html
-import textwrap
 import re
 import subprocess
 import sqlite3
 import threading
 import time
-from contextlib import ExitStack
 from datetime import datetime, date
 from urllib.parse import quote
 import pandas as pd
@@ -40,25 +37,6 @@ APP_ROOT = Path(__file__).resolve().parent
 APP_TEMP_DIR = APP_ROOT / "tmg_data" / "tmp"
 APP_ULTRALYTICS_DIR = APP_ROOT / "Ultralytics"
 APP_MPLCONFIG_DIR = APP_ROOT / "tmg_data" / "matplotlib"
-
-try:
-    from viewer_manager import render_desktop_viewer_controls as _tmg_render_desktop_viewer_controls
-    from viewer_manager import prepare_desktop_viewer_cache as _tmg_prepare_desktop_viewer_cache
-    from config_app import (
-        enable_desktop_viewer_mode as _tmg_enable_desktop_viewer_mode,
-        enable_streamlit_viewer_mode as _tmg_enable_streamlit_viewer_mode,
-        get_viewer_runtime as _tmg_get_viewer_runtime,
-    )
-    HAS_TMG_VIEWER_MANAGER = True
-except Exception:
-    _tmg_render_desktop_viewer_controls = None
-    _tmg_prepare_desktop_viewer_cache = None
-    _tmg_enable_desktop_viewer_mode = None
-    _tmg_enable_streamlit_viewer_mode = None
-    _tmg_get_viewer_runtime = None
-    HAS_TMG_VIEWER_MANAGER = False
-
-_TMG_DESKTOP_VIEWER_RENDERED_KEYS = set()
 
 for _local_dir in (
     APP_ROOT / ".streamlit",
@@ -94,6 +72,52 @@ try:
     HAS_GEOPANDAS = True
 except ImportError:
     HAS_GEOPANDAS = False
+
+try:
+    from analysis.soybean_maturation import (
+        DEFAULT_MATURATION_CONFIG,
+        analyze_grid_temporal_maturation,
+        build_temporal_summary,
+        draw_maturation_grid_overlay,
+        export_maturation_excel,
+    )
+    HAS_SOYBEAN_MATURATION_BACKEND = True
+    SOYBEAN_MATURATION_BACKEND_ERROR = ""
+except Exception as exc:
+    DEFAULT_MATURATION_CONFIG = {}
+    HAS_SOYBEAN_MATURATION_BACKEND = False
+    SOYBEAN_MATURATION_BACKEND_ERROR = str(exc)
+
+try:
+    from modules.map_creator import render_map_creator, render_map_creator_module
+    HAS_MAP_CREATOR_MODULE = True
+    MAP_CREATOR_MODULE_ERROR = ""
+except Exception as exc:
+    render_map_creator = None
+    render_map_creator_module = None
+    HAS_MAP_CREATOR_MODULE = False
+    MAP_CREATOR_MODULE_ERROR = str(exc)
+
+try:
+    from modules.local_performance import (
+        cleanup_file_cache,
+        ensure_local_performance_layout,
+        fast_file_fingerprint,
+        local_cache_limits,
+        upsert_ortho_cache_record,
+        write_app_log,
+    )
+    HAS_LOCAL_PERFORMANCE = True
+    LOCAL_PERFORMANCE_ERROR = ""
+except Exception as exc:
+    cleanup_file_cache = None
+    ensure_local_performance_layout = None
+    fast_file_fingerprint = None
+    local_cache_limits = None
+    upsert_ortho_cache_record = None
+    write_app_log = None
+    HAS_LOCAL_PERFORMANCE = False
+    LOCAL_PERFORMANCE_ERROR = str(exc)
 
 # Remover limite de tamanho de imagem do PIL para Ortofotos gigantes[cite: 1]
 Image.MAX_IMAGE_PIXELS = None
@@ -312,14 +336,14 @@ def _tmg_loading_logo_html() -> str:
         pass
     return "<div class='tmg-load-logo-fallback'>TMG</div>"
 
-def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", container=None, auto_hide_seconds: float | None = None):
+def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", container=None):
     try:
         pct = max(0, min(100, int(float(progress))))
     except Exception:
         pct = 0
     texto_seguro = html.escape(str(texto or "Carregando arquivo..."))
     status = "Carregamento concluído com sucesso." if pct >= 100 else texto_seguro
-    fill = "linear-gradient(90deg, #1f75ff 0%, #18c7ff 34%, #ff8c00 72%, #5ff2b1 100%)"
+    fill = get_progress_color(pct)
     theme = globals().get("DEPLOY_BAR_THEME", {})
     card_background = theme.get(
         "card_background",
@@ -336,11 +360,6 @@ def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", conta
     fill_shadow = theme.get("fill_shadow", "inset 0 1px 0 rgba(255,255,255,.42), 0 0 18px rgba(66,165,245,.58)")
     status_color = theme.get("status_success" if pct >= 100 else "status_loading", "#5ff2b1" if pct >= 100 else "#ffb347")
     logo_html = _tmg_loading_logo_html()
-    autohide_class = " tmg-load-autohide" if auto_hide_seconds is not None and pct >= 100 else ""
-    try:
-        autohide_delay = max(0.2, float(auto_hide_seconds or 1.25))
-    except Exception:
-        autohide_delay = 1.25
     markup = f"""
     <style>
     .tmg-load-card {{
@@ -352,8 +371,6 @@ def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", conta
         background:{card_background};
         box-shadow:{card_shadow};
         font-family:'Segoe UI', Arial, sans-serif;
-        overflow:hidden;
-        max-height:190px;
     }}
     .tmg-load-head {{
         display:flex;
@@ -431,22 +448,8 @@ def render_tmg_loading_bar(progress, texto: str = "Carregando arquivo...", conta
         0% {{ transform:translateX(-100%); }}
         100% {{ transform:translateX(180%); }}
     }}
-    .tmg-load-card.tmg-load-autohide {{
-        animation:tmgLoadAutoHide .45s ease forwards;
-        animation-delay:{autohide_delay:.2f}s;
-    }}
-    @keyframes tmgLoadAutoHide {{
-        to {{
-            opacity:0;
-            max-height:0;
-            margin:0;
-            padding-top:0;
-            padding-bottom:0;
-            border-width:0;
-        }}
-    }}
     </style>
-    <div class="tmg-load-card{autohide_class}">
+    <div class="tmg-load-card">
         <div class="tmg-load-head">{logo_html}<div class="tmg-load-text">{texto_seguro}</div></div>
         <div class="tmg-load-track">
             <div class="tmg-load-fill"></div>
@@ -470,22 +473,6 @@ def render_progress_upload_tmg(progress, texto: str = "Carregando arquivo...", c
 def render_upload_status_tmg(progress=100, texto: str = "Carregamento concluído com sucesso.", container=None):
     return render_tmg_loading_bar(progress, texto, container=container)
 
-def _tmg_upload_file_label(uploaded) -> str:
-    try:
-        name = Path(getattr(uploaded, "name", "ortofoto")).name
-    except Exception:
-        name = "ortofoto"
-    try:
-        size = int(getattr(uploaded, "size", 0) or 0)
-    except Exception:
-        size = 0
-    size_label = _tv_human_size(size) if "_tv_human_size" in globals() and size else ""
-    return f"{name} · {size_label}" if size_label else name
-
-def render_tmg_ortho_import_progress(container, progress, uploaded=None, etapa: str = "Importando ortofoto..."):
-    label = _tmg_upload_file_label(uploaded) if uploaded is not None else "ortofoto"
-    return update_tmg_loading(container, progress, f"{etapa} · {label}")
-
 def clear_tmg_loading(container):
     try:
         if container is not None:
@@ -500,950 +487,14 @@ def finish_tmg_loading_and_clear(container, texto: str = "Carregamento concluíd
     if container is None:
         return
     try:
-        render_tmg_loading_bar(100, texto, container=container, auto_hide_seconds=max(0.8, float(hold_seconds or 0.45) + 0.75))
+        update_tmg_loading(container, 100, texto)
+        if hold_seconds and hold_seconds > 0:
+            time.sleep(float(hold_seconds))
     except Exception:
         pass
-
-def render_tmg_global_loading_overlay(
-    progress,
-    texto: str = "Carregando módulo...",
-    container=None,
-    auto_hide_seconds: float | None = None,
-):
-    try:
-        pct = max(0, min(100, int(float(progress))))
-    except Exception:
-        pct = 0
-    texto_seguro = html.escape(str(texto or "Carregando módulo..."))
-    status = "Carregamento concluído com sucesso." if pct >= 100 else texto_seguro
-    fill = "linear-gradient(90deg, #1f75ff 0%, #18c7ff 34%, #ff8c00 72%, #5ff2b1 100%)"
-    logo_html = _tmg_loading_logo_html()
-    autohide_class = " tmg-global-loading-autohide" if auto_hide_seconds is not None and pct >= 100 else ""
-    try:
-        autohide_delay = max(0.2, float(auto_hide_seconds or 0.65))
-    except Exception:
-        autohide_delay = 0.65
-    markup = f"""
-    <style>
-    .tmg-global-loading-overlay {{
-        position: fixed;
-        inset: 0;
-        z-index: 2147483200;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 24px;
-        background:
-            radial-gradient(circle at 50% 22%, rgba({THEME_PRIMARY_RGB}, .20), transparent 36%),
-            linear-gradient(135deg, rgba(2,14,36,.98), rgba(6,21,37,.97), rgba(13,43,69,.96));
-        backdrop-filter: blur(10px) saturate(145%);
-        -webkit-backdrop-filter: blur(10px) saturate(145%);
-        opacity: 1;
-        pointer-events: all;
-        transition: opacity .42s ease;
-    }}
-    .tmg-global-loading-card {{
-        width: min(480px, calc(100vw - 42px));
-        padding: 22px 24px;
-        border-radius: 20px;
-        border: 1px solid rgba(255,140,0,.42);
-        background:
-            linear-gradient(120deg, rgba(255,255,255,.14), transparent 30%),
-            radial-gradient(circle at top left, rgba({THEME_PRIMARY_RGB}, .24), transparent 42%),
-            linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.84), rgba({THEME_PRIMARY_RGB}, .20));
-        box-shadow:
-            0 22px 48px rgba(0,0,0,.54),
-            0 0 36px rgba(255,140,0,.20),
-            inset 0 1px 0 rgba(255,255,255,.24),
-            inset 0 -12px 22px rgba(2,14,36,.40);
-        color: #fff;
-        font-family: 'Segoe UI', Arial, sans-serif;
-        text-align: center;
-    }}
-    .tmg-global-loading-logo {{
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 52px;
-        margin-bottom: 12px;
-    }}
-    .tmg-global-loading-logo .tmg-load-logo-img {{
-        max-width: 170px;
-        max-height: 58px;
-        object-fit: contain;
-        filter: drop-shadow(0 8px 14px rgba(0,0,0,.48)) drop-shadow(0 0 18px rgba({THEME_PRIMARY_RGB},.42));
-    }}
-    .tmg-global-loading-logo .tmg-load-logo-fallback {{
-        color:#fff;
-        font-weight:950;
-        letter-spacing:4px;
-        font-size:1.25rem;
-        text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba({THEME_PRIMARY_RGB},.62);
-    }}
-    .tmg-global-loading-text {{
-        color:#ffffff;
-        font-size:.95rem;
-        font-weight:950;
-        letter-spacing:.45px;
-        text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 12px rgba({THEME_PRIMARY_RGB},.42);
-    }}
-    .tmg-global-loading-track {{
-        position:relative;
-        height:26px;
-        margin-top:15px;
-        border-radius:999px;
-        overflow:hidden;
-        border:1px solid rgba(255,140,0,.46);
-        background:linear-gradient(180deg,#020e24,#071a2c);
-        box-shadow:inset 0 3px 8px rgba(0,0,0,.70), 0 0 18px rgba({THEME_PRIMARY_RGB},.28);
-    }}
-    .tmg-global-loading-fill {{
-        width:{pct}%;
-        height:100%;
-        border-radius:999px;
-        background:{fill};
-        box-shadow:inset 0 1px 0 rgba(255,255,255,.46), 0 0 20px rgba({THEME_PRIMARY_RGB},.58);
-        transition:width .35s ease, background .35s ease;
-        position:relative;
-    }}
-    .tmg-global-loading-fill:after {{
-        content:"";
-        position:absolute;
-        inset:0;
-        background:linear-gradient(120deg, transparent 0%, rgba(255,255,255,.40) 45%, transparent 75%);
-        transform:translateX(-100%);
-        animation:tmgGlobalLoadingShine 1.25s ease-in-out infinite;
-    }}
-    .tmg-global-loading-percent {{
-        position:absolute;
-        inset:0;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        color:#fff;
-        font-weight:950;
-        font-size:.80rem;
-        text-shadow:0 1px 4px rgba(0,0,0,.86);
-    }}
-    .tmg-global-loading-status {{
-        margin-top:9px;
-        color:{'#5ff2b1' if pct >= 100 else '#dffbff'};
-        font-size:.78rem;
-        font-weight:850;
-        text-shadow:0 1px 0 rgba(0,0,0,.80);
-    }}
-    .tmg-global-loading-overlay.tmg-global-loading-autohide {{
-        animation:tmgGlobalLoadingFade .42s ease forwards;
-        animation-delay:{autohide_delay:.2f}s;
-    }}
-    @keyframes tmgGlobalLoadingShine {{
-        0% {{ transform:translateX(-100%); }}
-        100% {{ transform:translateX(180%); }}
-    }}
-    @keyframes tmgGlobalLoadingFade {{
-        to {{ opacity:0; visibility:hidden; }}
-    }}
-    </style>
-    <div class="tmg-global-loading-overlay{autohide_class}">
-        <div class="tmg-global-loading-card">
-            <div class="tmg-global-loading-logo">{logo_html}</div>
-            <div class="tmg-global-loading-text">{texto_seguro}</div>
-            <div class="tmg-global-loading-track">
-                <div class="tmg-global-loading-fill"></div>
-                <div class="tmg-global-loading-percent">{pct}%</div>
-            </div>
-            <div class="tmg-global-loading-status">{html.escape(status)}</div>
-        </div>
-    </div>
-    """
-    target = container if container is not None else st
-    target.markdown(markup, unsafe_allow_html=True)
-    return container
-
-def finish_tmg_global_loading_overlay(container, texto: str = "Carregamento concluído com sucesso.", hold_seconds: float = 0.35):
-    if container is None:
-        return
-    try:
-        render_tmg_global_loading_overlay(100, texto, container=container, auto_hide_seconds=max(0.35, float(hold_seconds or 0.35)))
-    except Exception:
-        pass
-
-def _render_fixed_ortho_viewer_frame(
-    state: str = "empty",
-    progress=0,
-    titulo: str = "Visualizador de Ortofoto",
-    mensagem: str = "Nenhuma ortofoto carregada",
-    detalhe: str = "PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW",
-    icone: str = "🗺️",
-    height: int = 720,
-    container=None,
-    modo: str = "",
-    auto_hide_seconds: float | None = None,
-):
-    try:
-        pct = max(0, min(100, int(float(progress))))
-    except Exception:
-        pct = 0
-    try:
-        frame_height = max(360, int(height or 720))
-    except Exception:
-        frame_height = 720
-    state_key = str(state or "empty").strip().lower()
-    titulo_seguro = html.escape(str(titulo or "Visualizador de Ortofoto"))
-    mensagem_segura = html.escape(str(mensagem or "Nenhuma ortofoto carregada"))
-    detalhe_seguro = html.escape(str(detalhe or ""))
-    icone_seguro = html.escape(str(icone or "🗺️"))
-    status = "Ortofoto pronta para exibição." if state_key == "loading" and pct >= 100 else mensagem_segura
-    logo_html = _tmg_loading_logo_html()
-    autohide_class = " tmg-fixed-ortho-viewer-autohide" if state_key == "loading" and auto_hide_seconds is not None and pct >= 100 else ""
-    try:
-        autohide_delay = max(0.25, float(auto_hide_seconds or 0.65))
-    except Exception:
-        autohide_delay = 0.65
-    if state_key == "loading":
-        center_html = f"""
-            <div class="tmg-fixed-ortho-loading-card">
-                <div class="tmg-fixed-ortho-logo">{logo_html}</div>
-                <div class="tmg-fixed-ortho-message">{mensagem_segura}</div>
-                <div class="tmg-fixed-ortho-detail">{detalhe_seguro}</div>
-                <div class="tmg-fixed-ortho-track">
-                    <div class="tmg-fixed-ortho-fill"></div>
-                    <div class="tmg-fixed-ortho-percent">{pct}%</div>
-                </div>
-                <div class="tmg-fixed-ortho-status">{html.escape(status)}</div>
-            </div>
-        """
-    else:
-        status_class = " tmg-fixed-ortho-card-error" if state_key == "error" else ""
-        center_html = f"""
-            <div class="tmg-fixed-ortho-empty-card{status_class}">
-                <div class="tmg-fixed-ortho-empty-icon">{icone_seguro}</div>
-                <div class="tmg-fixed-ortho-empty-message">{mensagem_segura}</div>
-                <div class="tmg-fixed-ortho-empty-detail">{detalhe_seguro}</div>
-            </div>
-        """
-    center_html = textwrap.indent(textwrap.dedent(center_html).strip(), "            ")
-    markup = textwrap.dedent(f"""
-    <style>
-    .tmg-fixed-ortho-viewer-frame {{
-        width:100%;
-        height:{frame_height}px;
-        min-height:{frame_height}px;
-        margin:10px 0 16px 0;
-        border-radius:18px;
-        border:1px solid rgba(0,212,255,.42);
-        background:
-            linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
-            radial-gradient(circle at 20% 10%, rgba(0,212,255,.13), transparent 32%),
-            linear-gradient(145deg,#020e24,#061525,#0d2b45);
-        background-size:34px 34px,34px 34px,100% 100%,100% 100%;
-        box-shadow:
-            0 18px 42px rgba(0,0,0,.46),
-            0 0 28px rgba(0,212,255,.18),
-            inset 0 1px 0 rgba(255,255,255,.10),
-            inset 0 0 0 2px rgba(0,212,255,.18);
-        overflow:hidden;
-        position:relative;
-        font-family:'Segoe UI', Arial, sans-serif;
-        color:#ffffff;
-    }}
-    .tmg-fixed-ortho-toolbar {{
-        position:absolute;
-        top:12px;
-        left:12px;
-        right:12px;
-        z-index:3;
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        gap:12px;
-        padding:0;
-        pointer-events:none;
-    }}
-    .tmg-fixed-ortho-title {{
-        color:#ffffff;
-        font-size:.78rem;
-        font-weight:950;
-        letter-spacing:.4px;
-        padding:8px 10px;
-        border-radius:10px;
-        border:1px solid rgba(0,212,255,.28);
-        background:rgba(3,18,38,.72);
-        box-shadow:0 8px 20px rgba(0,0,0,.32);
-        text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 14px rgba(0,212,255,.48);
-    }}
-    .tmg-fixed-ortho-mode {{
-        color:#d9fbff;
-        font-size:.72rem;
-        font-weight:800;
-        padding:5px 10px;
-        border-radius:999px;
-        border:1px solid rgba(0,212,255,.34);
-        background:rgba(0,212,255,.07);
-    }}
-    .tmg-fixed-ortho-body {{
-        height:100%;
-        min-height:100%;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        padding:26px;
-        background:
-            radial-gradient(circle at center, rgba(0,212,255,.10), transparent 36%),
-            linear-gradient(45deg, rgba(255,255,255,.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.025) 75%),
-            linear-gradient(45deg, rgba(255,255,255,.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.025) 75%);
-        background-size:34px 34px;
-        background-position:0 0,17px 17px;
-    }}
-    .tmg-fixed-ortho-loading-card,
-    .tmg-fixed-ortho-empty-card {{
-        width:min(500px, 94%);
-        padding:24px 26px 22px 26px;
-        border-radius:20px;
-        border:1px solid rgba(0,212,255,.42);
-        background:
-            linear-gradient(120deg, rgba(255,255,255,.12), transparent 34%),
-            radial-gradient(circle at top left, rgba(0,212,255,.22), transparent 44%),
-            linear-gradient(145deg, rgba(2,14,36,.94), rgba(12,57,98,.84), rgba(0,212,255,.16));
-        box-shadow:
-            0 22px 48px rgba(0,0,0,.52),
-            0 0 34px rgba(0,212,255,.30),
-            inset 0 1px 0 rgba(255,255,255,.22),
-            inset 0 -9px 18px rgba(2,14,36,.46);
-        text-align:center;
-        transition:opacity .35s ease, transform .35s ease;
-    }}
-    .tmg-fixed-ortho-card-error {{
-        border-color:rgba(255,96,96,.55);
-        box-shadow:0 22px 48px rgba(0,0,0,.52), 0 0 32px rgba(255,96,96,.22), inset 0 1px 0 rgba(255,255,255,.18);
-    }}
-    .tmg-fixed-ortho-logo {{
-        display:flex;
-        justify-content:center;
-        align-items:center;
-        min-height:54px;
-        margin-bottom:12px;
-        animation:tmgOrthoLogoPulse 1.8s ease-in-out infinite;
-    }}
-    .tmg-fixed-ortho-logo .tmg-load-logo-img {{
-        max-width:170px;
-        max-height:58px;
-        object-fit:contain;
-        filter:drop-shadow(0 8px 14px rgba(0,0,0,.50)) drop-shadow(0 0 18px rgba(0,212,255,.42));
-    }}
-    .tmg-fixed-ortho-logo .tmg-load-logo-fallback {{
-        color:#fff;
-        font-weight:950;
-        letter-spacing:4px;
-        font-size:1.25rem;
-        text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba(0,212,255,.60);
-    }}
-    .tmg-fixed-ortho-message,
-    .tmg-fixed-ortho-empty-message {{
-        color:#ffffff;
-        font-size:.96rem;
-        font-weight:950;
-        letter-spacing:.35px;
-        text-transform:uppercase;
-        text-shadow:0 1px 0 rgba(0,0,0,.86);
-    }}
-    .tmg-fixed-ortho-detail,
-    .tmg-fixed-ortho-empty-detail {{
-        min-height:20px;
-        margin-top:7px;
-        color:#d9fbff;
-        font-size:.77rem;
-        font-weight:800;
-    }}
-    .tmg-fixed-ortho-empty-icon {{
-        font-size:2.9rem;
-        margin-bottom:10px;
-        filter:drop-shadow(0 0 16px rgba(0,212,255,.35));
-    }}
-    .tmg-fixed-ortho-track {{
-        position:relative;
-        height:28px;
-        margin-top:17px;
-        overflow:hidden;
-        border-radius:999px;
-        border:1px solid rgba(255,255,255,.14);
-        background:linear-gradient(180deg,#04101f,#0b2540);
-        box-shadow:inset 0 3px 8px rgba(0,0,0,.58), 0 0 16px rgba(0,212,255,.16);
-    }}
-    .tmg-fixed-ortho-fill {{
-        width:{pct}%;
-        height:100%;
-        border-radius:999px;
-        background:linear-gradient(90deg,#42a5f5,#00d4ff,#5ff2b1);
-        box-shadow:0 0 18px rgba(0,212,255,.55), inset 0 1px 0 rgba(255,255,255,.36);
-        transition:width .35s ease;
-        position:relative;
-    }}
-    .tmg-fixed-ortho-fill:after {{
-        content:"";
-        position:absolute;
-        inset:0;
-        background:linear-gradient(120deg, transparent 0%, rgba(255,255,255,.38) 45%, transparent 75%);
-        transform:translateX(-100%);
-        animation:tmgOrthoLoadingShine 1.25s ease-in-out infinite;
-    }}
-    .tmg-fixed-ortho-percent {{
-        position:absolute;
-        inset:0;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        color:#ffffff;
-        font-weight:950;
-        font-size:.82rem;
-        text-shadow:0 1px 4px rgba(0,0,0,.88);
-    }}
-    .tmg-fixed-ortho-status {{
-        margin-top:10px;
-        color:{'#5ff2b1' if pct >= 100 else '#d9fbff'};
-        font-size:.80rem;
-        font-weight:900;
-        text-shadow:0 1px 0 rgba(0,0,0,.82);
-    }}
-    .tmg-fixed-ortho-viewer-frame.tmg-fixed-ortho-viewer-autohide {{
-        animation:tmgOrthoLoadingFade .42s ease forwards;
-        animation-delay:{autohide_delay:.2f}s;
-    }}
-    @keyframes tmgOrthoLoadingShine {{
-        0% {{ transform:translateX(-100%); }}
-        100% {{ transform:translateX(180%); }}
-    }}
-    @keyframes tmgOrthoLogoPulse {{
-        0%, 100% {{ transform:scale(1); opacity:.94; }}
-        50% {{ transform:scale(1.025); opacity:1; }}
-    }}
-    @keyframes tmgOrthoLoadingFade {{
-        to {{ opacity:0; max-height:0; min-height:0; margin:0; visibility:hidden; }}
-    }}
-    </style>
-    <div class="tmg-fixed-ortho-viewer-frame FixedOrthoViewerFrame{autohide_class}" data-state="{html.escape(state_key)}">
-        <div class="tmg-fixed-ortho-toolbar">
-            <div class="tmg-fixed-ortho-title">{titulo_seguro}</div>
-        </div>
-        <div class="tmg-fixed-ortho-body">
-{center_html}
-        </div>
-    </div>
-    """).strip()
-    target = container if container is not None else st
-    try:
-        target.html(markup)
-    except Exception:
-        target.markdown(markup, unsafe_allow_html=True)
-    return container
-
-def render_tmg_ortho_viewer_loading(
-    progress,
-    texto: str = "Carregando ortofoto...",
-    container=None,
-    modo: str = "Visualizador Streamlit",
-    detalhe: str = "",
-    auto_hide_seconds: float | None = None,
-    height: int = 720,
-    titulo: str = "Visualizador de Ortofoto",
-):
-    return _render_fixed_ortho_viewer_frame(
-        state="loading",
-        progress=progress,
-        titulo=titulo,
-        mensagem=texto,
-        detalhe=detalhe or "Preparando visualização...",
-        height=height,
-        container=container,
-        modo=modo,
-        auto_hide_seconds=auto_hide_seconds,
-    )
-
-def finish_tmg_ortho_viewer_loading(
-    container,
-    texto: str = "Ortofoto carregada com sucesso.",
-    modo: str = "Visualizador Streamlit",
-    hold_seconds: float = 0.25,
-    height: int = 720,
-    titulo: str = "Visualizador de Ortofoto",
-):
-    if container is None:
-        return
-    try:
-        render_tmg_ortho_viewer_loading(
-            100,
-            texto,
-            container=container,
-            modo=modo,
-            detalhe="Abrindo imagem no visualizador...",
-            auto_hide_seconds=None,
-            height=height,
-            titulo=titulo,
-        )
-    except Exception:
-        pass
-
-def render_tmg_ortho_empty_frame(
-    titulo: str = "Visualizador de Ortofoto",
-    mensagem: str = "Nenhuma ortofoto carregada",
-    detalhe: str = "PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW",
-    icone: str = "🗺️",
-    height: int = 706,
-    container=None,
-):
-    return _render_fixed_ortho_viewer_frame(
-        state="empty",
-        titulo=titulo,
-        mensagem=mensagem,
-        detalhe=detalhe,
-        icone=icone,
-        height=height,
-        container=container,
-        modo=_tmg_viewer_mode_label(),
-    )
-
-def render_tmg_ortho_error_frame(
-    titulo: str = "Visualizador de Ortofoto",
-    erro: str = "Não foi possível carregar a ortofoto.",
-    detalhe: str = "Tente importar outro arquivo.",
-    height: int = 706,
-    container=None,
-) -> None:
-    _render_fixed_ortho_viewer_frame(
-        state="error",
-        titulo=titulo,
-        mensagem=erro,
-        detalhe=detalhe,
-        icone="⚠️",
-        height=height,
-        container=container,
-        modo=_tmg_viewer_mode_label(),
-    )
-
-def _tmg_ortho_viewer_theme_patch_css() -> str:
-    return """
-<style id="tmg-ortho-viewer-theme-patch">
-:root {
-    --tmg-view-bg:#061525;
-    --tmg-view-bg-2:#0d2b45;
-    --tmg-view-cyan:#00d4ff;
-    --tmg-view-blue:#42a5f5;
-    --tmg-view-green:#5ff2b1;
-    --tmg-view-text:#ffffff;
-    --tmg-view-muted:#d9fbff;
-    --tmg-view-glass:rgba(3,18,38,.84);
-    --tmg-view-panel:linear-gradient(145deg, rgba(2,14,36,.94), rgba(12,57,98,.86), rgba(0,212,255,.15));
-}
-html, body {
-    background:
-        radial-gradient(circle at 20% 10%, rgba(0,212,255,.14), transparent 34%),
-        linear-gradient(145deg,#020e24,#061525,#0d2b45) !important;
-    color:var(--tmg-view-text) !important;
-}
-#vc, #wrap, #viewer, #map, #mapWrap, #canvasWrap, #orthoViewer,
-.viewer, .viewer-wrap, .viewer-shell, .canvas-wrap, .map-wrap, .stage, .viewport {
-    background:
-        linear-gradient(rgba(255,255,255,.028) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,.028) 1px, transparent 1px),
-        radial-gradient(circle at center, rgba(0,212,255,.10), transparent 38%),
-        linear-gradient(145deg,#020e24,#061525,#0d2b45) !important;
-    background-size:34px 34px,34px 34px,100% 100%,100% 100% !important;
-    border-color:rgba(0,212,255,.46) !important;
-    box-shadow:
-        0 18px 42px rgba(0,0,0,.46),
-        0 0 28px rgba(0,212,255,.20),
-        inset 0 1px 0 rgba(255,255,255,.10),
-        inset 0 0 0 1px rgba(0,212,255,.18) !important;
-}
-.toolbar, .grid-panel, .panel, .side-panel, .control-panel, .controls,
-.assessment-panel, .count-panel, .legend, .status-panel, #annotPopup,
-.zoom-badge, .crosshair, .hint, .info-panel, .summary-panel {
-    color:var(--tmg-view-text) !important;
-    border-color:rgba(0,212,255,.40) !important;
-    background:var(--tmg-view-panel) !important;
-    box-shadow:
-        0 12px 28px rgba(0,0,0,.42),
-        0 0 22px rgba(0,212,255,.18),
-        inset 0 1px 0 rgba(255,255,255,.13) !important;
-}
-.toolbar {
-    background:transparent !important;
-    border-color:transparent !important;
-    box-shadow:none !important;
-}
-button, .tb-btn, .grid-btn, .btn, .tool-btn, #btnExport,
-input[type="button"], input[type="submit"] {
-    color:#ffffff !important;
-    border-color:rgba(0,212,255,.52) !important;
-    background:
-        linear-gradient(145deg, rgba(2,14,36,.96), rgba(12,57,98,.90), rgba(0,212,255,.22)) !important;
-    box-shadow:
-        0 8px 18px rgba(0,0,0,.38),
-        0 0 18px rgba(0,212,255,.20),
-        inset 0 1px 0 rgba(255,255,255,.18) !important;
-    text-shadow:0 1px 0 rgba(0,0,0,.82), 0 0 10px rgba(0,212,255,.45) !important;
-}
-button:hover, .tb-btn:hover, .grid-btn:hover, .btn:hover, .tool-btn:hover, #btnExport:hover,
-input[type="button"]:hover, input[type="submit"]:hover {
-    border-color:rgba(95,242,177,.72) !important;
-    box-shadow:
-        0 10px 22px rgba(0,0,0,.42),
-        0 0 24px rgba(0,212,255,.36),
-        inset 0 1px 0 rgba(255,255,255,.22) !important;
-    transform:translateY(-1px);
-}
-button:active, .tb-btn:active, .grid-btn:active, .btn:active, .tool-btn:active {
-    transform:translateY(1px) scale(.99);
-}
-.active, .sel, .selected, button.active, .grid-btn.active, .grid-btn.annot.active, .quick-active {
-    color:#ffffff !important;
-    border-color:rgba(95,242,177,.80) !important;
-    background:
-        linear-gradient(145deg, rgba(0,94,128,.96), rgba(0,212,255,.34), rgba(95,242,177,.24)) !important;
-    box-shadow:
-        0 0 26px rgba(0,212,255,.35),
-        inset 0 1px 0 rgba(255,255,255,.24) !important;
-}
-input, select, textarea {
-    color:#ffffff !important;
-    border-color:rgba(0,212,255,.42) !important;
-    background:rgba(2,14,36,.78) !important;
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.10), 0 0 12px rgba(0,212,255,.12) !important;
-}
-input:focus, select:focus, textarea:focus {
-    outline:none !important;
-    border-color:rgba(95,242,177,.72) !important;
-    box-shadow:0 0 18px rgba(0,212,255,.30), inset 0 1px 0 rgba(255,255,255,.16) !important;
-}
-label, h1, h2, h3, h4, .title, .panel-title, .assessment-panel-title,
-.grid-panel label, .zoom-badge {
-    color:#ffffff !important;
-    text-shadow:0 1px 0 rgba(0,0,0,.86), 0 0 14px rgba(0,212,255,.48) !important;
-}
-.crosshair, .hint, .status, .grid-status, .grid-all-status,
-.assessment-empty, .small, .muted {
-    color:var(--tmg-view-muted) !important;
-}
-table, th, td {
-    color:#ffffff !important;
-    border-color:rgba(0,212,255,.24) !important;
-    background-color:rgba(2,14,36,.72) !important;
-}
-th {
-    background:linear-gradient(145deg, rgba(0,70,108,.92), rgba(0,212,255,.18)) !important;
-    color:#ffffff !important;
-    text-shadow:0 1px 0 rgba(0,0,0,.82) !important;
-}
-canvas, img {
-    image-rendering:auto;
-}
-::-webkit-scrollbar { width:10px; height:10px; }
-::-webkit-scrollbar-track { background:#04101f; border-radius:999px; }
-::-webkit-scrollbar-thumb {
-    background:linear-gradient(180deg,#42a5f5,#00d4ff,#5ff2b1);
-    border-radius:999px;
-    border:2px solid #04101f;
-}
-</style>
-"""
-
-def _inject_tmg_ortho_viewer_theme(viewer_html: str) -> str:
-    markup = str(viewer_html or "")
-    if "tmg-ortho-viewer-theme-patch" in markup:
-        return markup
-    patch = _tmg_ortho_viewer_theme_patch_css()
-    if re.search(r"</head\s*>", markup, flags=re.IGNORECASE):
-        return re.sub(r"</head\s*>", patch + "\n</head>", markup, count=1, flags=re.IGNORECASE)
-    return patch + "\n" + markup
-
-def _wrap_tmg_ortho_viewer_component_html(viewer_html: str, height: int = 720, scrolling: bool = False) -> str:
-    try:
-        frame_height = max(360, int(height or 720))
-    except Exception:
-        frame_height = 720
-    logo_html = _tmg_loading_logo_html()
-    patched_viewer_html = str(viewer_html or "")
-    patched_viewer_html = patched_viewer_html.replace(
-        "const parentDoc = window.parent && window.parent.document;",
-        "const parentDoc = (window.parent && window.parent.parent && window.parent.parent.document) || (window.parent && window.parent.document);"
-    )
-    patched_viewer_html = patched_viewer_html.replace(
-        "Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype, 'value').set",
-        "Object.getOwnPropertyDescriptor((parentDoc && parentDoc.defaultView ? parentDoc.defaultView : window.parent).HTMLInputElement.prototype, 'value').set"
-    )
-    patched_viewer_html = patched_viewer_html.replace(
-        "const parentWin = window.parent || window;",
-        "const parentWin = (window.parent && window.parent.parent) || window.parent || window;"
-    )
-    patched_viewer_html = _inject_tmg_ortho_viewer_theme(patched_viewer_html)
-    srcdoc_json = json.dumps(patched_viewer_html).replace("</", "<\\/")
-    iframe_scroll = "yes" if scrolling else "no"
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-* {{ box-sizing:border-box; }}
-html, body {{
-    width:100%;
-    height:{frame_height}px;
-    margin:0;
-    padding:0;
-    overflow:hidden;
-    background:#061525;
-    font-family:'Segoe UI', Arial, sans-serif;
-}}
-.tmg-component-fixed-shell {{
-    width:100%;
-    height:{frame_height}px;
-    min-height:{frame_height}px;
-    position:relative;
-    overflow:hidden;
-    border-radius:18px;
-    border:1px solid rgba(0,212,255,.48);
-    background:
-        linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
-        radial-gradient(circle at 20% 10%, rgba(0,212,255,.14), transparent 32%),
-        linear-gradient(145deg,#020e24,#061525,#0d2b45);
-    background-size:34px 34px,34px 34px,100% 100%,100% 100%;
-    box-shadow:
-        0 18px 42px rgba(0,0,0,.46),
-        0 0 28px rgba(0,212,255,.18),
-        inset 0 1px 0 rgba(255,255,255,.10),
-        inset 0 0 0 2px rgba(0,212,255,.18);
-}}
-.tmg-component-viewer-frame {{
-    width:100%;
-    height:100%;
-    border:0;
-    display:block;
-    opacity:0;
-    transition:opacity .28s ease;
-    background:transparent;
-}}
-.tmg-component-fixed-shell.ready .tmg-component-viewer-frame {{
-    opacity:1;
-}}
-.tmg-component-overlay {{
-    position:absolute;
-    inset:0;
-    z-index:5;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    padding:26px;
-    background:
-        radial-gradient(circle at center, rgba(0,212,255,.14), transparent 38%),
-        linear-gradient(45deg, rgba(255,255,255,.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.025) 75%),
-        linear-gradient(45deg, rgba(255,255,255,.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.025) 75%);
-    background-size:34px 34px;
-    background-position:0 0,17px 17px;
-    transition:opacity .32s ease, visibility .32s ease;
-}}
-.tmg-component-fixed-shell.ready .tmg-component-overlay {{
-    opacity:0;
-    visibility:hidden;
-    pointer-events:none;
-}}
-.tmg-component-card {{
-    width:min(520px, 94%);
-    padding:24px 26px 22px 26px;
-    border-radius:20px;
-    border:1px solid rgba(0,212,255,.46);
-    background:
-        linear-gradient(120deg, rgba(255,255,255,.12), transparent 34%),
-        radial-gradient(circle at top left, rgba(0,212,255,.24), transparent 44%),
-        linear-gradient(145deg, rgba(2,14,36,.94), rgba(12,57,98,.84), rgba(0,212,255,.16));
-    box-shadow:
-        0 22px 48px rgba(0,0,0,.52),
-        0 0 34px rgba(0,212,255,.30),
-        inset 0 1px 0 rgba(255,255,255,.22),
-        inset 0 -9px 18px rgba(2,14,36,.46);
-    text-align:center;
-    color:#fff;
-}}
-.tmg-component-logo {{
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    min-height:54px;
-    margin-bottom:12px;
-    animation:tmgComponentLogoPulse 1.8s ease-in-out infinite;
-}}
-.tmg-component-logo .tmg-load-logo-img {{
-    max-width:170px;
-    max-height:58px;
-    object-fit:contain;
-    filter:drop-shadow(0 8px 14px rgba(0,0,0,.50)) drop-shadow(0 0 18px rgba(0,212,255,.42));
-}}
-.tmg-component-logo .tmg-load-logo-fallback {{
-    color:#fff;
-    font-weight:950;
-    letter-spacing:4px;
-    font-size:1.25rem;
-    text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba(0,212,255,.60);
-}}
-.tmg-component-message {{
-    color:#ffffff;
-    font-size:.96rem;
-    font-weight:950;
-    letter-spacing:.35px;
-    text-transform:uppercase;
-    text-shadow:0 1px 0 rgba(0,0,0,.86);
-}}
-.tmg-component-detail {{
-    margin-top:7px;
-    color:#d9fbff;
-    font-size:.78rem;
-    font-weight:800;
-}}
-.tmg-component-track {{
-    position:relative;
-    height:28px;
-    margin-top:17px;
-    overflow:hidden;
-    border-radius:999px;
-    border:1px solid rgba(255,255,255,.14);
-    background:linear-gradient(180deg,#04101f,#0b2540);
-    box-shadow:inset 0 3px 8px rgba(0,0,0,.58), 0 0 16px rgba(0,212,255,.16);
-}}
-.tmg-component-fill {{
-    width:0%;
-    height:100%;
-    border-radius:999px;
-    background:linear-gradient(90deg,#42a5f5,#00d4ff,#5ff2b1);
-    box-shadow:0 0 18px rgba(0,212,255,.55), inset 0 1px 0 rgba(255,255,255,.36);
-    transition:width .22s ease;
-    position:relative;
-}}
-.tmg-component-fill:after {{
-    content:"";
-    position:absolute;
-    inset:0;
-    background:linear-gradient(120deg, transparent 0%, rgba(255,255,255,.38) 45%, transparent 75%);
-    transform:translateX(-100%);
-    animation:tmgComponentShine 1.25s ease-in-out infinite;
-}}
-.tmg-component-percent {{
-    position:absolute;
-    inset:0;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    color:#ffffff;
-    font-weight:950;
-    font-size:.82rem;
-    text-shadow:0 1px 4px rgba(0,0,0,.88);
-}}
-.tmg-component-status {{
-    margin-top:10px;
-    color:#d9fbff;
-    font-size:.80rem;
-    font-weight:900;
-    text-shadow:0 1px 0 rgba(0,0,0,.82);
-}}
-@keyframes tmgComponentShine {{
-    0% {{ transform:translateX(-100%); }}
-    100% {{ transform:translateX(180%); }}
-}}
-@keyframes tmgComponentLogoPulse {{
-    0%, 100% {{ transform:scale(1); opacity:.94; }}
-    50% {{ transform:scale(1.025); opacity:1; }}
-}}
-</style>
-</head>
-<body>
-<div id="tmgShell" class="tmg-component-fixed-shell">
-    <iframe id="tmgInnerViewer" class="tmg-component-viewer-frame" scrolling="{iframe_scroll}" title="Visualizador TMG"></iframe>
-    <div id="tmgOverlay" class="tmg-component-overlay">
-        <div class="tmg-component-card">
-            <div class="tmg-component-logo">{logo_html}</div>
-            <div class="tmg-component-message">Preparando visualizador...</div>
-            <div class="tmg-component-detail" id="tmgComponentStatus">Montando ortofoto na moldura fixa</div>
-            <div class="tmg-component-track">
-                <div class="tmg-component-fill" id="tmgComponentFill"></div>
-                <div class="tmg-component-percent" id="tmgComponentPercent">0%</div>
-            </div>
-            <div class="tmg-component-status">Aguarde até a ortofoto aparecer.</div>
-        </div>
-    </div>
-</div>
-<script>
-(function() {{
-    const shell = document.getElementById('tmgShell');
-    const inner = document.getElementById('tmgInnerViewer');
-    const fill = document.getElementById('tmgComponentFill');
-    const percent = document.getElementById('tmgComponentPercent');
-    const status = document.getElementById('tmgComponentStatus');
-    let progress = 3;
-    let done = false;
-    function setProgress(value, text) {{
-        progress = Math.max(progress, Math.min(100, Math.round(value || 0)));
-        fill.style.width = progress + '%';
-        percent.textContent = progress + '%';
-        if (text) status.textContent = text;
-    }}
-    const timer = window.setInterval(function() {{
-        if (done) return;
-        const next = progress < 55 ? progress + 7 : (progress < 86 ? progress + 3 : progress + 1);
-        setProgress(Math.min(next, 94), 'Renderizando ortofoto e ferramentas...');
-    }}, 180);
-    function finish() {{
-        if (done) return;
-        done = true;
-        window.clearInterval(timer);
-        setProgress(100, 'Visualizador pronto.');
-        window.setTimeout(function() {{
-            shell.classList.add('ready');
-        }}, 260);
-    }}
-    inner.addEventListener('load', function() {{
-        setProgress(96, 'Imagem carregada. Finalizando desenho...');
-        window.setTimeout(finish, 520);
-    }});
-    inner.srcdoc = {srcdoc_json};
-    setProgress(12, 'Abrindo visualizador...');
-    window.setTimeout(finish, 18000);
-}})();
-</script>
-</body>
-</html>"""
-
-def render_tmg_ortho_viewer_component(viewer_slot, viewer_html: str, height: int = 720, scrolling: bool = False):
-    target = viewer_slot if viewer_slot is not None else st.empty()
-    wrapped_html = _wrap_tmg_ortho_viewer_component_html(viewer_html, height=height, scrolling=scrolling)
-    with target.container():
-        components.html(wrapped_html, height=height, scrolling=False)
-    return target
-
-def _set_tmg_ortho_loading_state(
-    filename: str = "",
-    progress: int = 0,
-    etapa: str = "Aguardando ortofoto...",
-    status: str = "idle",
-    error: str = "",
-) -> None:
-    try:
-        pct = max(0, min(100, int(float(progress))))
-    except Exception:
-        pct = 0
-    try:
-        st.session_state["_tmg_ortho_viewer_state"] = {
-            "filename": str(filename or ""),
-            "progress": pct,
-            "etapa": str(etapa or ""),
-            "status": str(status or "idle"),
-            "error": str(error or ""),
-            "updated_at": time.time(),
-        }
-    except Exception:
-        pass
+    clear_tmg_loading(container)
 
 TMG_PAGE_LABELS = {
-    "Login": "Login",
-    "Home": "Tela inicial",
     "Checklist": "Notas Rápidas",
     "Grid": "Marcador de Grid",
     "AnaliseMarcacaoGrid": "Análise de Marcação de Grid",
@@ -1451,6 +502,8 @@ TMG_PAGE_LABELS = {
     "Bases": "Banco de Dados Sistema",
     "Sync": "Sincronizar Dados",
     "Ortomosaicos": "Gerar Ortomosaicos",
+    "MarcadorKML": "Marcador de KML",
+    "CriadorMapa": "Criador de Mapa",
     "Visualizador": "Análises de Fenotipagem",
     "VoosDirecionados": "Processos de Voos para Análise",
     "Parceiros": "Parceiros",
@@ -1471,36 +524,13 @@ def _mark_tmg_page_transition(target_page: str) -> None:
         "started_at": time.time(),
     }
 
-def _mark_tmg_visualizador_transition(target_sub: str) -> None:
-    current_sub = st.session_state.get("visualizador_sub")
-    if not target_sub or target_sub == current_sub:
-        return
-    st.session_state["_tmg_visualizador_transition"] = {
-        "from": str(current_sub or ""),
-        "to": str(target_sub),
-        "started_at": time.time(),
-    }
-
 def render_tmg_page_transition_loading(container=None):
     transition = st.session_state.get("_tmg_page_transition")
     if not isinstance(transition, dict) or not transition.get("to"):
         return None
     target = container if container is not None else st.empty()
     label = _tmg_page_label(transition.get("to"))
-    elapsed = max(0.0, time.time() - float(transition.get("started_at") or time.time()))
-    progress = min(96, int(elapsed * 520))
-    render_tmg_global_loading_overlay(progress, f"Carregando módulo: {label}", container=target)
-    return target
-
-def render_tmg_visualizador_transition_loading(container=None):
-    transition = st.session_state.get("_tmg_visualizador_transition")
-    if not isinstance(transition, dict) or not transition.get("to"):
-        return None
-    target = container if container is not None else st.empty()
-    label = str(transition.get("to") or "visualizador")
-    elapsed = max(0.0, time.time() - float(transition.get("started_at") or time.time()))
-    progress = min(96, int(elapsed * 520))
-    render_tmg_global_loading_overlay(progress, f"Preparando visualizador: {label}", container=target)
+    render_tmg_loading_bar(18, f"Carregando janela: {label}", container=target)
     return target
 
 def clear_tmg_page_transition_loading(container=None) -> None:
@@ -1508,18 +538,9 @@ def clear_tmg_page_transition_loading(container=None) -> None:
         return
     try:
         if container is not None:
-            finish_tmg_global_loading_overlay(container, "Módulo carregado com sucesso.", hold_seconds=0.25)
+            finish_tmg_loading_and_clear(container, "Janela carregada com sucesso.", hold_seconds=0.03)
     finally:
         st.session_state.pop("_tmg_page_transition", None)
-
-def clear_tmg_visualizador_transition_loading(container=None) -> None:
-    if "_tmg_visualizador_transition" not in st.session_state:
-        return
-    try:
-        if container is not None:
-            finish_tmg_global_loading_overlay(container, "Visualizador carregado com sucesso.", hold_seconds=0.25)
-    finally:
-        st.session_state.pop("_tmg_visualizador_transition", None)
 
 def app_rerun():
     if hasattr(st, "rerun"):
@@ -1564,95 +585,30 @@ def _int_setting(name: str, default: int, min_value: int, max_value: int) -> int
         value = int(default)
     return max(min_value, min(max_value, value))
 
-def _setting_is_configured(name: str) -> bool:
-    try:
-        return bool(os.getenv(name, "").strip() or _streamlit_secret(name).strip())
-    except Exception:
-        return bool(os.getenv(name, "").strip())
-
 def _preview_max_dim() -> int:
-    # Perfil padrao: alta qualidade com abertura mais rapida no navegador.
+    # Ajuste solicitado: visualização de ortofotos com mais qualidade no Streamlit.
     # Pode ser configurado por variável/secret TMG_PREVIEW_MAX_DIM.
     # Mantém compatibilidade com Streamlit Cloud evitando carregar a imagem original inteira no navegador.
-    return _int_setting("TMG_PREVIEW_MAX_DIM", 4200, 2048, 14000)
+    return _int_setting("TMG_PREVIEW_MAX_DIM", 9000, 2048, 18000)
 
 def _preview_jpeg_quality() -> int:
-    # Qualidade alta e mais leve para reduzir tempo de conversao/renderizacao.
-    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 87, 82, 98)
+    # Qualidade alta para preservar detalhes de TIF/GeoTIFF/RGB no visualizador.
+    return _int_setting("TMG_PREVIEW_JPEG_QUALITY", 97, 82, 99)
 
 def _preview_min_jpeg_quality() -> int:
     # Piso de qualidade para evitar perda visual agressiva nas ortofotos grandes.
-    return _int_setting("TMG_PREVIEW_MIN_JPEG_QUALITY", 82, 70, 98)
+    return _int_setting("TMG_PREVIEW_MIN_JPEG_QUALITY", 92, 70, 98)
 
 def _preview_max_payload_mb() -> int:
-    # Limite do payload enviado ao navegador; a ortofoto original permanece intacta.
-    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 7, 5, 160)
+    # Limite alto para preservar mais detalhes no preview sem alterar o arquivo original.
+    return _int_setting("TMG_PREVIEW_MAX_PAYLOAD_MB", 64, 8, 240)
 
 def _preview_min_dim() -> int:
-    return _int_setting("TMG_PREVIEW_MIN_DIM", 2400, 1200, 8192)
-
-def _adaptive_ortho_preview_params(
-    file_bytes: bytes | None,
-    filename: str = "",
-    viewer_runtime: dict | None = None,
-) -> tuple[int, int, int, int, int]:
-    """Ajusta o preview por tamanho de arquivo para abrir mais rapido sem alterar a ortofoto original."""
-    max_dim = _preview_max_dim()
-    quality = _preview_jpeg_quality()
-    min_quality = _preview_min_jpeg_quality()
-    payload_mb = _preview_max_payload_mb()
-    min_dim = _preview_min_dim()
-    explicit_max_dim = _setting_is_configured("TMG_PREVIEW_MAX_DIM")
-    explicit_quality = _setting_is_configured("TMG_PREVIEW_JPEG_QUALITY")
-    explicit_min_quality = _setting_is_configured("TMG_PREVIEW_MIN_JPEG_QUALITY")
-    explicit_payload = _setting_is_configured("TMG_PREVIEW_MAX_PAYLOAD_MB")
-    explicit_min_dim = _setting_is_configured("TMG_PREVIEW_MIN_DIM")
-    size_mb = (len(file_bytes or b"") / (1024 * 1024)) if file_bytes else 0.0
-    runtime = viewer_runtime if isinstance(viewer_runtime, dict) else {}
-    is_deploy = bool(runtime.get("is_deploy"))
-
-    if not explicit_max_dim:
-        if is_deploy:
-            max_dim = min(max_dim, 3200)
-        elif size_mb >= 12:
-            max_dim = min(max_dim, 3600)
-        elif size_mb >= 500:
-            max_dim = min(max_dim, 4000)
-        elif size_mb >= 250:
-            max_dim = min(max_dim, 4600)
-        elif size_mb >= 100:
-            max_dim = min(max_dim, 5200)
-    if not explicit_quality:
-        if is_deploy or size_mb >= 12:
-            quality = min(quality, 87)
-        elif size_mb >= 250:
-            quality = min(quality, 89)
-        elif size_mb >= 100:
-            quality = min(quality, 90)
-    if not explicit_min_quality:
-        if is_deploy or size_mb >= 250:
-            min_quality = min(min_quality, 80)
-    if not explicit_payload:
-        if is_deploy:
-            payload_mb = min(payload_mb, 6)
-        elif size_mb >= 12:
-            payload_mb = min(payload_mb, 7)
-        elif size_mb >= 500:
-            payload_mb = min(payload_mb, 10)
-        elif size_mb >= 250:
-            payload_mb = min(payload_mb, 12)
-    if not explicit_min_dim:
-        if is_deploy or size_mb >= 250:
-            min_dim = min(min_dim, 1800)
-        elif size_mb >= 100:
-            min_dim = min(min_dim, 2200)
-    min_quality = min(min_quality, quality)
-    min_dim = min(min_dim, max_dim)
-    return int(max_dim), int(quality), int(min_quality), int(payload_mb), int(min_dim)
+    return _int_setting("TMG_PREVIEW_MIN_DIM", 5200, 1200, 14000)
 
 def _upload_limit_mb() -> int:
     # Valor informativo mostrado na interface; o limite real do Streamlit Cloud é definido em .streamlit/config.toml.
-    return _int_setting("TMG_UPLOAD_LIMIT_MB", 2048, 200, 4096)
+    return _int_setting("TMG_UPLOAD_LIMIT_MB", 8000, 200, 12000)
 
 def _looks_like_windows_drive_path(raw: str) -> bool:
     return len(raw) > 2 and raw[1] == ":" and raw[2:3] in ("\\", "/")
@@ -1710,6 +666,13 @@ TMG_PAGE_TRANSITION_CACHE_DIR = TMG_RUNTIME_CACHE_DIR / "page_transitions"
 TMG_RUNTIME_CONFIG_PATH = SYSTEM_CONFIG_DIR / "runtime_optimization.json"
 for _runtime_dir in (TMG_RUNTIME_CACHE_DIR, TMG_PAGE_TRANSITION_CACHE_DIR):
     _runtime_dir.mkdir(parents=True, exist_ok=True)
+
+LOCAL_PERFORMANCE_STATE = {}
+if HAS_LOCAL_PERFORMANCE and ensure_local_performance_layout is not None:
+    try:
+        LOCAL_PERFORMANCE_STATE = ensure_local_performance_layout(APP_ROOT)
+    except Exception as exc:
+        LOCAL_PERFORMANCE_STATE = {"error": str(exc)}
 
 THEME_PALETTES = {
     "padrao": {
@@ -1817,6 +780,11 @@ def _ensure_tmg_runtime_optimization_config() -> None:
         "preview_max_dim": _preview_max_dim(),
         "preview_jpeg_quality": _preview_jpeg_quality(),
         "preview_max_payload_mb": _preview_max_payload_mb(),
+        "session_ortho_cache_items": _int_setting("TMG_SESSION_ORTHO_CACHE_ITEMS", 3, 1, 8),
+        "disk_ortho_cache_files": _int_setting("TMG_ORTHO_DISK_CACHE_FILES", 96, 12, 500),
+        "disk_ortho_cache_gb": _int_setting("TMG_ORTHO_DISK_CACHE_GB", 5, 1, 50),
+        "local_performance": HAS_LOCAL_PERFORMANCE,
+        "local_performance_state": LOCAL_PERFORMANCE_STATE,
         "page_transition_loading": True,
         "keep_all_runtime_data_inside_program_folder": True,
     }
@@ -2166,36 +1134,363 @@ def aplicar_estilo_titulos_3d():
     </style>
     """, unsafe_allow_html=True)
 
+def inject_global_theme_css():
+    st.markdown(f"""
+    <style id="tmg-global-dark-field-theme">
+    :root {{
+        --tmg-bg-main: #061829;
+        --tmg-bg-card: rgba(8, 28, 48, 0.92);
+        --tmg-bg-input: #071f35;
+        --tmg-bg-input-hover: #0a2a45;
+        --tmg-text-main: #f5fbff;
+        --tmg-text-muted: #b8d4e8;
+        --tmg-neon-cyan: {THEME_PRIMARY_COLOR};
+        --tmg-neon-blue: #238cff;
+        --tmg-border-soft: rgba({THEME_PRIMARY_RGB}, 0.58);
+        --tmg-shadow-neon: 0 0 12px rgba({THEME_PRIMARY_RGB}, 0.32);
+    }}
+
+    label,
+    [data-testid="stWidgetLabel"],
+    [data-testid="stTextInput"] label,
+    [data-testid="stDateInput"] label,
+    [data-testid="stNumberInput"] label,
+    [data-testid="stSelectbox"] label,
+    [data-testid="stMultiSelect"] label,
+    [data-testid="stTextArea"] label,
+    [data-testid="stFileUploader"] label {{
+        color: var(--tmg-text-main) !important;
+        font-weight: 800 !important;
+        text-shadow: 0 1px 0 rgba(0,0,0,.86), 0 0 10px rgba({THEME_PRIMARY_RGB},.28) !important;
+    }}
+
+    .stTextInput input,
+    .stDateInput input,
+    .stNumberInput input,
+    .stTextArea textarea,
+    [data-testid="stTextInput"] input,
+    [data-testid="stDateInput"] input,
+    [data-testid="stNumberInput"] input,
+    [data-testid="stTimeInput"] input,
+    [data-testid="stTextArea"] textarea,
+    div[data-baseweb="input"],
+    div[data-baseweb="input"] input,
+    div[data-baseweb="textarea"],
+    div[data-baseweb="textarea"] textarea {{
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.10), transparent 30%),
+            linear-gradient(180deg, #09243b 0%, #061b2e 100%) !important;
+        color: var(--tmg-text-main) !important;
+        border: 1px solid var(--tmg-border-soft) !important;
+        border-radius: 10px !important;
+        box-shadow:
+            inset 0 0 8px rgba({THEME_PRIMARY_RGB}, 0.12),
+            var(--tmg-shadow-neon),
+            0 10px 24px rgba(0,0,0,.30) !important;
+        caret-color: var(--tmg-neon-cyan) !important;
+        min-height: 38px !important;
+    }}
+
+    .stTextInput input::placeholder,
+    .stDateInput input::placeholder,
+    .stNumberInput input::placeholder,
+    .stTextArea textarea::placeholder,
+    [data-testid="stTextInput"] input::placeholder,
+    [data-testid="stDateInput"] input::placeholder,
+    [data-testid="stNumberInput"] input::placeholder,
+    [data-testid="stTextArea"] textarea::placeholder {{
+        color: var(--tmg-text-muted) !important;
+        opacity: .88 !important;
+    }}
+
+    .stTextInput input:hover,
+    .stDateInput input:hover,
+    .stNumberInput input:hover,
+    .stTextArea textarea:hover,
+    div[data-baseweb="input"]:hover,
+    div[data-baseweb="textarea"]:hover {{
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.13), transparent 30%),
+            linear-gradient(180deg, #0a2a45 0%, #071f35 100%) !important;
+        border-color: var(--tmg-neon-cyan) !important;
+        box-shadow: 0 0 16px rgba({THEME_PRIMARY_RGB},.42), inset 0 0 10px rgba({THEME_PRIMARY_RGB},.16) !important;
+    }}
+
+    .stTextInput input:focus,
+    .stDateInput input:focus,
+    .stNumberInput input:focus,
+    .stTextArea textarea:focus,
+    div[data-baseweb="input"]:focus-within,
+    div[data-baseweb="textarea"]:focus-within {{
+        border-color: var(--tmg-neon-cyan) !important;
+        outline: none !important;
+        box-shadow:
+            0 0 0 1px rgba({THEME_PRIMARY_RGB}, 0.58),
+            0 0 18px rgba({THEME_PRIMARY_RGB}, 0.48),
+            inset 0 0 10px rgba({THEME_PRIMARY_RGB}, 0.18) !important;
+    }}
+
+    [data-testid="stSelectbox"] div[data-baseweb="select"],
+    [data-testid="stMultiSelect"] div[data-baseweb="select"],
+    div[data-baseweb="select"],
+    div[role="combobox"] {{
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.12), transparent 32%),
+            radial-gradient(circle at right, rgba({THEME_PRIMARY_RGB}, .24), transparent 44%),
+            linear-gradient(180deg, #09243b 0%, #061b2e 100%) !important;
+        color: var(--tmg-text-main) !important;
+        border: 1px solid var(--tmg-border-soft) !important;
+        border-radius: 10px !important;
+        box-shadow: var(--tmg-shadow-neon), 0 10px 24px rgba(0,0,0,.30) !important;
+        min-height: 38px !important;
+    }}
+
+    [data-testid="stSelectbox"] div[data-baseweb="select"] *,
+    [data-testid="stMultiSelect"] div[data-baseweb="select"] *,
+    div[data-baseweb="select"] *,
+    div[role="combobox"] * {{
+        color: var(--tmg-text-main) !important;
+        font-weight: 700 !important;
+    }}
+
+    div[role="listbox"],
+    ul[role="listbox"],
+    [data-baseweb="popover"] {{
+        background: #071f35 !important;
+        border: 1px solid var(--tmg-neon-cyan) !important;
+        color: var(--tmg-text-main) !important;
+        box-shadow: 0 14px 34px rgba(0,0,0,.48), 0 0 22px rgba({THEME_PRIMARY_RGB},.34) !important;
+    }}
+
+    div[role="option"],
+    li[role="option"] {{
+        background: #071f35 !important;
+        color: var(--tmg-text-main) !important;
+    }}
+
+    div[role="option"]:hover,
+    li[role="option"]:hover,
+    div[aria-selected="true"],
+    li[aria-selected="true"] {{
+        background: #0a3557 !important;
+        color: #ffffff !important;
+    }}
+
+    [data-testid="stFileUploader"] section,
+    [data-testid="stFileUploaderDropzone"] {{
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.10), transparent 32%),
+            linear-gradient(145deg, rgba(7,31,53,.92), rgba(4,19,34,.94)) !important;
+        border: 1.5px dashed var(--tmg-neon-cyan) !important;
+        border-radius: 14px !important;
+        color: var(--tmg-text-main) !important;
+        box-shadow: var(--tmg-shadow-neon), inset 0 1px 0 rgba(255,255,255,.16) !important;
+    }}
+
+    [data-testid="stFileUploader"] *,
+    [data-testid="stFileUploaderDropzone"] * {{
+        color: var(--tmg-text-main) !important;
+    }}
+
+    [data-testid="stForm"],
+    [data-testid="stExpander"],
+    [data-testid="stTabs"] [role="tablist"] {{
+        background: rgba(6, 24, 41, 0.75) !important;
+        border: 1px solid rgba({THEME_PRIMARY_RGB}, 0.28) !important;
+        border-radius: 14px !important;
+        box-shadow: 0 12px 28px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.10) !important;
+    }}
+
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] textarea,
+    [data-testid="stSidebar"] div[data-baseweb="select"],
+    [data-testid="stSidebar"] div[data-baseweb="input"] {{
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.10), transparent 30%),
+            linear-gradient(180deg, #09243b 0%, #061b2e 100%) !important;
+        color: var(--tmg-text-main) !important;
+        border-color: var(--tmg-border-soft) !important;
+    }}
+
+    .stProgress > div > div,
+    [data-testid="stProgress"] > div > div {{
+        background: rgba(255,255,255,.12) !important;
+        border: 1px solid rgba({THEME_PRIMARY_RGB},.38) !important;
+        border-radius: 999px !important;
+        box-shadow: inset 0 0 8px rgba(0,0,0,.32) !important;
+    }}
+
+    .stProgress > div > div > div > div,
+    [data-testid="stProgress"] div[role="progressbar"] > div {{
+        background: linear-gradient(90deg, var(--tmg-neon-cyan) 0%, var(--tmg-neon-blue) 55%, #005eff 100%) !important;
+        border-radius: 999px !important;
+        box-shadow: 0 0 14px rgba({THEME_PRIMARY_RGB},.54) !important;
+    }}
+
+    [data-testid="stDataFrame"],
+    [data-testid="stDataEditor"],
+    .stDataFrame,
+    .stTable {{
+        background: #071f35 !important;
+        border: 1px solid var(--tmg-neon-cyan) !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+        box-shadow: var(--tmg-shadow-neon), 0 12px 28px rgba(0,0,0,.34) !important;
+    }}
+
+    [data-testid="stDataFrame"] *,
+    [data-testid="stDataEditor"] *,
+    .stDataFrame *,
+    .stTable * {{
+        color: var(--tmg-text-main) !important;
+    }}
+
+    div[data-testid="stDataFrame"] [role="grid"],
+    div[data-testid="stDataEditor"] [role="grid"],
+    .glide-data-grid,
+    .dvn-scroller {{
+        background: #071f35 !important;
+        color: var(--tmg-text-main) !important;
+    }}
+
+    table {{
+        width: 100%;
+        background: #071f35 !important;
+        color: var(--tmg-text-main) !important;
+        border-collapse: collapse !important;
+    }}
+
+    thead tr th,
+    table thead th {{
+        background: linear-gradient(180deg, #0a3557 0%, #07243c 100%) !important;
+        color: #ffffff !important;
+        border-bottom: 1px solid var(--tmg-neon-cyan) !important;
+    }}
+
+    tbody tr,
+    table tbody tr {{
+        background: #071f35 !important;
+        color: var(--tmg-text-main) !important;
+    }}
+
+    tbody tr:nth-child(even),
+    table tbody tr:nth-child(even) {{
+        background: #092b48 !important;
+    }}
+
+    tbody td,
+    table tbody td {{
+        color: var(--tmg-text-main) !important;
+        border-color: rgba({THEME_PRIMARY_RGB}, 0.22) !important;
+    }}
+
+    input[type="date"]::-webkit-calendar-picker-indicator,
+    input[type="time"]::-webkit-calendar-picker-indicator {{
+        filter: invert(1) brightness(1.45) drop-shadow(0 0 4px rgba({THEME_PRIMARY_RGB},.7)) !important;
+        opacity: .95 !important;
+    }}
+
+    ::-webkit-scrollbar {{
+        width: 10px;
+        height: 10px;
+    }}
+
+    ::-webkit-scrollbar-track {{
+        background: #061829;
+    }}
+
+    ::-webkit-scrollbar-thumb {{
+        background: linear-gradient(180deg, var(--tmg-neon-cyan), var(--tmg-neon-blue));
+        border-radius: 999px;
+        border: 2px solid #061829;
+    }}
+
+    ::-webkit-scrollbar-thumb:hover {{
+        background: linear-gradient(180deg, #4ef3ff, #4da1ff);
+    }}
+    .tmg-mat-status-table {{
+        overflow-x:auto;
+        border:1px solid rgba({THEME_PRIMARY_RGB}, .58);
+        border-radius:12px;
+        margin:8px 0 14px;
+        background:
+            radial-gradient(circle at 14% 0%, rgba({THEME_PRIMARY_RGB}, .18), transparent 44%),
+            linear-gradient(145deg, rgba(2,14,36,.96), rgba(13,43,69,.84));
+        box-shadow:0 14px 30px rgba(0,0,0,.38), 0 0 24px rgba({THEME_PRIMARY_RGB}, .22), inset 0 1px 0 rgba(255,255,255,.12);
+    }}
+    .tmg-mat-status-table table {{
+        width:100%;
+        border-collapse:collapse;
+        color:#f5fbff !important;
+        background:transparent !important;
+        font-size:.78rem;
+    }}
+    .tmg-mat-status-table th {{
+        padding:10px 9px;
+        background:linear-gradient(180deg, #0B4C78, #08233D) !important;
+        color:#ffffff !important;
+        border-bottom:1px solid rgba({THEME_PRIMARY_RGB}, .52);
+        text-align:left;
+        font-weight:900;
+    }}
+    .tmg-mat-status-table td {{
+        padding:9px;
+        color:#f5fbff !important;
+        border-bottom:1px solid rgba({THEME_PRIMARY_RGB}, .18);
+        font-weight:750;
+    }}
+    .tmg-mat-status-table tbody tr:nth-child(odd) {{ background:rgba(8,34,58,.84) !important; }}
+    .tmg-mat-status-table tbody tr:nth-child(even) {{ background:rgba(15,56,88,.76) !important; }}
+    .tmg-mat-status-table tbody tr:hover {{ background:rgba({THEME_PRIMARY_RGB}, .22) !important; }}
+    .tmg-mat-edit-table {{
+        border:1px solid rgba({THEME_PRIMARY_RGB}, .58);
+        border-radius:12px 12px 0 0;
+        margin:8px 0 0;
+        background:
+            radial-gradient(circle at 14% 0%, rgba({THEME_PRIMARY_RGB}, .18), transparent 44%),
+            linear-gradient(145deg, rgba(2,14,36,.96), rgba(13,43,69,.84));
+        box-shadow:0 10px 22px rgba(0,0,0,.30), 0 0 18px rgba({THEME_PRIMARY_RGB}, .16), inset 0 1px 0 rgba(255,255,255,.12);
+        overflow:hidden;
+    }}
+    .tmg-mat-edit-head {{
+        display:grid;
+        grid-template-columns:2.2fr 2.2fr 1.35fr .8fr;
+        gap:10px;
+        padding:10px 12px;
+        background:linear-gradient(180deg, #0B4C78, #08233D) !important;
+        border-bottom:1px solid rgba({THEME_PRIMARY_RGB}, .52);
+    }}
+    .tmg-mat-edit-head span {{
+        color:#ffffff !important;
+        font-size:.76rem;
+        font-weight:950;
+        letter-spacing:.5px;
+        text-transform:uppercase;
+        text-shadow:0 1px 0 rgba(0,0,0,.85);
+    }}
+    .tmg-mat-file-cell {{
+        min-height:38px;
+        display:flex;
+        align-items:center;
+        padding:8px 10px;
+        margin-top:2px;
+        border:1px solid rgba({THEME_PRIMARY_RGB}, .34);
+        border-radius:8px;
+        background:linear-gradient(145deg, rgba(2,14,36,.92), rgba(13,43,69,.74));
+        color:#f5fbff !important;
+        font-weight:850;
+        text-shadow:0 1px 0 rgba(0,0,0,.75);
+        overflow:hidden;
+        text-overflow:ellipsis;
+        white-space:nowrap;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+
 aplicar_estilo_titulos_3d()
-
-def _tmg_current_viewer_runtime() -> dict:
-    if HAS_TMG_VIEWER_MANAGER and _tmg_get_viewer_runtime is not None:
-        try:
-            runtime = _tmg_get_viewer_runtime()
-            if isinstance(runtime, dict):
-                return runtime
-        except Exception:
-            pass
-    return {
-        "active_mode": "streamlit",
-        "configured_mode": "streamlit",
-        "desktop_available": False,
-        "desktop_enabled": False,
-        "is_deploy": True,
-    }
-
-def _tmg_viewer_mode_label(runtime: dict | None = None) -> str:
-    info = runtime if isinstance(runtime, dict) else _tmg_current_viewer_runtime()
-    active_mode = str(info.get("active_mode") or "streamlit").strip().lower()
-    if active_mode == "desktop":
-        return "Modo Desktop Local"
-    if bool(info.get("is_deploy")):
-        return "Modo Streamlit Web"
-    return "Modo Streamlit Local"
+inject_global_theme_css()
 
 def _tmg_embedded_visualizer_theme_markup() -> str:
-    runtime_logo_html = json.dumps(_tmg_loading_logo_html())
-    runtime_mode_label = json.dumps(_tmg_viewer_mode_label())
     return f"""
 <style id="tmg-embedded-viewer-theme">
 :root {{
@@ -2313,167 +1608,16 @@ textarea::placeholder {{
 #viewer,
 #vc,
 #cronViewer,
-#wrap,
-#vdv,
-#qgisViewer,
 .canvas-wrap,
 .map-wrap,
 .image-stage,
-.ortho-stage {{
+.ortho-stage,
+[class*="viewer"] {{
   background:
     radial-gradient(circle at 50% 0%, rgba({THEME_PRIMARY_RGB},.10), transparent 42%),
     linear-gradient(145deg,#020e24,#061525) !important;
   border:1px solid rgba({THEME_PRIMARY_RGB},.36) !important;
   box-shadow:0 16px 34px rgba(0,0,0,.42), 0 0 24px rgba({THEME_PRIMARY_RGB},.18) !important;
-}}
-#wrap,
-#vdv,
-#qgisViewer,
-#viewer,
-#vc,
-#cronViewer {{
-  min-height:640px !important;
-  border-radius:14px !important;
-  border:1px solid rgba(0,212,255,.42) !important;
-  outline:1px solid rgba(142,234,255,.34) !important;
-  outline-offset:-2px !important;
-  background:
-    linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
-    radial-gradient(circle at 20% 10%, rgba(0,212,255,.13), transparent 32%),
-    #071525 !important;
-  background-size:34px 34px,34px 34px,100% 100%,100% 100% !important;
-  box-shadow:
-    0 18px 42px rgba(0,0,0,.46),
-    0 0 28px rgba(0,212,255,.18),
-    inset 0 1px 0 rgba(255,255,255,.10),
-    inset 0 0 0 2px rgba(0,212,255,.18) !important;
-  overflow:hidden !important;
-  position:relative !important;
-}}
-#wrap:before,
-#vdv:before,
-#viewer:before,
-#vc:before,
-#cronViewer:before {{
-  content:"Visualizador de Ortofoto";
-  position:absolute;
-  left:12px;
-  top:12px;
-  z-index:2;
-  color:#dffaff;
-  font-size:12px;
-  font-weight:850;
-  padding:8px 10px;
-  border-radius:10px;
-  border:1px solid rgba(0,212,255,.28);
-  background:rgba(3,18,38,.72);
-  box-shadow:0 8px 20px rgba(0,0,0,.32);
-  text-shadow:0 1px 0 rgba(0,0,0,.78), 0 0 10px rgba(0,212,255,.32);
-  pointer-events:none;
-}}
-#wrap:empty:after,
-#vdv:empty:after,
-#viewer:empty:after,
-#vc:empty:after,
-#cronViewer:empty:after {{
-  content:"Adicione uma camada raster para iniciar o visualizador.";
-  position:absolute;
-  inset:0;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  color:#d9fbff;
-  font-weight:850;
-  letter-spacing:.25px;
-  text-shadow:0 1px 0 rgba(0,0,0,.78), 0 0 14px rgba(0,212,255,.38);
-}}
-#wrap canvas,
-#vdv canvas,
-#viewer canvas,
-#vc canvas,
-#cronViewer canvas,
-#qgisViewer canvas {{
-  background:transparent !important;
-  animation:tmgViewerReveal .36s ease both;
-  z-index:1 !important;
-}}
-.bar,
-.vdtop,
-.toolbar,
-.topbar,
-.controls {{
-  z-index:6 !important;
-}}
-#wrap .bar {{
-  top:12px !important;
-  right:12px !important;
-  left:auto !important;
-  bottom:auto !important;
-  display:flex !important;
-  flex-direction:column !important;
-  gap:7px !important;
-  max-width:168px !important;
-}}
-#wrap .bar button,
-#vdv .panel button,
-#viewer button,
-#vc button,
-#cronViewer button,
-.qgisBtn {{
-  min-height:34px !important;
-  border-radius:9px !important;
-  border:1px solid rgba(0,212,255,.42) !important;
-  color:#ffffff !important;
-  background:linear-gradient(145deg, rgba(5,30,58,.95), rgba(0,128,176,.62)) !important;
-  font-weight:900 !important;
-  box-shadow:0 8px 18px rgba(0,0,0,.42), 0 0 16px rgba(0,212,255,.20), inset 0 1px 0 rgba(255,255,255,.18) !important;
-  text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 10px rgba(0,212,255,.42) !important;
-}}
-#wrap .bar button:hover,
-#vdv .panel button:hover,
-#viewer button:hover,
-#vc button:hover,
-#cronViewer button:hover,
-.qgisBtn:hover {{
-  border-color:rgba(142,234,255,.86) !important;
-  box-shadow:0 10px 24px rgba(0,0,0,.48), 0 0 24px rgba(0,212,255,.42), inset 0 1px 0 rgba(255,255,255,.25) !important;
-  transform:translateY(-1px) !important;
-}}
-.badge,
-.hint,
-.scale,
-.coord,
-.qgisStatus,
-.qgisInfo,
-#vdv .panel,
-#wrap .hint,
-#viewer .hint,
-#vc .hint,
-#cronViewer .hint {{
-  border-radius:12px !important;
-  border:1px solid rgba(0,212,255,.34) !important;
-  color:#eafcff !important;
-  background:linear-gradient(145deg, rgba(3,18,38,.92), rgba(8,45,82,.78)) !important;
-  box-shadow:0 12px 26px rgba(0,0,0,.45), 0 0 22px rgba(0,212,255,.20), inset 0 1px 0 rgba(255,255,255,.10) !important;
-  text-shadow:0 1px 0 rgba(0,0,0,.72) !important;
-}}
-.badge,
-.qgisStatus {{
-  color:#dffaff !important;
-  font-weight:850 !important;
-}}
-.hint:before,
-.scale:before {{
-  content:"Identificação de parcela";
-  display:block;
-  color:#ffffff;
-  font-weight:900;
-  margin-bottom:3px;
-  text-shadow:0 0 10px rgba(0,212,255,.45);
-}}
-input[type=range] {{
-  accent-color:#00d4ff !important;
 }}
 .title,
 .panel-title,
@@ -2528,23 +1672,6 @@ td {{
 tr:nth-child(odd) {{ background:rgba(2,14,36,.48) !important; }}
 tr:nth-child(even) {{ background:rgba(13,43,69,.38) !important; }}
 tr:hover {{ background:rgba({THEME_PRIMARY_RGB},.20) !important; }}
-html.tmg-viewer-loading,
-body.tmg-viewer-loading {{
-  background:
-    radial-gradient(circle at 50% 22%, rgba({THEME_PRIMARY_RGB},.16), transparent 36%),
-    linear-gradient(135deg,#020e24 0%,#061525 54%,#0d2b45 100%) !important;
-}}
-body.tmg-viewer-loading > *:not(#tmg-viewer-runtime-loader) {{
-  opacity:1 !important;
-  visibility:visible !important;
-}}
-body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
-  animation:tmgViewerReveal .36s ease both;
-}}
-.tmg-viewer-loading-host {{
-  position:relative !important;
-  overflow:hidden !important;
-}}
 .tmg-viewer-runtime-loader {{
   position:fixed;
   inset:0;
@@ -2552,22 +1679,12 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
   display:flex;
   align-items:center;
   justify-content:center;
-  background:
-    radial-gradient(circle at 50% 24%, rgba({THEME_PRIMARY_RGB},.20), transparent 36%),
-    linear-gradient(135deg, rgba(2,14,36,.98), rgba(6,21,37,.97), rgba(13,43,69,.96));
-  backdrop-filter:blur(10px) saturate(145%);
-  -webkit-backdrop-filter:blur(10px) saturate(145%);
+  background:rgba(2,14,36,.76);
+  backdrop-filter:blur(8px) saturate(135%);
+  -webkit-backdrop-filter:blur(8px) saturate(135%);
   opacity:1;
-  transition:opacity .42s ease;
+  transition:opacity .35s ease;
   pointer-events:none;
-}}
-.tmg-viewer-runtime-loader.tmg-viewer-runtime-embedded {{
-  position:absolute;
-  z-index:80;
-  border-radius:inherit;
-  background:
-    radial-gradient(circle at 50% 26%, rgba({THEME_PRIMARY_RGB},.18), transparent 40%),
-    linear-gradient(135deg, rgba(2,14,36,.88), rgba(6,21,37,.84), rgba(13,43,69,.78));
 }}
 .tmg-viewer-runtime-card {{
   width:min(440px, calc(100vw - 36px));
@@ -2591,21 +1708,9 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  min-width:92px;
-  min-height:42px;
+  min-width:82px;
+  min-height:34px;
   margin-bottom:10px;
-  color:#ffffff;
-  font-weight:950;
-  letter-spacing:4px;
-  text-shadow:0 1px 0 rgba(0,0,0,.92), 0 0 18px rgba({THEME_PRIMARY_RGB},.62);
-}}
-.tmg-viewer-runtime-logo .tmg-load-logo-img {{
-  max-width:150px;
-  max-height:52px;
-  object-fit:contain;
-  filter:drop-shadow(0 8px 14px rgba(0,0,0,.48)) drop-shadow(0 0 18px rgba({THEME_PRIMARY_RGB},.42));
-}}
-.tmg-viewer-runtime-logo .tmg-load-logo-fallback {{
   color:#ffffff;
   font-weight:950;
   letter-spacing:4px;
@@ -2616,22 +1721,6 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
   font-weight:900;
   letter-spacing:.45px;
   text-shadow:0 1px 0 rgba(0,0,0,.86), 0 0 12px rgba({THEME_PRIMARY_RGB},.42);
-}}
-.tmg-viewer-runtime-mode {{
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  margin:2px auto 0 auto;
-  padding:5px 11px;
-  border-radius:999px;
-  border:1px solid rgba({THEME_PRIMARY_RGB},.56);
-  background:linear-gradient(145deg, rgba(2,14,36,.94), rgba(18,62,100,.76), rgba({THEME_PRIMARY_RGB},.16));
-  color:#ffffff;
-  font-size:.72rem;
-  font-weight:950;
-  letter-spacing:.45px;
-  text-shadow:0 1px 0 rgba(0,0,0,.88), 0 0 10px rgba({THEME_PRIMARY_RGB},.42);
-  box-shadow:0 0 15px rgba({THEME_PRIMARY_RGB},.25), inset 0 1px 0 rgba(255,255,255,.18);
 }}
 .tmg-viewer-runtime-track {{
   position:relative;
@@ -2680,71 +1769,46 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
   0% {{ transform:translateX(-100%); }}
   100% {{ transform:translateX(180%); }}
 }}
-@keyframes tmgViewerReveal {{
-  from {{ opacity:0; filter:blur(4px); transform:translateY(4px); }}
-  to {{ opacity:1; filter:blur(0); transform:translateY(0); }}
-}}
 </style>
 <script id="tmg-embedded-viewer-loading-autohide">
 (function() {{
-  function findViewerHost() {{
-    var selectors = ['#vc', '#viewer', '#cronViewer', '#qgisViewer', '#wrap', '#vdv', '.viewer', '.canvas-wrap', '.map-wrap', '.image-stage', '.ortho-stage'];
-    for (var i = 0; i < selectors.length; i++) {{
-      var el = document.querySelector(selectors[i]);
-      if (el) return el;
-    }}
-    return null;
-  }}
   function ensureRuntimeLoader() {{
     if (document.getElementById('tmg-viewer-runtime-loader')) return;
     if (!document.body) return;
-    var host = findViewerHost();
-    var target = host || document.body;
-    document.documentElement.classList.add('tmg-viewer-loading');
-    document.body.classList.add('tmg-viewer-loading');
-    document.body.classList.remove('tmg-viewer-ready');
     var loader = document.createElement('div');
     loader.id = 'tmg-viewer-runtime-loader';
-    loader.className = 'tmg-viewer-runtime-loader' + (host ? ' tmg-viewer-runtime-embedded' : '');
-    loader.__tmgHost = host || null;
-    if (host) host.classList.add('tmg-viewer-loading-host');
-    var logoHtml = {runtime_logo_html};
-    var modeLabel = {runtime_mode_label};
+    loader.className = 'tmg-viewer-runtime-loader';
     loader.innerHTML =
       '<div class="tmg-viewer-runtime-card">' +
-      '<div class="tmg-viewer-runtime-logo">' + logoHtml + '</div>' +
+      '<div class="tmg-viewer-runtime-logo">TMG</div>' +
       '<div class="tmg-viewer-runtime-text">Carregando visualizador...</div>' +
-      '<div class="tmg-viewer-runtime-mode">' + modeLabel + '</div>' +
       '<div class="tmg-viewer-runtime-track">' +
       '<div class="tmg-viewer-runtime-fill"></div>' +
-      '<div class="tmg-viewer-runtime-percent">0%</div>' +
+      '<div class="tmg-viewer-runtime-percent">8%</div>' +
       '</div>' +
-      '<div class="tmg-viewer-runtime-status">' + modeLabel + ' · Preparando ortofoto e ferramentas...</div>' +
+      '<div class="tmg-viewer-runtime-status">Preparando ortofoto e ferramentas...</div>' +
       '</div>';
-    target.appendChild(loader);
+    document.body.appendChild(loader);
     var fill = loader.querySelector('.tmg-viewer-runtime-fill');
     var pctEl = loader.querySelector('.tmg-viewer-runtime-percent');
     var statusEl = loader.querySelector('.tmg-viewer-runtime-status');
-    var pct = 0;
+    var pct = 8;
     function setPct(value, status) {{
       pct = Math.max(0, Math.min(100, Math.round(value)));
       if (fill) fill.style.width = pct + '%';
       if (pctEl) pctEl.textContent = pct + '%';
       if (status && statusEl) statusEl.textContent = status;
     }}
-    setPct(0, modeLabel + ' · Iniciando carregamento do visualizador...');
-    setTimeout(function() {{ setPct(8, modeLabel + ' · Recebendo imagem no visualizador...'); }}, 80);
-    setTimeout(function() {{ if (pct < 18) setPct(18, modeLabel + ' · Preparando recursos da ortofoto...'); }}, 240);
+    setPct(12, 'Recebendo imagem no visualizador...');
     var minReadyAt = Date.now() + 900;
     loader.__tmgTimer = setInterval(function() {{
-      if (pct < 94) {{
-        setPct(pct + Math.max(1, Math.round((94 - pct) / 10)), modeLabel + (pct < 55 ? ' · Carregando ortofoto...' : ' · Montando canvas e camadas...'));
+      if (pct < 92) {{
+        setPct(pct + Math.max(1, Math.round((92 - pct) / 9)), pct < 55 ? 'Carregando ortofoto...' : 'Montando canvas e camadas...');
       }}
     }}, 260);
     function allImagesReady() {{
       try {{
-        var root = loader.__tmgHost || document;
-        var images = Array.prototype.slice.call(root.querySelectorAll ? root.querySelectorAll('img') : (document.images || []));
+        var images = Array.prototype.slice.call(document.images || []);
         return images.every(function(img) {{ return img.complete && img.naturalWidth !== 0; }});
       }} catch(e) {{
         return true;
@@ -2761,32 +1825,18 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
           [Math.floor(w * .25), Math.floor(h * .25)],
           [Math.floor(w * .75), Math.floor(h * .25)],
           [Math.floor(w * .25), Math.floor(h * .75)],
-          [Math.floor(w * .75), Math.floor(h * .75)],
-          [Math.floor(w * .50), Math.floor(h * .18)],
-          [Math.floor(w * .18), Math.floor(h * .50)],
-          [Math.floor(w * .82), Math.floor(h * .50)],
-          [Math.floor(w * .50), Math.floor(h * .82)]
+          [Math.floor(w * .75), Math.floor(h * .75)]
         ];
-        var first = null;
-        var brightOrImageLike = 0;
-        var varied = 0;
         for (var i = 0; i < points.length; i++) {{
           var p = points[i];
           var data = ctx.getImageData(Math.max(0, p[0]), Math.max(0, p[1]), 1, 1).data;
-          if (!first) first = [data[0], data[1], data[2], data[3]];
-          var brightness = Math.max(data[0], data[1], data[2]);
-          var colorSpread = Math.max(data[0], data[1], data[2]) - Math.min(data[0], data[1], data[2]);
-          var delta = Math.abs(data[0] - first[0]) + Math.abs(data[1] - first[1]) + Math.abs(data[2] - first[2]);
-          if (data[3] > 0 && (brightness > 38 || colorSpread > 18)) brightOrImageLike++;
-          if (delta > 30) varied++;
+          if (data[3] > 0 || data[0] > 8 || data[1] > 8 || data[2] > 8) return true;
         }}
-        return brightOrImageLike >= 2 || varied >= 3;
       }} catch(e) {{}}
       return false;
     }}
     function viewerHasContent() {{
-      var root = loader.__tmgHost || document;
-      var canvases = Array.prototype.slice.call((root.querySelectorAll ? root.querySelectorAll('canvas') : document.querySelectorAll('canvas')) || []);
+      var canvases = Array.prototype.slice.call(document.querySelectorAll('canvas') || []);
       if (!canvases.length) return allImagesReady();
       return canvases.some(canvasHasContent);
     }}
@@ -2794,18 +1844,11 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
       if (loader.__tmgHidden) return;
       loader.__tmgHidden = true;
       clearInterval(loader.__tmgTimer);
-      setPct(100, modeLabel + ' · Visualizador pronto.');
+      setPct(100, 'Visualizador pronto.');
       setTimeout(function() {{
-        document.documentElement.classList.remove('tmg-viewer-loading');
-        document.body.classList.remove('tmg-viewer-loading');
-        document.body.classList.add('tmg-viewer-ready');
-        if (loader.__tmgHost) loader.__tmgHost.classList.remove('tmg-viewer-loading-host');
         loader.style.opacity = '0';
-        setTimeout(function() {{
-          loader.style.display = 'none';
-          document.body.classList.remove('tmg-viewer-ready');
-        }}, 460);
-      }}, 220);
+        setTimeout(function() {{ loader.style.display = 'none'; }}, 380);
+      }}, 360);
     }}
     function waitReady() {{
       if (document.readyState === 'complete' && allImagesReady() && viewerHasContent() && Date.now() >= minReadyAt) {{
@@ -2817,11 +1860,9 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
     window.addEventListener('load', function() {{ setTimeout(waitReady, 80); }});
     setTimeout(waitReady, 240);
     setTimeout(function() {{
-      if (!loader.__tmgHidden) setPct(96, modeLabel + ' · Aguardando renderização completa da ortofoto...');
+      setPct(96, 'Finalizando visualizador...');
+      hideLoader();
     }}, 18000);
-    setTimeout(function() {{
-      if (!loader.__tmgHidden) setPct(98, modeLabel + ' · Ainda preparando a imagem no visualizador...');
-    }}, 36000);
   }}
   function setProgressVisibility(bar) {{
     if (!bar) return;
@@ -2857,6 +1898,8 @@ body.tmg-viewer-ready > *:not(#tmg-viewer-runtime-loader) {{
 def _inject_tmg_embedded_visualizer_theme(markup: str) -> str:
     if not isinstance(markup, str) or "tmg-embedded-viewer-theme" in markup:
         return markup
+    if len(markup) > 500_000 or "data:image/" in markup or "base64," in markup:
+        return markup
     lower = markup.lower()
     viewer_signals = (
         "<canvas",
@@ -2881,6 +1924,8 @@ def _inject_tmg_embedded_visualizer_theme(markup: str) -> str:
 
 def _theme_colorize_markup(value):
     if not isinstance(value, str):
+        return value
+    if len(value) > 500_000 or "data:image/" in value or "base64," in value:
         return value
     themed = value
     replacements = {
@@ -2945,14 +1990,46 @@ def _theme_colorize_markup(value):
         )
     return themed
 
-_ORIGINAL_ST_MARKDOWN = st.markdown
-_ORIGINAL_COMPONENTS_HTML = components.html
+def _tmg_unwrap_callable(func, global_name: str):
+    candidate = func
+    seen = set()
+    while callable(candidate) and id(candidate) not in seen:
+        seen.add(id(candidate))
+        original = getattr(candidate, "__tmg_original_callable__", None)
+        if callable(original) and original is not candidate:
+            candidate = original
+            continue
+        maybe = getattr(candidate, "__globals__", {}).get(global_name)
+        if callable(maybe) and maybe is not candidate and id(maybe) not in seen:
+            candidate = maybe
+            continue
+        break
+    return candidate
+
+_ORIGINAL_ST_MARKDOWN = getattr(st, "_tmg_original_markdown", None)
+if not callable(_ORIGINAL_ST_MARKDOWN):
+    _ORIGINAL_ST_MARKDOWN = _tmg_unwrap_callable(st.markdown, "_ORIGINAL_ST_MARKDOWN")
+if getattr(_ORIGINAL_ST_MARKDOWN, "__name__", "") == "_themed_markdown":
+    _ORIGINAL_ST_MARKDOWN = getattr(getattr(st, "_main", None), "markdown", st.markdown)
+st._tmg_original_markdown = _ORIGINAL_ST_MARKDOWN
+
+_ORIGINAL_COMPONENTS_HTML = getattr(components, "_tmg_original_html", None)
+if not callable(_ORIGINAL_COMPONENTS_HTML):
+    _ORIGINAL_COMPONENTS_HTML = _tmg_unwrap_callable(components.html, "_ORIGINAL_COMPONENTS_HTML")
+if getattr(_ORIGINAL_COMPONENTS_HTML, "__name__", "") == "_themed_components_html":
+    _ORIGINAL_COMPONENTS_HTML = getattr(getattr(st, "_main", None), "_html", components.html)
+components._tmg_original_html = _ORIGINAL_COMPONENTS_HTML
 
 def _themed_markdown(body, *args, **kwargs):
     return _ORIGINAL_ST_MARKDOWN(_theme_colorize_markup(body), *args, **kwargs)
 
 def _themed_components_html(html, *args, **kwargs):
+    if isinstance(html, str) and (len(html) > 500_000 or "data:image/" in html or "base64," in html or 'id="matRoot"' in html):
+        return _ORIGINAL_COMPONENTS_HTML(html, *args, **kwargs)
     return _ORIGINAL_COMPONENTS_HTML(_inject_tmg_embedded_visualizer_theme(_theme_colorize_markup(html)), *args, **kwargs)
+
+_themed_markdown.__tmg_original_callable__ = _ORIGINAL_ST_MARKDOWN
+_themed_components_html.__tmg_original_callable__ = _ORIGINAL_COMPONENTS_HTML
 
 st.markdown = _themed_markdown
 components.html = _themed_components_html
@@ -2979,6 +2056,8 @@ MENU_PERMISSION_OPTIONS = {
     "menu_bases": "Banco de Dados",
     "menu_sync": "Sincronizar",
     "menu_ortomosaicos": "Gerar Ortomosaico",
+    "menu_kml": "Marcador de KML",
+    "menu_map_creator": "Criador de Mapa",
     "menu_parceiros": "Parceiros",
     "menu_controle_dados": "Controle de Dados",
 }
@@ -3086,7 +2165,7 @@ def _auth_load_users() -> dict:
         for key, value in defaults.items():
             if key in perms:
                 continue
-            if key in ("menu_checklist", "menu_grid", "menu_upload", "menu_bases", "menu_sync", "menu_ortomosaicos"):
+            if key in ("menu_checklist", "menu_grid", "menu_upload", "menu_bases", "menu_sync", "menu_ortomosaicos", "menu_kml", "menu_map_creator"):
                 perms[key] = legacy_culture_access
             elif key in ("menu_parceiros", "menu_controle_dados"):
                 perms[key] = legacy_partner_access
@@ -3138,7 +2217,7 @@ def _auth_permissions(user: dict = None) -> dict:
     normalized.update({k: bool(v) for k, v in perms.items()})
     legacy_culture_access = bool(normalized.get("culturas"))
     legacy_partner_access = bool(normalized.get("parceiros"))
-    for key in ("menu_checklist", "menu_grid", "menu_upload", "menu_bases", "menu_sync", "menu_ortomosaicos"):
+    for key in ("menu_checklist", "menu_grid", "menu_upload", "menu_bases", "menu_sync", "menu_ortomosaicos", "menu_kml", "menu_map_creator"):
         if key not in perms:
             normalized[key] = legacy_culture_access
     for key in ("menu_parceiros", "menu_controle_dados"):
@@ -4168,7 +3247,6 @@ def _processar_ortofoto_core(
     preview_max_payload_mb: int,
     preview_min_dim: int,
     progress_callback=None,
-    local_source_path: str | None = None,
 ):
     """Converte ortofotos para pré-visualização de alta qualidade no Streamlit.
 
@@ -4197,7 +3275,6 @@ def _processar_ortofoto_core(
         "preview_quality": preview_jpeg_quality,
         "preview_min_quality": preview_min_jpeg_quality,
         "preview_mode": "alta_qualidade",
-        "preview_backend": "memoria",
     }
 
     def _stretch_band(band):
@@ -4235,101 +3312,80 @@ def _processar_ortofoto_core(
             return pil_img.convert('RGB')
         return pil_img
 
-    local_source = None
     try:
-        if local_source_path:
-            local_candidate = Path(local_source_path)
-            if local_candidate.exists() and local_candidate.is_file():
-                local_source = local_candidate
-    except Exception:
-        local_source = None
-
-    try:
-        if local_source:
-            spatial_meta["preview_backend"] = "desktop_local_rasterio"
-            _set_progress(14, f"Lendo ortofoto pelo cache local: {Path(filename).name}")
-        else:
-            spatial_meta["preview_backend"] = "memoryfile_rasterio"
         _set_progress(14, f"Lendo ortofoto: {Path(filename).name}")
         import rasterio
         from rasterio.enums import Resampling
-        with ExitStack() as stack:
-            stack.enter_context(rasterio.Env(GDAL_CACHEMAX=512, NUM_THREADS="ALL_CPUS"))
-            if local_source:
-                src = stack.enter_context(rasterio.open(str(local_source)))
-            else:
-                from rasterio.io import MemoryFile
-                memfile = stack.enter_context(MemoryFile(file_bytes))
-                src = stack.enter_context(memfile.open())
-            _set_progress(24, "Interpretando metadados e dimensões da ortofoto...")
-            spatial_meta["orig_width"] = int(src.width)
-            spatial_meta["orig_height"] = int(src.height)
-            if getattr(src, "crs", None):
-                spatial_meta["crs"] = src.crs.to_wkt()
-            if getattr(src, "transform", None):
-                spatial_meta["transform"] = src.transform.to_gdal()
+        from rasterio.io import MemoryFile
+        with MemoryFile(file_bytes) as memfile:
+            with memfile.open() as src:
+                _set_progress(24, "Interpretando metadados e dimensões da ortofoto...")
+                spatial_meta["orig_width"] = int(src.width)
+                spatial_meta["orig_height"] = int(src.height)
+                if getattr(src, "crs", None):
+                    spatial_meta["crs"] = src.crs.to_wkt()
+                if getattr(src, "transform", None):
+                    spatial_meta["transform"] = src.transform.to_gdal()
 
-            max_dim = preview_max_dim
-            ratio = min(1.0, max_dim / max(src.width, src.height))
-            out_width = max(1, int(src.width * ratio))
-            out_height = max(1, int(src.height * ratio))
-            spatial_meta["ratio"] = ratio
-            spatial_meta["preview_width"] = out_width
-            spatial_meta["preview_height"] = out_height
+                max_dim = preview_max_dim
+                ratio = min(1.0, max_dim / max(src.width, src.height))
+                out_width = max(1, int(src.width * ratio))
+                out_height = max(1, int(src.height * ratio))
+                spatial_meta["ratio"] = ratio
+                spatial_meta["preview_width"] = out_width
+                spatial_meta["preview_height"] = out_height
 
-            # Bilinear abre ortofotos grandes bem mais rapido no navegador mantendo boa leitura visual.
-            resampling_filter = getattr(Resampling, "bilinear", Resampling.nearest)
-            bands = int(src.count)
+                # Cúbico mantém boa nitidez visual e é mais rápido que Lanczos em ortofotos grandes.
+                resampling_filter = getattr(Resampling, "cubic", Resampling.bilinear)
+                bands = int(src.count)
 
-            if bands >= 3:
-                _set_progress(42, "Gerando pré-visualização RGB de alta qualidade...")
-                # Mantém RGB verdadeiro quando o GeoTIFF já está em uint8; faz realce leve somente em 16/32 bits.
-                band_indexes = [1, 2, 3]
-                data = src.read(
-                    band_indexes,
-                    out_shape=(3, out_height, out_width),
-                    resampling=resampling_filter,
-                    masked=True,
-                )
-                selected_dtypes = [np.dtype(src.dtypes[index - 1]) for index in band_indexes]
-                if all(dtype == np.dtype("uint8") for dtype in selected_dtypes):
-                    arr = np.transpose(np.stack([_preserve_uint8_band(data[i]) for i in range(3)]), (1, 2, 0))
+                if bands >= 3:
+                    _set_progress(42, "Gerando pré-visualização RGB de alta qualidade...")
+                    # Mantém RGB verdadeiro quando o GeoTIFF já está em uint8; faz realce leve somente em 16/32 bits.
+                    band_indexes = [1, 2, 3]
+                    data = src.read(
+                        band_indexes,
+                        out_shape=(3, out_height, out_width),
+                        resampling=resampling_filter,
+                        masked=True,
+                    )
+                    selected_dtypes = [np.dtype(src.dtypes[index - 1]) for index in band_indexes]
+                    if all(dtype == np.dtype("uint8") for dtype in selected_dtypes):
+                        arr = np.transpose(np.stack([_preserve_uint8_band(data[i]) for i in range(3)]), (1, 2, 0))
+                    else:
+                        arr = np.transpose(np.stack([_stretch_band(data[i]) for i in range(3)]), (1, 2, 0))
+                    img = Image.fromarray(arr, "RGB")
+                elif bands == 2:
+                    _set_progress(42, "Preparando ortofoto com canal alfa...")
+                    data = src.read(1, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
+                    alpha = src.read(2, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
+                    gray = _preserve_uint8_band(data) if np.dtype(src.dtypes[0]) == np.dtype("uint8") else _stretch_band(data)
+                    rgba = np.dstack([gray, gray, gray, _preserve_uint8_band(alpha)])
+                    img = _rgba_to_rgb(Image.fromarray(rgba, "RGBA"))
                 else:
-                    arr = np.transpose(np.stack([_stretch_band(data[i]) for i in range(3)]), (1, 2, 0))
-                img = Image.fromarray(arr, "RGB")
-            elif bands == 2:
-                _set_progress(42, "Preparando ortofoto com canal alfa...")
-                data = src.read(1, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
-                alpha = src.read(2, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
-                gray = _preserve_uint8_band(data) if np.dtype(src.dtypes[0]) == np.dtype("uint8") else _stretch_band(data)
-                rgba = np.dstack([gray, gray, gray, _preserve_uint8_band(alpha)])
-                img = _rgba_to_rgb(Image.fromarray(rgba, "RGBA"))
-            else:
-                _set_progress(42, "Preparando banda única da ortofoto...")
-                data = src.read(1, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
-                if np.dtype(src.dtypes[0]) == np.dtype("uint8"):
-                    img = Image.fromarray(_preserve_uint8_band(data), "L").convert("RGB")
-                else:
-                    img = Image.fromarray(_stretch_band(data), "L").convert("RGB")
+                    _set_progress(42, "Preparando banda única da ortofoto...")
+                    data = src.read(1, out_shape=(out_height, out_width), resampling=resampling_filter, masked=True)
+                    if np.dtype(src.dtypes[0]) == np.dtype("uint8"):
+                        img = Image.fromarray(_preserve_uint8_band(data), "L").convert("RGB")
+                    else:
+                        img = Image.fromarray(_stretch_band(data), "L").convert("RGB")
     except ImportError:
         try:
-            spatial_meta["preview_backend"] = "desktop_local_pillow" if local_source else "memory_pillow"
-            _set_progress(30, "Lendo imagem com Pillow local..." if local_source else "Lendo imagem com Pillow...")
-            img = Image.open(local_source if local_source else BytesIO(file_bytes))
+            _set_progress(30, "Lendo imagem com Pillow...")
+            img = Image.open(BytesIO(file_bytes))
         except Exception as e_pil:
             erro = f"Falha ao ler imagem sem Rasterio: {e_pil}"
     except Exception as e_rast:
         try:
-            spatial_meta["preview_backend"] = "desktop_local_pillow_fallback" if local_source else "memory_pillow_fallback"
-            _set_progress(30, "Lendo imagem local em modo compatível..." if local_source else "Lendo imagem em modo compatível...")
-            img = Image.open(local_source if local_source else BytesIO(file_bytes))
+            _set_progress(30, "Lendo imagem em modo compatível...")
+            img = Image.open(BytesIO(file_bytes))
         except Exception as e_pil:
             erro = f"Falha ao ler formato {ext}: {e_rast} | {e_pil}"
 
     if erro is None and img is None:
         try:
             _set_progress(34, "Interpretando imagem...")
-            img = Image.open(local_source if local_source else BytesIO(file_bytes))
+            img = Image.open(BytesIO(file_bytes))
         except Exception as e:
             erro = f"Falha ao interpretar a imagem: {e}"
 
@@ -4346,17 +3402,26 @@ def _processar_ortofoto_core(
     img = _rgba_to_rgb(img)
 
     MAX_DIM = preview_max_dim
+    resized_for_preview = False
     if max(img.size) > MAX_DIM:
         _set_progress(68, "Otimizando tamanho para o visualizador...")
         ratio = MAX_DIM / max(img.size)
         spatial_meta["ratio"] = ratio
         resample_filter = getattr(Image, 'Resampling', Image).LANCZOS
         img = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))), resample_filter)
+        resized_for_preview = True
     else:
         _set_progress(68, "Preservando dimensão do preview da ortofoto...")
 
     spatial_meta["preview_width"] = img.width
     spatial_meta["preview_height"] = img.height
+
+    if resized_for_preview and str(os.getenv("TMG_PREVIEW_SHARPEN", "1")).strip().lower() not in ("0", "false", "nao", "não", "off"):
+        try:
+            _set_progress(70, "Aplicando nitidez leve no preview da ortofoto...")
+            img = img.filter(ImageFilter.UnsharpMask(radius=0.85, percent=115, threshold=3))
+        except Exception:
+            pass
 
     def _save_preview_jpeg(pil_img, jpeg_quality):
         save_options = [
@@ -4385,8 +3450,8 @@ def _processar_ortofoto_core(
     buf = BytesIO()
 
     try:
-        for step_idx in range(10):
-            _set_progress(min(92, 72 + int((step_idx / 10) * 20)), "Comprimindo preview sem perder qualidade visual...")
+        for step_idx in range(18):
+            _set_progress(min(92, 72 + int((step_idx / 18) * 20)), "Comprimindo preview sem perder qualidade visual...")
             buf = _save_preview_jpeg(preview_img, quality)
             payload_size = buf.tell()
             if payload_size <= max_payload_bytes:
@@ -4432,7 +3497,7 @@ def _processar_ortofoto_core(
 
     return b64, img.size, None, spatial_meta
 
-@st.cache_data(show_spinner=False, max_entries=12)
+@st.cache_data(show_spinner=False, max_entries=4)
 def _processar_ortofoto_cached(
     file_bytes: bytes,
     filename: str,
@@ -4453,76 +3518,39 @@ def _processar_ortofoto_cached(
         progress_callback=None,
     )
 
-@st.cache_data(show_spinner=False, max_entries=18)
-def _processar_ortofoto_file_cached(
-    local_source_path: str,
-    filename: str,
-    source_size: int,
-    source_mtime_ns: int,
-    preview_max_dim: int,
-    preview_jpeg_quality: int,
-    preview_min_jpeg_quality: int,
-    preview_max_payload_mb: int,
-    preview_min_dim: int,
-):
-    return _processar_ortofoto_core(
-        b"",
-        filename,
-        preview_max_dim,
-        preview_jpeg_quality,
-        preview_min_jpeg_quality,
-        preview_max_payload_mb,
-        preview_min_dim,
-        progress_callback=None,
-        local_source_path=local_source_path,
-    )
-
 def _ortho_preview_cache_key(file_bytes: bytes, filename: str, params: tuple) -> str:
+    if HAS_LOCAL_PERFORMANCE and fast_file_fingerprint is not None:
+        try:
+            return fast_file_fingerprint(file_bytes or b"", filename or "", str(params))
+        except Exception:
+            pass
     hasher = hashlib.sha1()
     hasher.update(str(filename or "").encode("utf-8", errors="ignore"))
     hasher.update(str(params).encode("utf-8", errors="ignore"))
     if file_bytes:
         hasher.update(str(len(file_bytes)).encode("ascii"))
-        hasher.update(file_bytes[:1024 * 1024])
-        if len(file_bytes) > 1024 * 1024:
-            hasher.update(file_bytes[-1024 * 1024:])
+        sample_size = 4 * 1024 * 1024
+        hasher.update(file_bytes[:sample_size])
+        if len(file_bytes) > sample_size * 2:
+            middle = max(0, (len(file_bytes) // 2) - (sample_size // 2))
+            hasher.update(file_bytes[middle:middle + sample_size])
+        if len(file_bytes) > sample_size:
+            hasher.update(file_bytes[-sample_size:])
     return hasher.hexdigest()
 
 ORTHO_PREVIEW_CACHE_DIR = SYSTEM_DATABASE_DIR / "ortho_preview_cache"
-ORTHO_SOURCE_CACHE_DIR = SYSTEM_DATABASE_DIR / "ortho_source_cache"
-
-def _persistent_ortho_cache_enabled() -> bool:
-    return os.getenv("TMG_ENABLE_PERSISTENT_ORTHO_CACHE", "").strip().lower() in ("1", "true", "yes", "sim")
-
-def _purge_disabled_ortho_caches() -> None:
-    if _persistent_ortho_cache_enabled():
-        return
-    for path in (ORTHO_PREVIEW_CACHE_DIR, ORTHO_SOURCE_CACHE_DIR):
-        try:
-            resolved = Path(path).resolve()
-            root = SYSTEM_DATABASE_DIR.resolve()
-            if resolved == root or not resolved.is_relative_to(root):
-                continue
-            if resolved.exists():
-                shutil.rmtree(resolved, ignore_errors=True)
-        except Exception:
-            pass
-
-def _safe_ortho_cache_suffix(filename: str) -> str:
-    suffix = Path(filename or "").suffix.lower()
-    if suffix in {".tif", ".tiff", ".geotiff", ".png", ".jpg", ".jpeg", ".jp2", ".bmp", ".webp"}:
-        return suffix
-    return ".img"
 
 def _ortho_preview_disk_paths(cache_key: str) -> tuple[Path, Path]:
     safe_key = re.sub(r"[^a-fA-F0-9]+", "", str(cache_key or ""))[:64] or "preview"
     return ORTHO_PREVIEW_CACHE_DIR / f"{safe_key}.jpg", ORTHO_PREVIEW_CACHE_DIR / f"{safe_key}.json"
 
-def _cleanup_ortho_preview_disk_cache(max_files: int = 10, max_bytes: int = 260 * 1024 * 1024) -> None:
+def _cleanup_ortho_preview_disk_cache(max_files: int | None = None, max_bytes: int | None = None) -> None:
     try:
-        if not _persistent_ortho_cache_enabled():
-            _purge_disabled_ortho_caches()
+        if HAS_LOCAL_PERFORMANCE and cleanup_file_cache is not None:
+            cleanup_file_cache(ORTHO_PREVIEW_CACHE_DIR, "*.jpg", (".json",), max_files=max_files, max_bytes=max_bytes)
             return
+        max_files = max_files or 96
+        max_bytes = max_bytes or (5 * 1024 * 1024 * 1024)
         ORTHO_PREVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         files = sorted(
             [p for p in ORTHO_PREVIEW_CACHE_DIR.glob("*.jpg") if p.is_file()],
@@ -4549,60 +3577,7 @@ def _cleanup_ortho_preview_disk_cache(max_files: int = 10, max_bytes: int = 260 
     except Exception:
         pass
 
-def _cleanup_ortho_source_cache(keep_path: Path | None = None, max_files: int = 3, max_bytes: int = 1200 * 1024 * 1024) -> None:
-    try:
-        if not _persistent_ortho_cache_enabled():
-            _purge_disabled_ortho_caches()
-            return
-        ORTHO_SOURCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        keep = keep_path.resolve() if keep_path else None
-        files = sorted(
-            [p for p in ORTHO_SOURCE_CACHE_DIR.iterdir() if p.is_file()],
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        total = sum(p.stat().st_size for p in files)
-        for idx, path in enumerate(files):
-            try:
-                if keep and path.resolve() == keep:
-                    continue
-                if idx >= max_files or total > max_bytes:
-                    size = path.stat().st_size
-                    path.unlink(missing_ok=True)
-                    total -= size
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-def _save_ortho_source_cache(file_bytes: bytes, filename: str, cache_key: str) -> Path | None:
-    try:
-        if not _persistent_ortho_cache_enabled():
-            return None
-        if not file_bytes:
-            return None
-        suffix = _safe_ortho_cache_suffix(filename)
-        should_cache_source = suffix in {".tif", ".tiff", ".geotiff", ".jp2"} or len(file_bytes) >= 5 * 1024 * 1024
-        if not should_cache_source:
-            return None
-        ORTHO_SOURCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        target = ORTHO_SOURCE_CACHE_DIR / f"{str(cache_key or 'ortho')[:40]}{suffix}"
-        if not target.exists() or target.stat().st_size != len(file_bytes):
-            target.write_bytes(file_bytes)
-        else:
-            try:
-                now = time.time()
-                os.utime(target, (now, now))
-            except Exception:
-                pass
-        _cleanup_ortho_source_cache(keep_path=target)
-        return target
-    except Exception:
-        return None
-
 def _read_ortho_preview_disk_cache(cache_key: str):
-    if not _persistent_ortho_cache_enabled():
-        return None
     jpg_path, meta_path = _ortho_preview_disk_paths(cache_key)
     try:
         if not jpg_path.exists() or not meta_path.exists():
@@ -4626,10 +3601,8 @@ def _read_ortho_preview_disk_cache(cache_key: str):
     except Exception:
         return None
 
-def _write_ortho_preview_disk_cache(cache_key: str, result) -> None:
+def _write_ortho_preview_disk_cache(cache_key: str, result, filename: str = "", source_size: int = 0) -> None:
     try:
-        if not _persistent_ortho_cache_enabled():
-            return
         if not result or result[2] or not result[0]:
             return
         jpg_path, meta_path = _ortho_preview_disk_paths(cache_key)
@@ -4637,102 +3610,83 @@ def _write_ortho_preview_disk_cache(cache_key: str, result) -> None:
         jpg_path.write_bytes(base64.b64decode(result[0]))
         meta = {
             "created_at": datetime.now().isoformat(timespec="seconds"),
+            "filename": str(filename or ""),
+            "source_size_bytes": int(source_size or 0),
             "dims": list(result[1] or (0, 0)),
             "spatial_meta": result[3] or {},
         }
         meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        if HAS_LOCAL_PERFORMANCE and upsert_ortho_cache_record is not None:
+            upsert_ortho_cache_record(APP_ROOT, cache_key, str(filename or ""), jpg_path, meta_path, int(source_size or jpg_path.stat().st_size))
         _cleanup_ortho_preview_disk_cache()
     except Exception:
         pass
 
-def processar_ortofoto(
-    file_bytes: bytes,
-    filename: str,
-    viewer_slot=None,
-    show_loading: bool = True,
-    viewer_height: int = 720,
-    viewer_title: str = "Visualizador de Ortofoto",
-):
+def _ortho_preview_profile_settings(preview_profile: str = "padrao") -> tuple[int, int, int, int, int, str]:
+    profile = str(preview_profile or "padrao").strip().lower()
+    preview_max_dim = _preview_max_dim()
+    preview_jpeg_quality = _preview_jpeg_quality()
+    preview_min_jpeg_quality = _preview_min_jpeg_quality()
+    preview_max_payload_mb = _preview_max_payload_mb()
+    preview_min_dim = _preview_min_dim()
+    if profile in ("contagem", "count", "plantas"):
+        preview_max_dim = _int_setting("TMG_CONTAGEM_PREVIEW_MAX_DIM", min(preview_max_dim, 10000), 4096, 14000)
+        preview_jpeg_quality = _int_setting("TMG_CONTAGEM_PREVIEW_JPEG_QUALITY", max(preview_jpeg_quality, 97), 86, 99)
+        preview_min_jpeg_quality = _int_setting("TMG_CONTAGEM_PREVIEW_MIN_JPEG_QUALITY", max(preview_min_jpeg_quality, 92), 78, 98)
+        preview_max_payload_mb = _int_setting("TMG_CONTAGEM_PREVIEW_MAX_PAYLOAD_MB", min(preview_max_payload_mb, 64), 16, 140)
+        preview_min_dim = _int_setting("TMG_CONTAGEM_PREVIEW_MIN_DIM", max(preview_min_dim, 5200), 2400, 12000)
+    return (
+        preview_max_dim,
+        preview_jpeg_quality,
+        preview_min_jpeg_quality,
+        preview_max_payload_mb,
+        preview_min_dim,
+        profile,
+    )
+
+def processar_ortofoto(file_bytes: bytes, filename: str, preview_profile: str = "padrao"):
     file_name = Path(filename or "ortofoto").name
     total_mb = (len(file_bytes or b"") / (1024 * 1024)) if file_bytes is not None else 0
-    loading_slot = viewer_slot if viewer_slot is not None else (st.empty() if show_loading else None)
-    viewer_runtime = _tmg_current_viewer_runtime()
-    viewer_mode_label = _tmg_viewer_mode_label(viewer_runtime)
+    loading_slot = st.empty()
     (
         preview_max_dim,
         preview_jpeg_quality,
         preview_min_jpeg_quality,
         preview_max_payload_mb,
         preview_min_dim,
-    ) = _adaptive_ortho_preview_params(file_bytes, file_name, viewer_runtime)
+        preview_profile_key,
+    ) = _ortho_preview_profile_settings(preview_profile)
 
     def _progress(pct: int, message: str):
-        base_message = str(message or "Carregando ortofoto...")
-        if viewer_mode_label not in base_message:
-            base_message = f"{viewer_mode_label} · {base_message}"
-        detail = f"Arquivo: {file_name} · {total_mb:.1f} MB" if total_mb else f"Arquivo: {file_name}"
-        _set_tmg_ortho_loading_state(file_name, pct, base_message, "loading")
-        if show_loading and loading_slot is not None:
-            render_tmg_ortho_viewer_loading(
-                pct,
-                base_message,
-                container=loading_slot,
-                modo=viewer_mode_label,
-                detalhe=detail,
-                height=viewer_height,
-                titulo=viewer_title,
-            )
+        detail = f"{message} · {total_mb:.1f} MB" if total_mb else message
+        update_tmg_loading(loading_slot, pct, detail)
 
     try:
-        _purge_disabled_ortho_caches()
-        params = (preview_max_dim, preview_jpeg_quality, preview_min_jpeg_quality, preview_max_payload_mb, preview_min_dim)
+        params = (preview_profile_key, preview_max_dim, preview_jpeg_quality, preview_min_jpeg_quality, preview_max_payload_mb, preview_min_dim)
         cache_key = _ortho_preview_cache_key(file_bytes or b"", file_name, params)
+        session_cache_limit = _int_setting("TMG_SESSION_ORTHO_CACHE_ITEMS", 3, 1, 8)
         session_cache = st.session_state.setdefault("_tmg_ortho_preview_cache", {})
-        _progress(3, f"Iniciando carregamento da ortofoto: {file_name}")
-        _progress(8, "Ativando barra TMG do visualizador...")
-        desktop_cache_path = None
-        local_source_path = None
-        if str(viewer_runtime.get("active_mode") or "").lower() == "desktop":
-            _progress(12, "Preparando bibliotecas locais rápidas para leitura da ortofoto...")
-        else:
-            _progress(12, "Preparando visualizador compatível com Streamlit...")
-        if HAS_TMG_VIEWER_MANAGER and _tmg_prepare_desktop_viewer_cache is not None:
-            try:
-                desktop_cache_path = _tmg_prepare_desktop_viewer_cache(file_bytes or b"", file_name, app_root=APP_ROOT)
-                if desktop_cache_path:
-                    _progress(16, "Leitura desktop local preparada para esta sessão...")
-            except Exception:
-                desktop_cache_path = None
-        if desktop_cache_path:
-            local_source_path = desktop_cache_path
-        else:
-            _progress(16, "Preparando leitura temporária da ortofoto sem salvar cache pesado...")
-            local_source_path = _save_ortho_source_cache(file_bytes or b"", file_name, cache_key)
-        if HAS_TMG_VIEWER_MANAGER and cache_key not in _TMG_DESKTOP_VIEWER_RENDERED_KEYS:
-            _TMG_DESKTOP_VIEWER_RENDERED_KEYS.add(cache_key)
-            try:
-                _tmg_render_desktop_viewer_controls(
-                    file_bytes or b"",
-                    file_name,
-                    key=f"tmg_desktop_viewer_{cache_key[:18]}",
-                    app_root=APP_ROOT,
-                )
-            except Exception:
-                pass
-        _progress(18, "Validando arquivo recebido pelo Streamlit...")
+        _progress(6, f"Iniciando carregamento da ortofoto: {file_name}")
+        _progress(12, "Validando arquivo recebido pelo Streamlit...")
         if cache_key in session_cache:
             _progress(36, "Preview já processado nesta sessão. Reaproveitando alta qualidade...")
             result = session_cache[cache_key]
+            if HAS_LOCAL_PERFORMANCE and write_app_log is not None:
+                write_app_log(APP_ROOT, "ortho_session_cache_hit", f"{file_name} ({total_mb:.1f} MB)")
             _progress(86, "Restaurando ortofoto no visualizador...")
         else:
-            _progress(18, "Preparando preview otimizado sem gravar cache pesado na pasta...")
+            _progress(18, "Buscando preview otimizado salvo na pasta do sistema...")
             disk_result = _read_ortho_preview_disk_cache(cache_key)
             if disk_result:
                 result = disk_result
+                if HAS_LOCAL_PERFORMANCE and write_app_log is not None:
+                    write_app_log(APP_ROOT, "ortho_disk_cache_hit", f"{file_name} ({total_mb:.1f} MB)")
                 _progress(78, "Preview salvo encontrado. Abrindo ortofoto sem reprocessar...")
             else:
                 _progress(22, "Preparando parâmetros de alta qualidade...")
-                _progress(30, f"Processando preview otimizado até {preview_max_dim}px com qualidade {preview_jpeg_quality}...")
+                _progress(30, f"Processando preview até {preview_max_dim}px com qualidade {preview_jpeg_quality}...")
+                if HAS_LOCAL_PERFORMANCE and write_app_log is not None:
+                    write_app_log(APP_ROOT, "ortho_processing_start", f"{file_name} ({total_mb:.1f} MB)")
                 result = _processar_ortofoto_core(
                     file_bytes,
                     filename,
@@ -4742,41 +3696,22 @@ def processar_ortofoto(
                     preview_max_payload_mb,
                     preview_min_dim,
                     progress_callback=_progress,
-                    local_source_path=str(local_source_path) if local_source_path else None,
                 )
-                if result and len(result) >= 4 and isinstance(result[3], dict):
-                    result[3]["viewer_mode"] = str(viewer_runtime.get("active_mode") or "streamlit")
-                    result[3]["viewer_mode_label"] = viewer_mode_label
-                _write_ortho_preview_disk_cache(cache_key, result)
+                _write_ortho_preview_disk_cache(cache_key, result, file_name, len(file_bytes or b""))
+                if result and not result[2] and HAS_LOCAL_PERFORMANCE and write_app_log is not None:
+                    write_app_log(APP_ROOT, "ortho_processing_done", f"{file_name} salvo no cache local")
             if result and not result[2]:
                 session_cache[cache_key] = result
-                if len(session_cache) > 8:
-                    for old_key in list(session_cache.keys())[:-8]:
+                if len(session_cache) > session_cache_limit:
+                    for old_key in list(session_cache.keys())[:-session_cache_limit]:
                         session_cache.pop(old_key, None)
                 st.session_state["_tmg_ortho_preview_cache"] = session_cache
-        if result and len(result) >= 4 and isinstance(result[3], dict):
-            result[3]["viewer_mode"] = str(viewer_runtime.get("active_mode") or "streamlit")
-            result[3]["viewer_mode_label"] = viewer_mode_label
         _progress(94, "Entregando ortofoto ao visualizador...")
         _progress(98, "Abrindo canvas e ferramentas do visualizador...")
-        if result and result[2]:
-            _set_tmg_ortho_loading_state(file_name, 100, str(result[2]), "error", str(result[2]))
-        else:
-            _set_tmg_ortho_loading_state(file_name, 100, "Ortofoto entregue ao visualizador.", "ready")
-        if show_loading and loading_slot is not None:
-            finish_tmg_ortho_viewer_loading(
-                loading_slot,
-                "Ortofoto carregada com sucesso.",
-                modo=viewer_mode_label,
-                hold_seconds=0.2,
-                height=viewer_height,
-                titulo=viewer_title,
-            )
+        finish_tmg_loading_and_clear(loading_slot, "Ortofoto carregada com sucesso.", hold_seconds=0.08)
         return result
-    except Exception as exc:
-        _set_tmg_ortho_loading_state(file_name, 100, f"Falha ao carregar ortofoto: {exc}", "error", str(exc))
-        if show_loading and loading_slot is not None:
-            clear_tmg_loading(loading_slot)
+    except Exception:
+        clear_tmg_loading(loading_slot)
         raise
 
 
@@ -7206,38 +6141,6 @@ if "cultura_selecionada" not in st.session_state:
     st.session_state.cultura_selecionada = None
 
 if not st.session_state.logged_in:
-    _tmg_login_transition_slot = render_tmg_page_transition_loading()
-
-    if HAS_TMG_VIEWER_MANAGER and _tmg_get_viewer_runtime is not None:
-        try:
-            viewer_mode_query = st.query_params.get("tmg_viewer_mode", "")
-        except Exception:
-            try:
-                legacy_params = st.experimental_get_query_params()
-                query_values = legacy_params.get("tmg_viewer_mode", [])
-                viewer_mode_query = query_values[-1] if query_values else ""
-            except Exception:
-                viewer_mode_query = ""
-        viewer_mode_query = str(viewer_mode_query or "").strip().lower()
-        if viewer_mode_query in ("desktop", "streamlit"):
-            try:
-                viewer_runtime_query = _tmg_get_viewer_runtime()
-                if viewer_mode_query == "desktop":
-                    if bool(viewer_runtime_query.get("is_deploy")) or not bool(viewer_runtime_query.get("desktop_available")):
-                        st.session_state["_login_viewer_notice"] = "Modo Desktop Local disponível somente no computador local."
-                    elif _tmg_enable_desktop_viewer_mode is not None:
-                        _tmg_enable_desktop_viewer_mode()
-                        st.session_state["_login_viewer_notice"] = "Modo Desktop Local ativado para os visualizadores."
-                elif _tmg_enable_streamlit_viewer_mode is not None:
-                    _tmg_enable_streamlit_viewer_mode()
-                    st.session_state["_login_viewer_notice"] = "Modo Streamlit Seguro ativado para os visualizadores."
-            except Exception:
-                st.session_state["_login_viewer_notice"] = "Não foi possível alterar o modo dos visualizadores."
-            try:
-                del st.query_params["tmg_viewer_mode"]
-            except Exception:
-                pass
-            app_rerun()
 
     if LOGIN_BG_PATH.exists():
         bg_css = _img_to_base64_css(LOGIN_BG_PATH)
@@ -7319,85 +6222,6 @@ if not st.session_state.logged_in:
         transform: translateY(1px) scale(.99);
     }
 
-    .login-desktop-toggle-btn {
-        position: fixed;
-        bottom: 18px;
-        left: 24px;
-        z-index: 9999;
-        display: inline-flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        min-width: 208px;
-        min-height: 44px;
-        padding: 10px 18px;
-        border-radius: 15px;
-        border: 1.5px solid rgba(120, 220, 255, .88);
-        background:
-            linear-gradient(120deg, rgba(255,255,255,.18), transparent 30%),
-            linear-gradient(145deg, rgba(2,14,36,.97), rgba(18,62,100,.90), rgba(0,212,255,.27));
-        color: #ffffff !important;
-        font-family: 'Segoe UI', Arial, sans-serif;
-        font-size: .82rem;
-        font-weight: 950;
-        letter-spacing: .35px;
-        text-decoration: none !important;
-        text-shadow: 0 1px 0 rgba(0,0,0,.95), 0 0 10px rgba(0,212,255,.58);
-        box-shadow:
-            0 14px 28px rgba(0,0,0,.46),
-            0 0 0 1px rgba(255,255,255,.10),
-            0 0 25px rgba(0,212,255,.34),
-            inset 0 1px 0 rgba(255,255,255,.30),
-            inset 0 -10px 18px rgba(2,14,36,.42);
-        backdrop-filter: blur(12px) saturate(145%);
-        -webkit-backdrop-filter: blur(12px) saturate(145%);
-        transition: transform .25s ease, box-shadow .30s ease, border-color .30s ease, filter .30s ease;
-    }
-
-    .login-desktop-toggle-btn:hover {
-        transform: translateY(-2px);
-        border-color: rgba(178, 240, 255, .98);
-        color: #ffffff !important;
-        filter: brightness(1.10);
-        box-shadow:
-            0 18px 34px rgba(0,0,0,.55),
-            0 0 0 1px rgba(255,255,255,.16),
-            0 0 35px rgba(0,212,255,.54),
-            inset 0 1px 0 rgba(255,255,255,.36),
-            inset 0 -10px 18px rgba(2,14,36,.34);
-    }
-
-    .login-desktop-toggle-btn:active {
-        transform: translateY(1px) scale(.99);
-    }
-
-    .login-desktop-toggle-btn.is-active {
-        border-color: rgba(95,242,177,.90);
-        box-shadow:
-            0 14px 28px rgba(0,0,0,.46),
-            0 0 0 1px rgba(255,255,255,.10),
-            0 0 26px rgba(95,242,177,.38),
-            inset 0 1px 0 rgba(255,255,255,.30),
-            inset 0 -10px 18px rgba(2,14,36,.42);
-    }
-
-    .login-desktop-toggle-main {
-        display: block;
-        color: #ffffff;
-        line-height: 1.05;
-    }
-
-    .login-desktop-toggle-status {
-        display: block;
-        margin-top: 4px;
-        color: #c9f7ff;
-        font-size: .66rem;
-        font-weight: 800;
-        line-height: 1.05;
-        letter-spacing: .25px;
-        opacity: .95;
-    }
-
     @media (max-width: 720px) {
         .login-mobile-btn {
             bottom: 12px;
@@ -7406,15 +6230,6 @@ if not st.session_state.logged_in:
             min-height: 38px;
             padding: 8px 13px;
             font-size: .76rem;
-        }
-        .login-desktop-toggle-btn {
-            bottom: 60px;
-            left: 12px;
-            right: 12px;
-            min-width: 0;
-            min-height: 42px;
-            padding: 8px 13px;
-            font-size: .74rem;
         }
     }
 
@@ -7586,42 +6401,6 @@ if not st.session_state.logged_in:
         margin-top: 14px;
     }
 
-    .login-desktop-mode-card {
-        margin: 10px 0 4px 0;
-        padding: 12px 14px;
-        border-radius: 14px;
-        border: 1px solid rgba(0,229,255,.40);
-        background:
-            radial-gradient(circle at 15% 0%, rgba(0,229,255,.18), transparent 36%),
-            linear-gradient(145deg, rgba(2,14,36,.94), rgba(18,62,100,.76), rgba(0,212,255,.12));
-        box-shadow:
-            0 12px 26px rgba(0,0,0,.38),
-            0 0 20px rgba(0,212,255,.20),
-            inset 0 1px 0 rgba(255,255,255,.16);
-    }
-
-    .login-desktop-mode-title {
-        color: #ffffff;
-        font-size: .82rem;
-        font-weight: 950;
-        letter-spacing: 1.2px;
-        text-transform: uppercase;
-        text-shadow: 0 1px 0 rgba(0,0,0,.95), 0 0 12px rgba(0,212,255,.42);
-        margin-bottom: 5px;
-    }
-
-    .login-desktop-mode-status {
-        color: #dffbff;
-        font-size: .74rem;
-        font-weight: 800;
-        line-height: 1.35;
-        text-shadow: 0 1px 0 rgba(0,0,0,.80);
-    }
-
-    .login-desktop-mode-status b {
-        color: #5ff2b1;
-    }
-
     .login-cfg-panel {
         background: linear-gradient(160deg, #181818 0%, #0f0f0f 100%);
         border: 1px solid #2a2a2a;
@@ -7665,37 +6444,6 @@ if not st.session_state.logged_in:
     """, unsafe_allow_html=True)
 
     st.markdown("<a class='login-mobile-btn' href='?mobile=1'>Versão Mobile</a>", unsafe_allow_html=True)
-    if HAS_TMG_VIEWER_MANAGER and _tmg_get_viewer_runtime is not None:
-        try:
-            viewer_runtime = _tmg_get_viewer_runtime()
-        except Exception:
-            viewer_runtime = {"active_mode": "streamlit", "configured_mode": "auto", "desktop_available": False, "is_deploy": True}
-        active_mode = str(viewer_runtime.get("active_mode", "streamlit"))
-        desktop_available = bool(viewer_runtime.get("desktop_available"))
-        is_deploy_viewer = bool(viewer_runtime.get("is_deploy"))
-        desktop_active = active_mode == "desktop"
-        toggle_target = "streamlit" if desktop_active else "desktop"
-        toggle_class = "login-desktop-toggle-btn is-active" if desktop_active else "login-desktop-toggle-btn"
-        toggle_title = "Modo Desktop Local"
-        engine_status = str(viewer_runtime.get("desktop_engine") or "streamlit")
-        if is_deploy_viewer:
-            toggle_status = "Streamlit Web"
-            toggle_target = "streamlit"
-        elif desktop_active:
-            toggle_status = f"Ativado · {engine_status}"
-        elif desktop_available:
-            toggle_status = "Desativado"
-        else:
-            toggle_status = "Indisponivel"
-        st.markdown(
-            f"""
-            <a class="{toggle_class}" role="button" href="?tmg_viewer_mode={toggle_target}" onclick="window.location.href='?tmg_viewer_mode={toggle_target}'; return false;">
-                <span class="login-desktop-toggle-main">{html.escape(toggle_title)}</span>
-                <span class="login-desktop-toggle-status">{html.escape(toggle_status)}</span>
-            </a>
-            """,
-            unsafe_allow_html=True,
-        )
 
     _, col_mid, _ = st.columns([1.25, 0.9, 1.25])
 
@@ -7718,14 +6466,11 @@ if not st.session_state.logged_in:
         usuario = st.text_input("Usuário", placeholder="Digite seu login", key="login_user")
         senha   = st.text_input("Senha",   placeholder="Digite sua senha", type="password", key="login_pass")
 
-        st.session_state.pop("_login_viewer_notice", None)
-
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
         if st.button("⟶  ENTRAR", type="primary", key="btn_entrar"):
             auth_user = _auth_find_user(usuario, senha)
             if auth_user:
-                _mark_tmg_page_transition("Home")
                 st.session_state.logged_in = True
                 st.session_state.auth_user = auth_user
                 state_login = _partners_load_state()
@@ -7791,7 +6536,6 @@ if not st.session_state.logged_in:
                     st.success("Imagem de fundo removida.")
                     app_rerun()
 
-    clear_tmg_page_transition_loading(_tmg_login_transition_slot)
     st.stop()
 
 
@@ -7799,7 +6543,6 @@ if not st.session_state.logged_in:
 # TELA DE SELEÇÃO DE CULTURA (PÓS-LOGIN)[cite: 1]
 # ==========================================
 if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
-    _tmg_home_transition_slot = render_tmg_page_transition_loading()
     current_user = _auth_current_user()
     allowed_cultures = _auth_allowed_cultures(current_user)
     can_open_partners = _auth_can_partners(current_user)
@@ -7971,7 +6714,6 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
                 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
                 if st.button(f"Selecionar {nome}", key=f"btn_cultura_{nome}", type="primary"):
                     st.session_state.cultura_selecionada = nome
-                    _mark_tmg_page_transition("Checklist")
                     st.session_state.pagina_ativa = "Checklist"
                     app_rerun()
 
@@ -7991,7 +6733,6 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
                 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
                 if st.button("Abrir Parceiros / Controle de Voos e Dados", key="btn_open_partners_home", type="primary", use_container_width=True):
                     st.session_state.cultura_selecionada = "PARCEIROS"
-                    _mark_tmg_page_transition("Parceiros")
                     st.session_state.pagina_ativa = "Parceiros"
                     app_rerun()
 
@@ -8007,7 +6748,6 @@ if st.session_state.logged_in and st.session_state.cultura_selecionada is None:
             unsafe_allow_html=True
         )
 
-    clear_tmg_page_transition_loading(_tmg_home_transition_slot)
     st.stop()
 
 
@@ -8037,21 +6777,21 @@ def _cultura_ambiente_info(cultura: str = "") -> dict:
         "SOJA": {
             "icone": "🌱",
             "nome": "SOJA",
-            "subtitulo": "Ambiente de Análise de Soja",
+            "subtitulo": "",
             "cor": "#4caf50",
             "glow": "76, 175, 80",
         },
         "MILHO": {
             "icone": "🌽",
             "nome": "MILHO",
-            "subtitulo": "Ambiente de Análise de Milho",
+            "subtitulo": "",
             "cor": "#ffb300",
             "glow": "255, 179, 0",
         },
         "ALGODÃO": {
             "icone": "🌿",
             "nome": "ALGODÃO",
-            "subtitulo": "Ambiente de Análise de Algodão",
+            "subtitulo": "",
             "cor": "#80cbc4",
             "glow": "128, 203, 196",
         },
@@ -8156,18 +6896,25 @@ def render_cultura_ambiente_card(topo: bool = False) -> None:
     info = _cultura_ambiente_info(cultura)
     glow = f"rgba({info['glow']}, .42)"
     extra_class = " cultura-env-top" if topo else ""
-    st.markdown(f"""
-    <div class="cultura-env-card{extra_class}" style="--culture-glow:{glow}; border-color:{info['cor']}88;">
-        <div class="cultura-env-logo">{info['icone']}</div>
-        <div>
-            <div class="cultura-env-title">Ambiente {html.escape(info['nome'])}</div>
-            <div class="cultura-env-subtitle">{html.escape(info['subtitulo'])}</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    card_html = (
+        f'<div class="cultura-env-card{extra_class}" style="--culture-glow:{glow}; border-color:{info["cor"]}88;">'
+        f'<div class="cultura-env-logo">{info["icone"]}</div>'
+        f'<div class="cultura-env-title">{html.escape(info["nome"])}</div>'
+        f'</div>'
+    )
+    st.markdown(card_html, unsafe_allow_html=True)
 
-# Adicionado um payload oculto para receber as coordenadas vindas do JavaScript
+# Payloads ocultos para receber coordenadas vindas dos visualizadores JavaScript
+st.markdown("""
+<style>
+div[data-testid="stTextInput"]:has(input[aria-label="grid_payload"]),
+div[data-testid="stTextInput"]:has(input[aria-label="kml_marker_payload"]) {
+    display: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
 st.text_input("grid_payload", key="grid_payload", label_visibility="hidden")
+st.text_input("kml_marker_payload", key="kml_marker_payload", label_visibility="hidden")
 
 # ==========================================
 # MODULO ISOLADO - TRANSFERENCIA DE VOOS
@@ -8372,13 +7119,11 @@ def _mosaic_bytes_from_selection(option: str) -> tuple:
 def _mosaic_input_bytes(uploaded, selected_option: str, origem: str) -> tuple:
     if uploaded is not None:
         load_box = st.empty()
-        render_tmg_ortho_import_progress(load_box, 18, uploaded, "Recebendo ortofoto do importador")
-        render_tmg_ortho_import_progress(load_box, 36, uploaded, "Validando arquivo de ortofoto")
+        update_tmg_loading(load_box, 35, f"Recebendo arquivo: {Path(uploaded.name).name}")
         raw = uploaded.getbuffer().tobytes()
-        render_tmg_ortho_import_progress(load_box, 68, uploaded, "Copiando arquivo para memória local")
-        render_tmg_ortho_import_progress(load_box, 84, uploaded, "Registrando ortofoto na biblioteca interna")
+        update_tmg_loading(load_box, 78, "Registrando arquivo na biblioteca interna...")
         _mosaic_register_bytes(raw, uploaded.name, origem)
-        finish_tmg_loading_and_clear(load_box, "Importação da ortofoto concluída com sucesso.", hold_seconds=0.22)
+        finish_tmg_loading_and_clear(load_box, "Carregamento concluído com sucesso.")
         return raw, uploaded.name
     return _mosaic_bytes_from_selection(selected_option)
 
@@ -8408,20 +7153,12 @@ def _resettable_ortho_uploader(label: str, key: str, accept_multiple_files: bool
         if accept_multiple_files:
             total_files = len(uploaded or [])
             if show_upload_loading:
-                total_size = sum(int(getattr(file, "size", 0) or 0) for file in (uploaded or []))
-                size_label = _tv_human_size(total_size) if total_size else ""
-                update_tmg_loading(load_box, 12, f"Recebendo {total_files} ortofoto(s) do importador...")
-                update_tmg_loading(load_box, 32, f"Validando lote de ortofotos" + (f" · {size_label}" if size_label else ""))
-                update_tmg_loading(load_box, 58, "Preparando arquivos para os visualizadores...")
-                update_tmg_loading(load_box, 86, "Ortofotos prontas para processamento no visualizador...")
-                finish_tmg_loading_and_clear(load_box, f"{total_files} arquivo(s) carregado(s) com sucesso.", hold_seconds=0.22)
+                update_tmg_loading(load_box, 65, f"Recebendo {total_files} arquivo(s) para carregamento...")
+                finish_tmg_loading_and_clear(load_box, f"{total_files} arquivo(s) carregado(s) com sucesso.")
         else:
             if show_upload_loading:
-                render_tmg_ortho_import_progress(load_box, 12, uploaded, "Recebendo ortofoto do importador")
-                render_tmg_ortho_import_progress(load_box, 34, uploaded, "Validando tipo, nome e tamanho")
-                render_tmg_ortho_import_progress(load_box, 58, uploaded, "Preparando ortofoto para o visualizador")
-                render_tmg_ortho_import_progress(load_box, 86, uploaded, "Arquivo pronto para processamento")
-                finish_tmg_loading_and_clear(load_box, "Importação da ortofoto concluída com sucesso.", hold_seconds=0.22)
+                update_tmg_loading(load_box, 65, f"Carregando ortofoto: {Path(uploaded.name).name}")
+                finish_tmg_loading_and_clear(load_box, "Carregamento concluído com sucesso.")
         _, clear_col = st.columns([3, 1])
         with clear_col:
             if st.button("🗑️ Excluir e importar nova", key=f"{key}_clear_{st.session_state[reset_key]}", use_container_width=True):
@@ -8823,13 +7560,7 @@ def _tv_render_orthos(manifest: dict) -> None:
         key="tv_ortho_upload"
     )
     if ortho_files:
-        load_box = st.empty()
-        total_size = sum(int(getattr(file, "size", 0) or 0) for file in (ortho_files or []))
-        size_label = _tv_human_size(total_size) if total_size else ""
-        update_tmg_loading(load_box, 16, f"Recebendo {len(ortho_files)} ortofoto(s) para registro...")
-        update_tmg_loading(load_box, 48, "Validando lote de ortofotos" + (f" · {size_label}" if size_label else ""))
-        update_tmg_loading(load_box, 82, "Arquivos prontos para importar no visualizador...")
-        finish_tmg_loading_and_clear(load_box, f"{len(ortho_files)} ortofoto(s) recebida(s) para registro.", hold_seconds=0.22)
+        render_tmg_loading_bar(100, f"{len(ortho_files)} ortofoto(s) recebida(s) para registro.")
     if st.button("Registrar ortofoto recebida", type="primary", key="tv_register_ortho", use_container_width=True):
         if not ortho_files:
             st.warning("Selecione uma ortofoto.")
@@ -9071,14 +7802,14 @@ def _tv_render_grid_parcelas(manifest: dict) -> None:
             ortho_id = selected.split(" · ")[0]
             record = next((o for o in manifest.get("orthos", []) if o.get("ortho_id") == ortho_id), None)
             if record and Path(record.get("path", "")).exists():
-                viewer_slot = st.empty()
-                raw = Path(record["path"]).read_bytes()
-                b64, dims, err, _ = processar_ortofoto(raw, record["nome"], viewer_slot=viewer_slot, viewer_height=700, viewer_title="Visualizador GIS")
+                with st.container():
+                    raw = Path(record["path"]).read_bytes()
+                    b64, dims, err, _ = processar_ortofoto(raw, record["nome"])
                 if err:
-                    render_tmg_ortho_error_frame("Visualizador GIS", err, "Tente abrir outra ortofoto.", 700, container=viewer_slot)
+                    st.error(err)
                 else:
                     st.markdown(f"<p style='color:#888;font-size:0.8rem;'>📐 {record['nome']} · {dims[0]}×{dims[1]} px · grid preservado em JSON</p>", unsafe_allow_html=True)
-                    render_tmg_ortho_viewer_component(viewer_slot, _tv_grid_viewer_html(b64, int(rows), int(cols), record["nome"]), height=700, scrolling=False)
+                    components.html(_tv_grid_viewer_html(b64, int(rows), int(cols), record["nome"]), height=700, scrolling=False)
 
     st.markdown("##### Versões de Grid")
     grid_rows = [{
@@ -9681,7 +8412,7 @@ def _vd_grid_shp_zip_bytes(grid: dict, ortho: dict) -> bytes:
 def _vd_grid_overlay_bytes(grid: dict, ortho: dict, image_format: str = "PNG") -> bytes:
     from PIL import ImageDraw
     raw = Path(ortho["path"]).read_bytes()
-    b64, _, err, _ = processar_ortofoto(raw, ortho.get("nome", "ortofoto"), show_loading=False)
+    b64, _, err, _ = processar_ortofoto(raw, ortho.get("nome", "ortofoto"))
     if err:
         raise RuntimeError(err)
     img = Image.open(BytesIO(base64.b64decode(b64))).convert("RGBA")
@@ -9999,11 +8730,7 @@ def _vd_render_ortofotos(manifest: dict) -> None:
             key="vd_ortho_file"
         )
         if ortho_file is not None:
-            load_box = st.empty()
-            render_tmg_ortho_import_progress(load_box, 18, ortho_file, "Recebendo ortofoto gerada")
-            render_tmg_ortho_import_progress(load_box, 52, ortho_file, "Validando arquivo para importação")
-            render_tmg_ortho_import_progress(load_box, 86, ortho_file, "Arquivo pronto para abrir no visualizador")
-            finish_tmg_loading_and_clear(load_box, "Ortofoto recebida com sucesso.", hold_seconds=0.22)
+            render_tmg_loading_bar(100, f"Ortofoto recebida: {Path(ortho_file.name).name}")
         importar_ortho = st.form_submit_button("Importar Ortofoto", type="primary", use_container_width=True)
 
     if importar_ortho:
@@ -10096,16 +8823,15 @@ def _vd_render_ortofotos(manifest: dict) -> None:
         st.info("Pré-visualização em espera. Clique em Abrir pré-visualização para carregar o mosaico no navegador.")
         return
 
-    viewer_slot = st.empty()
     raw = Path(ortho["path"]).read_bytes()
-    b64, dims, err, spatial_meta = processar_ortofoto(raw, ortho["nome"], viewer_slot=viewer_slot, viewer_height=700, viewer_title="Pré-visualização de Ortofoto")
+    b64, dims, err, spatial_meta = processar_ortofoto(raw, ortho["nome"])
     if err:
-        render_tmg_ortho_error_frame("Pré-visualização de Ortofoto", f"Não foi possível abrir o preview: {err}", "Tente importar outra ortofoto.", 700, container=viewer_slot)
+        st.error(f"Não foi possível abrir o preview: {err}")
     else:
         ortho["spatial_meta"] = spatial_meta or ortho.get("spatial_meta", {})
         ortho["resolucao_preview"] = f"{dims[0]}x{dims[1]} px"
         _vd_save_manifest(manifest)
-        render_tmg_ortho_viewer_component(viewer_slot, _vd_ortho_viewer_html(b64, ortho["nome"], dims[0], dims[1]), height=700, scrolling=False)
+        components.html(_vd_ortho_viewer_html(b64, ortho["nome"], dims[0], dims[1]), height=700, scrolling=False)
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -10232,14 +8958,13 @@ def _vd_render_grid(manifest: dict) -> None:
             ortho_id = _vd_id_from_option(selected)
             ortho = _vd_find_ortho(manifest, ortho_id)
             if ortho and Path(ortho.get("path", "")).exists():
-                viewer_slot = st.empty()
                 raw = Path(ortho["path"]).read_bytes()
-                b64, dims, err, _ = processar_ortofoto(raw, ortho["nome"], viewer_slot=viewer_slot, viewer_height=700, viewer_title="Marcador de Grid")
+                b64, dims, err, _ = processar_ortofoto(raw, ortho["nome"])
                 if err:
-                    render_tmg_ortho_error_frame("Marcador de Grid", err, "Tente selecionar outra ortofoto.", 700, container=viewer_slot)
+                    st.error(err)
                 else:
                     st.caption(f"{ortho['nome']} · {dims[0]}x{dims[1]} px")
-                    render_tmg_ortho_viewer_component(viewer_slot, _tv_grid_viewer_html(b64, int(rows), int(cols), ortho["nome"]), height=700, scrolling=False)
+                    components.html(_tv_grid_viewer_html(b64, int(rows), int(cols), ortho["nome"]), height=700, scrolling=False)
 
     st.markdown("#### Exportação Final")
     grid_options = [f"{g['grid_id']} · {g.get('ortho_nome','Ortofoto')}" for g in manifest.get("grids", [])]
@@ -10349,7 +9074,7 @@ def _vd_render_projetos(manifest: dict) -> None:
     with c1:
         if ortho and Path(ortho.get("path", "")).exists():
             raw = Path(ortho["path"]).read_bytes()
-            b64, dims, err, _ = processar_ortofoto(raw, ortho["nome"], show_loading=False)
+            b64, dims, err, _ = processar_ortofoto(raw, ortho["nome"])
             if not err:
                 app_image(Image.open(BytesIO(base64.b64decode(b64))))
                 st.caption(f"Miniatura: {ortho['nome']} · {dims[0]}x{dims[1]}")
@@ -11969,13 +10694,12 @@ def _orthomosaic_render_viewer(path: Path) -> None:
         )
     if st.session_state.get("ortho_view_file") == str(path):
         try:
-            viewer_slot = st.empty()
             raw = path.read_bytes()
-            b64, dims, err, _ = processar_ortofoto(raw, path.name, viewer_slot=viewer_slot, viewer_height=680, viewer_title="Gerador de Ortomosaico")
+            b64, dims, err, _ = processar_ortofoto(raw, path.name)
             if err:
-                render_tmg_ortho_error_frame("Gerador de Ortomosaico", "Não foi possível gerar a prévia no navegador.", "O arquivo continua disponível para download.", 680, container=viewer_slot)
+                st.info("Não foi possível gerar a prévia no navegador. O arquivo continua disponível para download.")
                 return
-            render_tmg_ortho_viewer_component(viewer_slot, _orthomosaic_simple_viewer_html(b64, path.name, dims[0], dims[1]), height=680, scrolling=False)
+            components.html(_orthomosaic_simple_viewer_html(b64, path.name, dims[0], dims[1]), height=680, scrolling=False)
         except Exception:
             st.info("Não foi possível gerar a prévia no navegador. O arquivo continua disponível para download.")
 
@@ -13448,30 +12172,17 @@ def render_loading_camadas(progress, texto: str = "Carregando camada...", arquiv
     target = container if container is not None else st
     target.markdown(markup, unsafe_allow_html=True)
 
+@st.cache_data(show_spinner=False, max_entries=3)
 def carregar_preview_raster_otimizado(file_bytes: bytes, filename: str):
-    params = _adaptive_ortho_preview_params(file_bytes, filename, _tmg_current_viewer_runtime())
-    cache_key = _ortho_preview_cache_key(file_bytes or b"", filename, params)
-    disk_result = _read_ortho_preview_disk_cache(cache_key)
-    if disk_result:
-        return disk_result
-    source_path = _save_ortho_source_cache(file_bytes or b"", filename, cache_key)
-    if source_path and source_path.exists():
-        try:
-            stat = source_path.stat()
-            result = _processar_ortofoto_file_cached(
-                str(source_path),
-                filename,
-                int(stat.st_size),
-                int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
-                *params,
-            )
-            _write_ortho_preview_disk_cache(cache_key, result)
-            return result
-        except Exception:
-            pass
-    result = _processar_ortofoto_cached(file_bytes, filename, *params)
-    _write_ortho_preview_disk_cache(cache_key, result)
-    return result
+    return _processar_ortofoto_cached(
+        file_bytes,
+        filename,
+        _preview_max_dim(),
+        _preview_jpeg_quality(),
+        _preview_min_jpeg_quality(),
+        _preview_max_payload_mb(),
+        _preview_min_dim(),
+    )
 
 def render_loading_visualizador_grid(progress=67, texto: str = "Carregando visualizador...", etapa: str = "Preparando camadas selecionadas...") -> str:
     try:
@@ -14551,7 +13262,7 @@ if(data.raster && data.raster.data_url){
 """
     loading_html = render_loading_visualizador_grid(18, "Carregando visualizador...", "Preparando camadas selecionadas...")
     viewer_html = viewer_html.replace("__VIEWER_DATA__", data_json).replace("__GRIDMARK_LOADING__", loading_html)
-    render_tmg_ortho_viewer_component(st.empty(), viewer_html, height=780, scrolling=False)
+    components.html(viewer_html, height=780, scrolling=False)
     st.session_state["gridmark_zoom_layer_id"] = ""
     st.session_state["gridmark_zoom_selected"] = False
 
@@ -15095,6 +13806,4313 @@ def render_analise_marcacao_grid() -> None:
 
 
 # ==========================================
+# MODULO ISOLADO - MARCADOR DE KML
+# ==========================================
+KML_MARKER_ROOT = SYSTEM_DATABASE_DIR / "marcador_kml"
+KML_MARKER_ROOT.mkdir(parents=True, exist_ok=True)
+
+def _kml_marker_safe_name(value: str, default: str = "area_tmg") -> str:
+    return _tv_safe_name(value or default) or default
+
+def _kml_marker_payload() -> dict:
+    raw = str(st.session_state.get("kml_marker_payload") or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+def _kml_marker_feature_from_payload(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    if payload.get("type") == "Feature" and isinstance(payload.get("geometry"), dict):
+        return payload
+    if payload.get("type") == "FeatureCollection":
+        for feature in payload.get("features", []):
+            if isinstance(feature, dict) and isinstance(feature.get("geometry"), dict):
+                geom_type = str(feature["geometry"].get("type") or "")
+                if geom_type in ("Polygon", "MultiPolygon"):
+                    return feature
+    if payload.get("type") in ("Polygon", "MultiPolygon"):
+        return {"type": "Feature", "properties": {}, "geometry": payload}
+    return {}
+
+def _kml_marker_polygon_coords(payload: dict) -> list[tuple[float, float]]:
+    feature = _kml_marker_feature_from_payload(payload)
+    geometry = feature.get("geometry", {}) if feature else {}
+    geom_type = str(geometry.get("type") or "")
+    coords_raw = geometry.get("coordinates") or []
+    if geom_type == "Polygon" and coords_raw:
+        ring = coords_raw[0]
+    elif geom_type == "MultiPolygon" and coords_raw and coords_raw[0]:
+        ring = coords_raw[0][0]
+    else:
+        return []
+
+    coords = []
+    for item in ring:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        try:
+            lon = float(item[0])
+            lat = float(item[1])
+        except Exception:
+            continue
+        if -180 <= lon <= 180 and -90 <= lat <= 90:
+            coords.append((lon, lat))
+
+    if len(coords) >= 2 and coords[0] == coords[-1]:
+        coords = coords[:-1]
+    unique_coords = []
+    for lon, lat in coords:
+        if not unique_coords or unique_coords[-1] != (lon, lat):
+            unique_coords.append((lon, lat))
+    if len(unique_coords) < 3:
+        return []
+    unique_coords.append(unique_coords[0])
+    return unique_coords
+
+def _kml_marker_utm_epsg(lon: float, lat: float) -> int:
+    zone = int((float(lon) + 180) // 6) + 1
+    zone = max(1, min(60, zone))
+    return (32600 if float(lat) >= 0 else 32700) + zone
+
+def _kml_marker_calculate_area(coords: list[tuple[float, float]]) -> dict:
+    if len(coords) < 4:
+        raise ValueError("Desenhe uma área no mapa para calcular.")
+    try:
+        from pyproj import Geod, Transformer
+    except Exception as exc:
+        raise RuntimeError("A biblioteca pyproj é obrigatória para calcular área geográfica corretamente.") from exc
+
+    lon_center = sum(lon for lon, _ in coords[:-1]) / max(1, len(coords) - 1)
+    lat_center = sum(lat for _, lat in coords[:-1]) / max(1, len(coords) - 1)
+    epsg = _kml_marker_utm_epsg(lon_center, lat_center)
+    geod = Geod(ellps="WGS84")
+    lons = [lon for lon, _ in coords]
+    lats = [lat for _, lat in coords]
+    area_geod, perimeter_geod = geod.polygon_area_perimeter(lons, lats)
+    area_m2 = abs(float(area_geod))
+    perimeter_m = abs(float(perimeter_geod))
+
+    if area_m2 <= 0:
+        from shapely.geometry import Polygon as ShapelyPolygon
+
+        transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
+        projected = [transformer.transform(lon, lat) for lon, lat in coords]
+        polygon_projected = ShapelyPolygon(projected)
+        if not polygon_projected.is_valid:
+            polygon_projected = polygon_projected.buffer(0)
+        area_m2 = abs(float(polygon_projected.area))
+        perimeter_m = abs(float(polygon_projected.length))
+
+    return {
+        "area_m2": area_m2,
+        "area_ha": area_m2 / 10000.0,
+        "perimeter_m": perimeter_m,
+        "epsg": epsg,
+        "centroid": (lon_center, lat_center),
+    }
+
+def _kml_marker_format_number(value: float, decimals: int = 2) -> str:
+    try:
+        return f"{float(value):,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return "0,00"
+
+def _kml_marker_kml_color(hex_color: str, alpha: str = "ff") -> str:
+    clean = str(hex_color or "#00e5ff").strip().lstrip("#")
+    if len(clean) == 3:
+        clean = "".join(ch * 2 for ch in clean)
+    if len(clean) != 6 or not re.fullmatch(r"[0-9a-fA-F]{6}", clean):
+        clean = "00e5ff"
+    red, green, blue = clean[0:2], clean[2:4], clean[4:6]
+    alpha = alpha if re.fullmatch(r"[0-9a-fA-F]{2}", str(alpha or "")) else "ff"
+    return f"{alpha}{blue}{green}{red}".lower()
+
+def _kml_marker_generate_kml(nome_area: str, observacao: str, coords: list[tuple[float, float]], area_info: dict, data_area: str | None = None) -> bytes:
+    if len(coords) < 4:
+        raise ValueError("Não foi possível gerar o KML sem polígono.")
+
+    nome_limpo = str(nome_area or "Área TMG").strip() or "Área TMG"
+    obs_limpa = str(observacao or "").strip()
+    data_limpa = re.sub(r"[^0-9]", "", str(data_area or date.today().strftime("%Y%m%d")))[:8] or date.today().strftime("%Y%m%d")
+    vertices = max(0, len(coords) - 1)
+    coord_lines = "\n".join(f"{lon:.8f},{lat:.8f},0" for lon, lat in coords)
+    line_color = _kml_marker_kml_color(THEME_PRIMARY_COLOR, "ff")
+    poly_color = _kml_marker_kml_color(THEME_PRIMARY_COLOR, "66")
+    description_parts = [
+        f"Nome da área: {nome_limpo}",
+        f"Data: {data_limpa}",
+        f"Área: {_kml_marker_format_number(area_info.get('area_m2', 0.0), 2)} m²",
+        f"Hectares: {_kml_marker_format_number(area_info.get('area_ha', 0.0), 4)} ha",
+        f"Perímetro: {_kml_marker_format_number(area_info.get('perimeter_m', 0.0), 2)} m",
+        f"Vértices: {vertices}",
+    ]
+    if obs_limpa:
+        description_parts.append(f"Observação: {obs_limpa}")
+    description_parts.append(f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    description_html = "<br/>".join(html.escape(part, quote=True) for part in description_parts)
+    description_html = description_html.replace("]]>", "]]]]><![CDATA[>")
+    nome_xml = html.escape(nome_limpo, quote=True)
+    obs_xml = html.escape(obs_limpa, quote=True)
+    data_xml = html.escape(data_limpa, quote=True)
+
+    kml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>{nome_xml}</name>
+    <Style id="tmg_area_style">
+      <LineStyle>
+        <color>{line_color}</color>
+        <width>3</width>
+      </LineStyle>
+      <PolyStyle>
+        <color>{poly_color}</color>
+        <fill>1</fill>
+        <outline>1</outline>
+      </PolyStyle>
+    </Style>
+    <Placemark>
+      <name>{nome_xml}</name>
+      <description><![CDATA[{description_html}]]></description>
+      <styleUrl>#tmg_area_style</styleUrl>
+      <ExtendedData>
+        <Data name="nome_area"><value>{nome_xml}</value></Data>
+        <Data name="data"><value>{data_xml}</value></Data>
+        <Data name="observacao"><value>{obs_xml}</value></Data>
+        <Data name="area_m2"><value>{float(area_info.get('area_m2', 0.0)):.4f}</value></Data>
+        <Data name="area_ha"><value>{float(area_info.get('area_ha', 0.0)):.6f}</value></Data>
+        <Data name="perimetro_m"><value>{float(area_info.get('perimeter_m', 0.0)):.4f}</value></Data>
+        <Data name="vertices"><value>{vertices}</value></Data>
+      </ExtendedData>
+      <Polygon>
+        <extrude>0</extrude>
+        <altitudeMode>clampToGround</altitudeMode>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+{coord_lines}
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+  </Document>
+</kml>
+"""
+    return kml.encode("utf-8")
+
+def _render_kml_marker_css() -> None:
+    st.markdown(f"""
+    <style>
+    .kml-page-intro {{
+        margin:0 0 14px 0;
+        padding:12px 14px;
+        border-radius:12px;
+        border:1px solid rgba({THEME_PRIMARY_RGB}, .42);
+        background:
+            linear-gradient(120deg, rgba(255,255,255,.10), transparent 34%),
+            linear-gradient(145deg, rgba(2,14,36,.92), rgba(13,43,69,.74), rgba({THEME_PRIMARY_RGB}, .12));
+        color:#e8fbff;
+        font-weight:800;
+        letter-spacing:.4px;
+        box-shadow:0 12px 24px rgba(0,0,0,.30), 0 0 18px rgba({THEME_PRIMARY_RGB}, .16);
+    }}
+    .kml-marker-shell {{
+        border:1px solid rgba({THEME_PRIMARY_RGB}, .46);
+        border-radius:14px;
+        padding:0;
+        background:
+            radial-gradient(circle at 12% 0%, rgba({THEME_PRIMARY_RGB}, .18), transparent 44%),
+            linear-gradient(145deg, rgba(2,14,36,.94), rgba(13,43,69,.76), rgba({THEME_PRIMARY_RGB}, .12));
+        box-shadow:0 14px 30px rgba(0,0,0,.36), 0 0 24px rgba({THEME_PRIMARY_RGB}, .18);
+        overflow:hidden;
+    }}
+    .kml-marker-title {{
+        color:#ffffff;
+        font-size:1.03rem;
+        font-weight:950;
+        letter-spacing:2px;
+        text-transform:uppercase;
+        margin:0 0 12px 0;
+        text-shadow:0 2px 0 rgba(0,0,0,.88), 0 0 16px rgba({THEME_PRIMARY_RGB}, .46);
+    }}
+    .kml-summary-row {{
+        display:flex;
+        justify-content:space-between;
+        gap:12px;
+        padding:9px 0;
+        border-bottom:1px solid rgba({THEME_PRIMARY_RGB}, .22);
+        color:#e8fbff;
+        font-size:.84rem;
+    }}
+    .kml-summary-row b {{
+        color:#ffffff;
+        font-weight:900;
+    }}
+    .kml-coord-box {{
+        margin-top:10px;
+        padding:10px;
+        border-radius:10px;
+        border:1px solid rgba({THEME_PRIMARY_RGB}, .34);
+        background:rgba(2,14,36,.62);
+        color:#dffbff;
+        font-family:'Consolas','Courier New',monospace;
+        font-size:.75rem;
+        line-height:1.45;
+        word-break:break-word;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+
+def render_kml_marker_map(initial_feature: dict | None = None) -> None:
+    initial_json = json.dumps(initial_feature or None, ensure_ascii=False)
+    data_auto = date.today().strftime("%Y%m%d")
+    map_html = """
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+  <style>
+    * { box-sizing:border-box; }
+    html, body {
+      margin:0; padding:0; width:100%; height:100%;
+      background:#020e24; color:#ffffff;
+      font-family:'Segoe UI', Arial, sans-serif; overflow:hidden;
+    }
+    .kml-tool {
+      width:100%; height:780px; padding:14px;
+      display:grid;
+      grid-template-columns:336px minmax(0, 1fr);
+      grid-template-areas:"side map";
+      gap:14px;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(__THEME_RGB__, .18), transparent 42%),
+        linear-gradient(135deg, #020e24 0%, #061525 52%, #0d2b45 100%);
+    }
+    .kml-map-frame, .kml-side-panel {
+      border:1px solid rgba(__THEME_RGB__, .56);
+      border-radius:14px;
+      background:
+        linear-gradient(120deg, rgba(255,255,255,.10), transparent 32%),
+        linear-gradient(145deg, rgba(2,14,36,.94), rgba(18,62,100,.78), rgba(__THEME_RGB__, .14));
+      box-shadow:
+        0 16px 32px rgba(0,0,0,.40),
+        0 0 26px rgba(__THEME_RGB__, .20),
+        inset 0 1px 0 rgba(255,255,255,.14);
+      overflow:hidden;
+    }
+    .kml-map-frame { grid-area:map; position:relative; min-width:0; }
+    #map { width:100%; height:100%; min-height:610px; background:#020e24; }
+    .kml-map-frame.earth-tilt #map {
+      transform:perspective(1400px) rotateX(5deg) scale(1.015);
+      transform-origin:50% 54%;
+      transition:transform .24s ease, filter .24s ease;
+      filter:saturate(1.08) contrast(1.04);
+    }
+    .leaflet-container { background:#020e24; color:#ffffff; }
+    .tmg-kml-imagery-contrast {
+      filter:contrast(1.18) saturate(1.22) brightness(1.04);
+    }
+    .leaflet-control-layers, .leaflet-bar a, .leaflet-bar a:hover {
+      background:linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.88), rgba(__THEME_RGB__, .20)) !important;
+      border-color:rgba(__THEME_RGB__, .54) !important;
+      color:#ffffff !important;
+      box-shadow:0 10px 24px rgba(0,0,0,.42), 0 0 20px rgba(__THEME_RGB__, .20) !important;
+    }
+    .leaflet-control-layers {
+      margin-top:10px !important;
+      margin-right:10px !important;
+      border-radius:8px !important;
+    }
+    .leaflet-control-layers label, .leaflet-control-layers span { color:#ffffff !important; font-weight:700; }
+    .leaflet-draw-tooltip { background:rgba(2,14,36,.92); border:1px solid rgba(__THEME_RGB__, .58); color:#ffffff; }
+    .leaflet-draw-toolbar a {
+      background-image:none !important;
+      text-indent:0 !important;
+      display:flex !important;
+      align-items:center !important;
+      justify-content:center !important;
+      overflow:hidden !important;
+      font-size:0 !important;
+      color:#ffffff !important;
+    }
+    .leaflet-draw-toolbar a::before {
+      display:block;
+      color:#ffffff;
+      font-family:'Segoe UI Symbol','Segoe UI',Arial,sans-serif;
+      font-size:17px;
+      font-weight:950;
+      line-height:1;
+      text-shadow:0 1px 0 #000, 0 0 10px rgba(__THEME_RGB__, .62);
+    }
+    .leaflet-draw-draw-polygon::before { content:"⬟"; }
+    .leaflet-draw-edit-edit::before { content:"✎"; }
+    .leaflet-draw-edit-remove::before { content:"×"; font-size:22px !important; }
+    .leaflet-draw-toolbar a.leaflet-disabled::before { opacity:.40; }
+    .leaflet-draw-actions a {
+      width:auto !important;
+      min-width:62px !important;
+      padding:0 9px !important;
+      background-image:none !important;
+      text-indent:0 !important;
+      color:#ffffff !important;
+      font-size:11px !important;
+      font-weight:900 !important;
+      text-shadow:0 1px 0 rgba(0,0,0,.84) !important;
+    }
+    .tmg-map-badge {
+      position:absolute; left:54px; bottom:34px; z-index:600;
+      border:1px solid rgba(__THEME_RGB__, .55); border-radius:10px;
+      padding:8px 11px; background:rgba(2,14,36,.88); color:#dffbff;
+      font-size:11px; font-weight:800; letter-spacing:.7px;
+      box-shadow:0 10px 22px rgba(0,0,0,.38), 0 0 16px rgba(__THEME_RGB__, .20);
+      pointer-events:none;
+    }
+    .earth-compass {
+      position:absolute; right:28px; bottom:58px; z-index:590;
+      width:58px; height:58px; border-radius:50%;
+      border:1px solid rgba(255,255,255,.38);
+      background:
+        radial-gradient(circle, rgba(255,255,255,.13) 0 24%, transparent 25%),
+        conic-gradient(from 0deg, rgba(255,255,255,.18), rgba(__THEME_RGB__, .16), rgba(255,255,255,.18), rgba(255,255,255,.08), rgba(255,255,255,.18));
+      box-shadow:0 8px 20px rgba(0,0,0,.34), 0 0 18px rgba(__THEME_RGB__, .18), inset 0 0 18px rgba(255,255,255,.10);
+      pointer-events:none;
+    }
+    .earth-compass::before {
+      content:"N";
+      position:absolute; top:2px; left:50%; transform:translateX(-50%);
+      color:#ffffff; font-size:10px; font-weight:950;
+      text-shadow:0 1px 0 #000, 0 0 8px rgba(__THEME_RGB__, .65);
+    }
+    .earth-compass::after {
+      content:"";
+      position:absolute; left:50%; top:13px; transform:translateX(-50%);
+      width:0; height:0;
+      border-left:5px solid transparent;
+      border-right:5px solid transparent;
+      border-bottom:20px solid rgba(__THEME_PRIMARY__, .90);
+      filter:drop-shadow(0 0 6px rgba(__THEME_RGB__, .75));
+    }
+    .earth-bottom-status {
+      position:absolute; left:0; right:0; bottom:0; z-index:675;
+      display:flex; justify-content:flex-end; gap:18px; align-items:center;
+      min-height:24px; padding:4px 12px;
+      background:linear-gradient(90deg, rgba(2,14,36,.12), rgba(2,14,36,.74));
+      color:#e7fbff;
+      font-size:11px;
+      font-weight:750;
+      text-shadow:0 1px 0 rgba(0,0,0,.88);
+      pointer-events:none;
+    }
+    .kml-loading-overlay {
+      position:absolute; inset:0; z-index:720;
+      display:flex; align-items:center; justify-content:center;
+      padding:24px;
+      background:
+        radial-gradient(circle at 50% 42%, rgba(__THEME_RGB__, .22), transparent 38%),
+        linear-gradient(135deg, rgba(2,14,36,.86), rgba(2,14,36,.58));
+      backdrop-filter:blur(4px);
+      transition:opacity .28s ease, visibility .28s ease;
+    }
+    .kml-loading-overlay.hidden {
+      opacity:0; visibility:hidden; pointer-events:none;
+    }
+    .kml-loading-card {
+      width:min(380px, 92%);
+      border:1px solid rgba(__THEME_RGB__, .58);
+      border-radius:12px;
+      background:linear-gradient(145deg, rgba(2,14,36,.94), rgba(18,62,100,.82));
+      box-shadow:0 18px 36px rgba(0,0,0,.42), 0 0 24px rgba(__THEME_RGB__, .22);
+      padding:16px;
+      color:#ffffff;
+    }
+    .kml-loading-card strong {
+      display:block;
+      font-size:13px;
+      letter-spacing:1.4px;
+      text-transform:uppercase;
+      margin-bottom:7px;
+      text-shadow:0 1px 0 #000, 0 0 12px rgba(__THEME_RGB__, .42);
+    }
+    .kml-loading-card span {
+      display:block;
+      color:#dffbff;
+      font-size:12px;
+      font-weight:800;
+      line-height:1.35;
+      margin-bottom:12px;
+    }
+    .kml-progress {
+      height:9px;
+      overflow:hidden;
+      border-radius:99px;
+      border:1px solid rgba(__THEME_RGB__, .42);
+      background:rgba(255,255,255,.10);
+    }
+    .kml-progress i {
+      display:block;
+      width:8%;
+      height:100%;
+      border-radius:99px;
+      background:linear-gradient(90deg, __THEME_PRIMARY__, #ff9f1c);
+      box-shadow:0 0 14px rgba(__THEME_RGB__, .55);
+      transition:width .28s ease;
+    }
+    .kml-side-panel {
+      grid-area:side;
+      padding:0;
+      overflow:auto;
+      background:
+        linear-gradient(120deg, rgba(255,255,255,.08), transparent 28%),
+        linear-gradient(180deg, rgba(6,31,54,.98) 0%, rgba(3,20,42,.98) 44%, rgba(2,14,36,.99) 100%);
+      color:#e8fbff;
+      scrollbar-color:__THEME_PRIMARY__ rgba(2,14,36,.90);
+      scrollbar-width:thin;
+    }
+    .kml-side-panel::-webkit-scrollbar { width:10px; }
+    .kml-side-panel::-webkit-scrollbar-track {
+      background:rgba(2,14,36,.92);
+      border-left:1px solid rgba(__THEME_RGB__, .18);
+    }
+    .kml-side-panel::-webkit-scrollbar-thumb {
+      border:2px solid rgba(2,14,36,.92);
+      border-radius:999px;
+      background:linear-gradient(180deg, __THEME_PRIMARY__, #04d98b);
+      box-shadow:0 0 12px rgba(__THEME_RGB__, .42);
+    }
+    .earth-panel-section {
+      border-bottom:1px solid rgba(__THEME_RGB__, .34);
+      background:
+        linear-gradient(120deg, rgba(255,255,255,.08), transparent 36%),
+        linear-gradient(145deg, rgba(2,14,36,.82), rgba(12,45,74,.72), rgba(__THEME_RGB__, .08));
+      color:#e8fbff;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.10), inset 0 -1px 0 rgba(0,0,0,.24);
+    }
+    .earth-panel-section.dark {
+      background:
+        linear-gradient(120deg, rgba(255,255,255,.08), transparent 36%),
+        linear-gradient(145deg, rgba(2,14,36,.92), rgba(18,62,100,.72), rgba(__THEME_RGB__, .12));
+      color:#e8fbff;
+    }
+    .earth-section-title {
+      height:28px; display:flex; align-items:center; gap:7px;
+      padding:0 10px;
+      border-top:1px solid rgba(255,255,255,.16);
+      border-bottom:1px solid rgba(__THEME_RGB__, .46);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.04) 48%, rgba(0,0,0,.18) 49%),
+        linear-gradient(145deg, rgba(2,14,36,.98), rgba(18,62,100,.88), rgba(__THEME_RGB__, .18));
+      color:#ffffff;
+      font-size:12px;
+      font-weight:950;
+      letter-spacing:.35px;
+      text-transform:uppercase;
+      text-shadow:0 1px 0 #000, 0 0 12px rgba(__THEME_RGB__, .44);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.16), 0 1px 0 rgba(0,0,0,.34);
+    }
+    .earth-section-title.dark {
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.04) 48%, rgba(0,0,0,.18) 49%),
+        linear-gradient(145deg, rgba(2,14,36,.98), rgba(18,62,100,.88), rgba(__THEME_RGB__, .20));
+      color:#ffffff;
+      text-shadow:0 1px 0 #000, 0 0 10px rgba(__THEME_RGB__, .38);
+      border-color:rgba(__THEME_RGB__, .48);
+    }
+    .earth-section-body { padding:10px; }
+    .earth-tree {
+      font-size:12px;
+      color:#dffbff;
+      line-height:1.45;
+    }
+    .earth-tree-row {
+      display:flex; align-items:center; gap:6px;
+      padding:4px 7px;
+      border:1px solid transparent;
+      border-radius:6px;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      color:#dffbff;
+      text-shadow:0 1px 0 rgba(0,0,0,.70);
+    }
+    .earth-tree-row.active {
+      border-color:rgba(__THEME_RGB__, .40);
+      background:linear-gradient(145deg, rgba(__THEME_RGB__, .52), rgba(47,145,207,.58));
+      color:#ffffff;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.18), 0 0 14px rgba(__THEME_RGB__, .18);
+    }
+    .earth-tree-row input { width:13px; height:13px; accent-color:__THEME_PRIMARY__; }
+    .earth-tree-row.child { padding-left:24px; color:#a6d9e5; font-size:11px; opacity:.84; }
+    .earth-layer-list {
+      color:#e8fbff;
+      font-size:12px;
+      line-height:1.45;
+    }
+    .earth-layer-list label {
+      display:flex; align-items:center; gap:7px; padding:4px 7px;
+      color:#e8fbff;
+      border-radius:6px;
+      text-shadow:0 1px 0 rgba(0,0,0,.70);
+    }
+    .earth-layer-list label:hover {
+      background:rgba(__THEME_RGB__, .09);
+    }
+    .earth-layer-list input { accent-color:__THEME_PRIMARY__; }
+    .panel-title {
+      margin:0 0 10px 0; color:#ffffff; font-size:15px; font-weight:950;
+      letter-spacing:2px; text-transform:uppercase;
+      text-shadow:0 2px 0 rgba(0,0,0,.88), 0 0 16px rgba(__THEME_RGB__, .46);
+      padding:7px 9px;
+      border:1px solid rgba(__THEME_RGB__, .42);
+      border-radius:7px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,.04) 52%, rgba(0,0,0,.18) 53%),
+        linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.78));
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.16), 0 0 16px rgba(__THEME_RGB__, .13);
+    }
+    .instruction {
+      margin:0 0 12px 0; padding:10px;
+      border:1px solid rgba(__THEME_RGB__, .38); border-radius:10px;
+      background:rgba(2,14,36,.62); color:#dffbff;
+      font-size:12px; font-weight:800; line-height:1.42;
+    }
+    .field { margin-bottom:10px; }
+    .field label {
+      display:block; margin:0 0 5px 0; color:#ffffff;
+      font-size:11px; font-weight:900; letter-spacing:1px; text-transform:uppercase;
+      text-shadow:0 1px 0 rgba(0,0,0,.78), 0 0 8px rgba(__THEME_RGB__, .20);
+    }
+    .field input, .field textarea {
+      width:100%; border-radius:9px; border:1px solid rgba(__THEME_RGB__, .58);
+      background:linear-gradient(145deg, rgba(2,14,36,.92), rgba(13,43,69,.78));
+      color:#ffffff; padding:9px 10px; font-size:13px; font-weight:800;
+      outline:none; box-shadow:inset 0 1px 0 rgba(255,255,255,.12), 0 0 12px rgba(__THEME_RGB__, .12);
+    }
+    .field input:focus, .field textarea:focus {
+      border-color:__THEME_SOFT__; box-shadow:0 0 20px rgba(__THEME_RGB__, .28), inset 0 1px 0 rgba(255,255,255,.20);
+    }
+    .field input[readonly] { opacity:.86; cursor:default; }
+    .field textarea { min-height:76px; resize:vertical; font-family:'Segoe UI', Arial, sans-serif; }
+    .search-row {
+      display:grid;
+      grid-template-columns:minmax(0, 1fr) 92px;
+      gap:8px;
+      align-items:end;
+      margin-bottom:10px;
+    }
+    .search-row .field { margin-bottom:0; }
+    .search-hint {
+      margin:-4px 0 10px 0;
+      color:#9edfec;
+      font-size:10.5px;
+      font-weight:750;
+      line-height:1.35;
+      opacity:.92;
+    }
+    .file-import {
+      display:grid;
+      grid-template-columns:116px minmax(0, 1fr);
+      gap:8px;
+      align-items:center;
+      margin:2px 0 10px;
+    }
+    .file-input { display:none; }
+    .file-trigger {
+      min-height:36px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      border-radius:9px;
+      border:1px solid rgba(__THEME_RGB__, .62);
+      background:
+        linear-gradient(120deg, rgba(255,255,255,.12), transparent 34%),
+        linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.82), rgba(__THEME_RGB__, .24));
+      color:#ffffff !important;
+      font-size:11px !important;
+      font-weight:950 !important;
+      letter-spacing:.5px;
+      text-transform:uppercase;
+      cursor:pointer;
+      box-shadow:0 9px 18px rgba(0,0,0,.28), 0 0 14px rgba(__THEME_RGB__, .16), inset 0 1px 0 rgba(255,255,255,.14);
+    }
+    .file-trigger:hover {
+      border-color:__THEME_SOFT__;
+      box-shadow:0 12px 22px rgba(0,0,0,.34), 0 0 20px rgba(__THEME_RGB__, .28), inset 0 1px 0 rgba(255,255,255,.20);
+    }
+    .file-name {
+      min-width:0;
+      color:#dffbff;
+      font-size:11px;
+      font-weight:800;
+      line-height:1.25;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+    }
+    .metrics {
+      display:grid; grid-template-columns:1fr 1fr; gap:9px; margin:12px 0;
+    }
+    .metric-card {
+      min-height:72px; border:1px solid rgba(__THEME_RGB__, .38); border-radius:10px;
+      padding:9px;
+      background:
+        linear-gradient(120deg, rgba(255,255,255,.08), transparent 38%),
+        linear-gradient(145deg, rgba(2,14,36,.72), rgba(13,43,69,.62));
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.10), 0 9px 18px rgba(0,0,0,.18);
+    }
+    .metric-card.wide { grid-column:span 2; }
+    .metric-label {
+      color:#bfefff; font-size:10px; font-weight:900; letter-spacing:1px; text-transform:uppercase;
+    }
+    .metric-value {
+      margin-top:6px; color:#ffffff; font-size:18px; font-weight:950;
+      text-shadow:0 1px 0 #000, 0 0 12px rgba(__THEME_RGB__, .40);
+      overflow-wrap:anywhere;
+    }
+    .metric-card.wide .metric-value { font-size:16px; }
+    .button-grid { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-top:10px; }
+    .button-grid .full { grid-column:span 2; }
+    .kml-action {
+      min-height:40px; border-radius:10px; border:1px solid rgba(__THEME_RGB__, .62);
+      background:
+        linear-gradient(120deg, rgba(255,255,255,.12), transparent 34%),
+        linear-gradient(145deg, rgba(2,14,36,.96), rgba(18,62,100,.82), rgba(__THEME_RGB__, .24));
+      color:#ffffff; font-size:12px; font-weight:950; letter-spacing:.6px; cursor:pointer;
+      text-shadow:0 1px 0 rgba(0,0,0,.86), 0 0 10px rgba(__THEME_RGB__, .34);
+      box-shadow:0 9px 18px rgba(0,0,0,.32), 0 0 16px rgba(__THEME_RGB__, .18), inset 0 1px 0 rgba(255,255,255,.16);
+      transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease, opacity .18s ease;
+    }
+    .kml-action:hover:not(:disabled) {
+      transform:translateY(-1px); border-color:__THEME_SOFT__;
+      box-shadow:0 12px 24px rgba(0,0,0,.38), 0 0 24px rgba(__THEME_RGB__, .34), inset 0 1px 0 rgba(255,255,255,.22);
+    }
+    .kml-action:disabled { opacity:.42; cursor:not-allowed; filter:saturate(.55); }
+    .kml-action.primary {
+      background:
+        linear-gradient(120deg, rgba(255,255,255,.16), transparent 34%),
+        linear-gradient(145deg, __THEME_PRIMARY__, #027fa0);
+      border-color:__THEME_SOFT__;
+    }
+    .message {
+      min-height:38px; margin-top:12px; padding:9px 10px;
+      border:1px solid rgba(__THEME_RGB__, .32); border-radius:10px;
+      background:rgba(2,14,36,.58); color:#dffbff; font-size:12px; font-weight:800; line-height:1.35;
+    }
+    .message.ok { border-color:rgba(0,255,157,.55); color:#c9ffe8; }
+    .message.err { border-color:rgba(255,82,82,.58); color:#ffd6d6; }
+    .coords-box {
+      max-height:96px; overflow:auto; margin-top:10px; padding:9px;
+      border:1px solid rgba(__THEME_RGB__, .30); border-radius:9px;
+      background:
+        linear-gradient(120deg, rgba(255,255,255,.06), transparent 38%),
+        rgba(2,14,36,.62);
+      color:#cfefff;
+      font-family:'Consolas','Courier New',monospace; font-size:10.5px; line-height:1.42;
+    }
+    @media (max-width: 920px) {
+      body { overflow:auto; }
+      .kml-tool { height:auto; min-height:780px; grid-template-columns:1fr; grid-template-areas:"map" "side"; }
+      .kml-map-frame { height:560px; }
+      #map { min-height:560px; }
+      .kml-side-panel { min-height:unset; }
+      .earth-compass { right:18px; bottom:58px; }
+      .tmg-map-badge { left:10px; right:10px; bottom:34px; text-align:center; }
+    }
+  </style>
+</head>
+<body>
+  <main class="kml-tool">
+    <section class="kml-map-frame">
+      <div id="map"></div>
+      <div class="kml-loading-overlay" id="mapLoading">
+        <div class="kml-loading-card">
+          <strong>Carregando visualizador</strong>
+          <span id="loadingText">Preparando base de satélite e fallback do Google Earth.</span>
+          <div class="kml-progress"><i id="loadingBar"></i></div>
+        </div>
+      </div>
+      <div class="tmg-map-badge" id="mapStatus">POLÍGONO: 0 VÉRTICES · 0,00 m² · 0,0000 ha</div>
+      <div class="earth-compass"></div>
+      <div class="earth-bottom-status">
+        <span id="earthCoordStatus">Lat -- Lon --</span>
+        <span id="earthZoomStatus">Zoom --</span>
+        <span>Imagem: Esri / OpenStreetMap</span>
+      </div>
+    </section>
+
+    <aside class="kml-side-panel">
+      <div class="earth-panel-section">
+        <div class="earth-section-title">▾ Pesquisar</div>
+        <div class="earth-section-body">
+          <div class="search-row">
+            <div class="field">
+              <label for="citySearch">Cidade / local</label>
+              <input id="citySearch" type="text" placeholder="Ex.: Sorriso MT" autocomplete="off">
+            </div>
+            <button class="kml-action" id="btnSearchCity" type="button">Buscar</button>
+          </div>
+          <div class="search-hint" id="searchHint">Digite uma cidade e clique em Buscar para centralizar o mapa.</div>
+        </div>
+      </div>
+
+      <div class="earth-panel-section">
+        <div class="earth-section-title">▾ Lugares</div>
+        <div class="earth-section-body earth-tree">
+          <div class="earth-tree-row"><input type="checkbox" checked> <span>Meus lugares</span></div>
+          <div class="earth-tree-row child"><input type="checkbox"> <span>Passeio aos pontos turísticos</span></div>
+          <div class="earth-tree-row"><input type="checkbox" checked> <span>Lugares temporários</span></div>
+          <div class="earth-tree-row active"><input type="checkbox" checked> <span id="earthPlaceName">Area_TMG___DATE__</span></div>
+        </div>
+      </div>
+
+      <div class="earth-panel-section dark">
+        <div class="earth-section-title dark">▾ Dados da Área</div>
+        <div class="earth-section-body">
+          <h2 class="panel-title">Marcador de KML</h2>
+          <div class="instruction" id="instruction">Desenhe uma área no mapa para calcular e exportar o KML.</div>
+
+          <div class="field">
+            <label for="areaName">Nome da área</label>
+            <input id="areaName" type="text" value="Area_TMG___DATE__" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="areaDate">Data automática</label>
+            <input id="areaDate" type="text" value="__DATE__" readonly>
+          </div>
+          <div class="field">
+            <label for="areaObs">Observação</label>
+            <textarea id="areaObs" placeholder="Opcional"></textarea>
+          </div>
+          <div class="field">
+            <label>Importar KML existente</label>
+            <div class="file-import">
+              <label class="file-trigger" for="kmlImport">Importar KML</label>
+              <input class="file-input" id="kmlImport" type="file" accept=".kml,.xml,application/vnd.google-earth.kml+xml,text/xml,application/xml">
+              <span class="file-name" id="kmlImportName">Nenhum KML importado</span>
+            </div>
+          </div>
+
+          <div class="metrics">
+            <div class="metric-card wide">
+              <div class="metric-label">Área em m²</div>
+              <div class="metric-value" id="metricM2">0,00</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Hectares</div>
+              <div class="metric-value" id="metricHa">0,0000</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Perímetro</div>
+              <div class="metric-value" id="metricPerimeter">0,00 m</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Vértices</div>
+              <div class="metric-value" id="metricVertices">0</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Centroide</div>
+              <div class="metric-value" id="metricCentroid">-</div>
+            </div>
+          </div>
+
+          <div class="button-grid">
+            <button class="kml-action" id="btnStartPolygon" type="button">Adicionar Polígono</button>
+            <button class="kml-action" id="btnCancelDraw" type="button">Cancelar Marcação</button>
+            <button class="kml-action" id="btnClearPolygon" type="button">Limpar Tudo</button>
+            <button class="kml-action" id="btnCenterMap" type="button">Centralizar Mapa</button>
+            <button class="kml-action primary full" id="btnExportKml" type="button" disabled>Exportar KML</button>
+          </div>
+          <div class="message" id="message">Aguardando desenho do polígono.</div>
+          <div class="coords-box" id="coordsBox">Coordenadas principais aparecerão aqui.</div>
+        </div>
+      </div>
+
+      <div class="earth-panel-section dark">
+        <div class="earth-section-title dark">▾ Camadas</div>
+        <div class="earth-section-body earth-layer-list">
+          <label><input type="checkbox" checked disabled> Avisos</label>
+          <label><input type="checkbox" checked disabled> Fronteiras e etiquetas</label>
+          <label><input type="checkbox" checked disabled> Lugares</label>
+          <label><input type="checkbox" checked disabled> Estradas</label>
+          <label><input type="checkbox" checked disabled> Terreno</label>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    const INITIAL_FEATURE = __INITIAL_FEATURE__;
+    const DEFAULT_CENTER = [-15.5989, -56.0949];
+    const DEFAULT_ZOOM = 16;
+    const DATE_AUTO = '__DATE__';
+    const STORAGE_KEY = 'tmg_kml_marker_state_v2';
+    const GOOGLE_EARTH_WEB_URL = 'https://earth.google.com/web/';
+
+    if (L.drawLocal) {
+      L.drawLocal.draw.toolbar.actions.title = 'Cancelar marcação';
+      L.drawLocal.draw.toolbar.actions.text = 'Cancelar';
+      L.drawLocal.draw.toolbar.finish.title = 'Finalizar polígono';
+      L.drawLocal.draw.toolbar.finish.text = 'Finalizar';
+      L.drawLocal.draw.toolbar.undo.title = 'Apagar último ponto';
+      L.drawLocal.draw.toolbar.undo.text = 'Apagar último ponto';
+      L.drawLocal.draw.toolbar.buttons.polygon = 'Criar polígono';
+      L.drawLocal.draw.handlers.polygon.tooltip.start = 'Clique para iniciar o polígono.';
+      L.drawLocal.draw.handlers.polygon.tooltip.cont = 'Clique para adicionar outro vértice.';
+      L.drawLocal.draw.handlers.polygon.tooltip.end = 'Clique no primeiro ponto ou em finalizar para fechar.';
+      L.drawLocal.edit.toolbar.actions.save.title = 'Salvar alterações';
+      L.drawLocal.edit.toolbar.actions.save.text = 'Salvar';
+      L.drawLocal.edit.toolbar.actions.cancel.title = 'Cancelar edição';
+      L.drawLocal.edit.toolbar.actions.cancel.text = 'Cancelar';
+      L.drawLocal.edit.toolbar.buttons.edit = 'Editar vértices';
+      L.drawLocal.edit.toolbar.buttons.editDisabled = 'Desenhe um polígono para editar';
+      L.drawLocal.edit.toolbar.buttons.remove = 'Apagar polígono';
+      L.drawLocal.edit.toolbar.buttons.removeDisabled = 'Desenhe um polígono para apagar';
+      L.drawLocal.edit.handlers.edit.tooltip.text = 'Arraste os vértices para corrigir a área.';
+      L.drawLocal.edit.handlers.remove.tooltip.text = 'Clique no polígono para apagar.';
+    }
+
+    const TILE_MIN_ZOOM = 3;
+    const TILE_MAX_ZOOM = 22;
+    const TILE_NATIVE_ESRI = 19;
+    const TILE_NATIVE_OSM = 19;
+    const TILE_NATIVE_CARTO = 20;
+    const TILE_NATIVE_TERRAIN = 17;
+    const ESRI_WORLD_IMAGERY_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+    const ESRI_CLARITY_URL = 'https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+    const ESRI_LABELS_URL = 'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
+    const trackedTileLayers = [];
+
+    function makeTileOptions(maxNativeZoom, attribution, extra) {
+      return Object.assign({
+        minZoom: TILE_MIN_ZOOM,
+        maxZoom: TILE_MAX_ZOOM,
+        maxNativeZoom: maxNativeZoom,
+        detectRetina: false,
+        updateWhenZooming: false,
+        updateWhenIdle: true,
+        keepBuffer: 6,
+        attribution: attribution
+      }, extra || {});
+    }
+
+    function makeTileLayer(name, url, maxNativeZoom, attribution, extra) {
+      const layer = L.tileLayer(url, makeTileOptions(maxNativeZoom, attribution, extra));
+      layer.tmgLayerName = name;
+      layer.tmgFallbackBase = !(extra && extra.fallbackBase === false);
+      trackedTileLayers.push(layer);
+      return layer;
+    }
+
+    const map = L.map('map', {
+      center: DEFAULT_CENTER,
+      zoom: DEFAULT_ZOOM,
+      minZoom: TILE_MIN_ZOOM,
+      maxZoom: TILE_MAX_ZOOM,
+      crs: L.CRS.EPSG3857,
+      zoomSnap: 0.1,
+      zoomDelta: 0.5,
+      wheelPxPerZoomLevel: 55,
+      wheelDebounceTime: 20,
+      doubleClickZoom: true,
+      boxZoom: true,
+      worldCopyJump: true,
+      preferCanvas: true
+    });
+
+    console.info('[TMG KML] CRS ativo:', map.options.crs === L.CRS.EPSG3857 ? 'EPSG:3857' : map.options.crs);
+    window.tmgKmlMap = map;
+
+    const osm = makeTileLayer('OpenStreetMap', 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', TILE_NATIVE_OSM, '&copy; OpenStreetMap');
+    const esriSat = makeTileLayer('Satélite HD Esri', ESRI_WORLD_IMAGERY_URL, TILE_NATIVE_ESRI, 'Tiles &copy; Esri');
+    const esriSatContrast = makeTileLayer('Satélite Contraste', ESRI_WORLD_IMAGERY_URL, TILE_NATIVE_ESRI, 'Tiles &copy; Esri', {
+      className: 'tmg-kml-imagery-contrast'
+    });
+    const esriClarity = makeTileLayer('Satélite Clarity', ESRI_CLARITY_URL, TILE_NATIVE_ESRI, 'Tiles &copy; Esri');
+    const esriLabels = makeTileLayer('Rótulos Esri', ESRI_LABELS_URL, TILE_NATIVE_ESRI, 'Labels &copy; Esri', {
+      fallbackBase: false
+    });
+    const hybridImagery = makeTileLayer('Híbrido - satélite', ESRI_WORLD_IMAGERY_URL, TILE_NATIVE_ESRI, 'Tiles &copy; Esri');
+    const hybridLabels = makeTileLayer('Híbrido - rótulos', ESRI_LABELS_URL, TILE_NATIVE_ESRI, 'Labels &copy; Esri', {
+      fallbackBase: false
+    });
+    const hybridClarityImagery = makeTileLayer('Híbrido Clarity - satélite', ESRI_CLARITY_URL, TILE_NATIVE_ESRI, 'Tiles &copy; Esri');
+    const hybridClarityLabels = makeTileLayer('Híbrido Clarity - rótulos', ESRI_LABELS_URL, TILE_NATIVE_ESRI, 'Labels &copy; Esri', {
+      fallbackBase: false
+    });
+    const hybrid = L.layerGroup([
+      hybridImagery,
+      hybridLabels
+    ]);
+    hybrid.tmgLayerName = 'Híbrido';
+    const hybridClarity = L.layerGroup([
+      hybridClarityImagery,
+      hybridClarityLabels
+    ]);
+    hybridClarity.tmgLayerName = 'Híbrido Clarity';
+    const terrain = makeTileLayer('Terreno', 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', TILE_NATIVE_TERRAIN, '&copy; OpenTopoMap');
+    const esriTopo = makeTileLayer('Topográfico Esri', 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', TILE_NATIVE_ESRI, 'Tiles &copy; Esri');
+    const esriStreets = makeTileLayer('Ruas Esri', 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', TILE_NATIVE_ESRI, 'Tiles &copy; Esri');
+    const cartoLight = makeTileLayer('Claro', 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', TILE_NATIVE_CARTO, '&copy; CARTO');
+    const cartoDark = makeTileLayer('Escuro', 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', TILE_NATIVE_CARTO, '&copy; CARTO');
+
+    const baseLayers = {
+      'OpenStreetMap': osm,
+      'Satélite HD Esri': esriSat,
+      'Híbrido': hybrid,
+      'Terreno': terrain,
+      'Claro': cartoLight,
+      'Escuro': cartoDark,
+      'Satélite Clarity': esriClarity,
+      'Satélite Contraste': esriSatContrast,
+      'Híbrido Clarity': hybridClarity,
+      'Topográfico Esri': esriTopo,
+      'Ruas Esri': esriStreets
+    };
+    window.tmgKmlBaseLayers = baseLayers;
+    window.tmgKmlTileLayers = trackedTileLayers;
+    let currentBaseName = 'Híbrido';
+    let currentBaseLayer = hybrid;
+    let fallbackInProgress = false;
+
+    function setActiveBaseLayer(name, layer, reason) {
+      Object.keys(baseLayers).forEach(label => {
+        const candidate = baseLayers[label];
+        if (candidate && map.hasLayer(candidate)) map.removeLayer(candidate);
+      });
+      layer.addTo(map);
+      currentBaseName = name;
+      currentBaseLayer = layer;
+      console.warn('[TMG KML] fallback aplicado:', name, '| motivo:', reason || 'troca de camada', '| zoom:', map.getZoom());
+      setLoading(78, 'Fallback aplicado: ' + name + '.');
+    }
+
+    function applyTileFallback(sourceName, event) {
+      if (fallbackInProgress) return;
+      fallbackInProgress = true;
+      const activeName = currentBaseName || sourceName || '';
+      const targetName = activeName === 'Satélite HD Esri' ? 'OpenStreetMap' : 'Satélite HD Esri';
+      const targetLayer = baseLayers[targetName] || osm;
+      const tileUrl = event && event.tile && event.tile.src ? event.tile.src : '';
+      console.warn('[TMG KML] erro de tile:', { camada: sourceName || activeName, ativa: activeName, zoom: map.getZoom(), tile: tileUrl });
+      if (activeName === 'OpenStreetMap') {
+        setLoading(76, 'OpenStreetMap está ativo; aguardando novos tiles.');
+        window.setTimeout(() => { fallbackInProgress = false; }, 1200);
+        return;
+      }
+      setActiveBaseLayer(targetName, targetLayer, 'erro de tile em ' + (sourceName || activeName));
+      window.setTimeout(() => { fallbackInProgress = false; }, 1600);
+    }
+
+    function inspectLoadedTile(layer, event) {
+      const tile = event && event.tile ? event.tile : null;
+      if (!tile) return;
+      const looksEmpty = (tile.naturalWidth && tile.naturalWidth <= 1) || (tile.naturalHeight && tile.naturalHeight <= 1);
+      if (looksEmpty) {
+        console.warn('[TMG KML] tile vazio detectado:', { camada: layer.tmgLayerName, zoom: map.getZoom(), tile: tile.src || '' });
+        if (layer.tmgFallbackBase !== false) applyTileFallback(layer.tmgLayerName, event);
+      }
+    }
+
+    function trackTileLayer(layer) {
+      if (!layer || !layer.on || layer.tmgTracked) return;
+      layer.tmgTracked = true;
+      layer.on('tileerror', event => {
+        console.warn('[TMG KML] tileerror:', { camada: layer.tmgLayerName || currentBaseName, zoom: map.getZoom() });
+        setLoading(74, 'Uma camada falhou; aplicando fallback seguro.');
+        if (layer.tmgFallbackBase !== false) applyTileFallback(layer.tmgLayerName, event);
+      });
+      layer.on('tileload', event => inspectLoadedTile(layer, event));
+    }
+
+    trackedTileLayers.forEach(trackTileLayer);
+    hybrid.addTo(map);
+    console.info('[TMG KML] camada ativa:', currentBaseName, '| zoom:', map.getZoom(), '| maxZoom:', map.getMaxZoom());
+    L.control.layers(baseLayers, {}, { collapsed: false }).addTo(map);
+    map.on('baselayerchange', event => {
+      currentBaseName = event.name || 'Camada base';
+      currentBaseLayer = event.layer;
+      console.info('[TMG KML] camada ativa:', currentBaseName, '| zoom:', map.getZoom());
+    });
+    map.on('zoomend', () => console.info('[TMG KML] zoom atual:', map.getZoom(), '| camada ativa:', currentBaseName));
+    L.control.scale({ metric: true, imperial: false }).addTo(map);
+
+    const drawnItems = new L.FeatureGroup();
+    map.addLayer(drawnItems);
+
+    const polygonStyle = {
+      color: '__THEME_PRIMARY__',
+      weight: 4,
+      opacity: 0.95,
+      fillColor: '__THEME_PRIMARY__',
+      fillOpacity: 0.28
+    };
+
+    const polygonDrawOptions = {
+      allowIntersection: false,
+      showArea: true,
+      metric: true,
+      repeatMode: false,
+      guidelineDistance: 8,
+      shapeOptions: polygonStyle
+    };
+
+    const drawControl = new L.Control.Draw({
+      position: 'topleft',
+      draw: {
+        polyline: false,
+        rectangle: false,
+        circle: false,
+        circlemarker: false,
+        marker: false,
+        polygon: polygonDrawOptions
+      },
+      edit: {
+        featureGroup: drawnItems,
+        remove: true
+      }
+    });
+    map.addControl(drawControl);
+    let drawPolygonHandler = null;
+    let lastValidFeature = null;
+    let lastStats = null;
+    let searchMarker = null;
+
+    const areaName = document.getElementById('areaName');
+    const areaDate = document.getElementById('areaDate');
+    const areaObs = document.getElementById('areaObs');
+    const kmlImport = document.getElementById('kmlImport');
+    const kmlImportName = document.getElementById('kmlImportName');
+    const citySearch = document.getElementById('citySearch');
+    const searchHint = document.getElementById('searchHint');
+    const instruction = document.getElementById('instruction');
+    const mapStatus = document.getElementById('mapStatus');
+    const mapLoading = document.getElementById('mapLoading');
+    const loadingBar = document.getElementById('loadingBar');
+    const loadingText = document.getElementById('loadingText');
+    const message = document.getElementById('message');
+    const coordsBox = document.getElementById('coordsBox');
+    const metricM2 = document.getElementById('metricM2');
+    const metricHa = document.getElementById('metricHa');
+    const metricPerimeter = document.getElementById('metricPerimeter');
+    const metricVertices = document.getElementById('metricVertices');
+    const metricCentroid = document.getElementById('metricCentroid');
+    const btnStartPolygon = document.getElementById('btnStartPolygon');
+    const btnCancelDraw = document.getElementById('btnCancelDraw');
+    const btnClearPolygon = document.getElementById('btnClearPolygon');
+    const btnCenterMap = document.getElementById('btnCenterMap');
+    const btnExportKml = document.getElementById('btnExportKml');
+    const btnSearchCity = document.getElementById('btnSearchCity');
+    const earthCoordStatus = document.getElementById('earthCoordStatus');
+    const earthZoomStatus = document.getElementById('earthZoomStatus');
+    const earthPlaceName = document.getElementById('earthPlaceName');
+
+    function polygonLayers() {
+      const layers = [];
+      drawnItems.eachLayer(layer => {
+        if (layer instanceof L.Polygon) layers.push(layer);
+      });
+      return layers;
+    }
+
+    function firstPolygonLayer() {
+      const layers = polygonLayers();
+      return layers.length ? layers[layers.length - 1] : null;
+    }
+
+    function featuresFromLayers() {
+      return polygonLayers().map(layer => normalizeFeature(layer.toGeoJSON(12))).filter(Boolean);
+    }
+
+    function formatNumberBR(value, decimals) {
+      const n = Number(value || 0);
+      return n.toLocaleString('pt-BR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+    }
+
+    function xmlEscape(value) {
+      return String(value || '').replace(/[<>&'"]/g, ch => ({
+        '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;'
+      }[ch]));
+    }
+
+    function sanitizeFileName(value) {
+      return String(value || 'Area_TMG_' + DATE_AUTO)
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^A-Za-z0-9_.-]+/g, '_')
+        .replace(/^_+|_+$/g, '') || ('Area_TMG_' + DATE_AUTO);
+    }
+
+    function normalizeFeature(feature) {
+      if (!feature || !feature.geometry) return null;
+      const geom = feature.geometry;
+      let ring = [];
+      if (geom.type === 'Polygon' && Array.isArray(geom.coordinates) && geom.coordinates[0]) {
+        ring = geom.coordinates[0].map(pt => [Number(pt[0]), Number(pt[1])]);
+      } else if (geom.type === 'MultiPolygon' && geom.coordinates && geom.coordinates[0] && geom.coordinates[0][0]) {
+        ring = geom.coordinates[0][0].map(pt => [Number(pt[0]), Number(pt[1])]);
+      }
+      ring = ring.filter(pt => Number.isFinite(pt[0]) && Number.isFinite(pt[1]));
+      if (ring.length >= 2 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) {
+        ring = ring.slice(0, -1);
+      }
+      if (ring.length < 3) return null;
+      ring.push([ring[0][0], ring[0][1]]);
+      return {
+        type: 'Feature',
+        properties: Object.assign({}, feature.properties || {}),
+        geometry: { type: 'Polygon', coordinates: [ring] }
+      };
+    }
+
+    function featureFromLatLngs(latlngs) {
+      const ring = (latlngs || []).map(ll => [Number(ll.lng), Number(ll.lat)])
+        .filter(pt => Number.isFinite(pt[0]) && Number.isFinite(pt[1]));
+      if (ring.length < 3) {
+        return {
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'Polygon', coordinates: [ring] }
+        };
+      }
+      ring.push([ring[0][0], ring[0][1]]);
+      return normalizeFeature({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [ring] } });
+    }
+
+    function fallbackArea(feature) {
+      const ring = feature.geometry.coordinates[0].map(pt => L.latLng(pt[1], pt[0]));
+      return Math.abs(L.GeometryUtil && L.GeometryUtil.geodesicArea ? L.GeometryUtil.geodesicArea(ring) : 0);
+    }
+
+    function fallbackPerimeter(feature) {
+      const ring = feature.geometry.coordinates[0].map(pt => L.latLng(pt[1], pt[0]));
+      let perimeter = 0;
+      for (let i = 1; i < ring.length; i++) perimeter += ring[i - 1].distanceTo(ring[i]);
+      return perimeter;
+    }
+
+    function calculateStats(feature) {
+      const normalized = normalizeFeature(feature);
+      if (!normalized) return { valid: false, vertices: 0, areaM2: 0, areaHa: 0, perimeterM: 0, centroid: null };
+      const ring = normalized.geometry.coordinates[0];
+      let areaM2 = 0;
+      let perimeterM = 0;
+      let centroid = null;
+      try {
+        if (window.turf) {
+          areaM2 = Math.abs(turf.area(normalized));
+          perimeterM = Math.abs(turf.length(normalized, { units: 'kilometers' }) * 1000);
+          centroid = turf.centroid(normalized).geometry.coordinates;
+        }
+      } catch(e) {
+        areaM2 = 0;
+      }
+      if (!areaM2) areaM2 = fallbackArea(normalized);
+      if (!perimeterM) perimeterM = fallbackPerimeter(normalized);
+      if (!centroid) {
+        const open = ring.slice(0, -1);
+        centroid = [
+          open.reduce((acc, pt) => acc + pt[0], 0) / open.length,
+          open.reduce((acc, pt) => acc + pt[1], 0) / open.length
+        ];
+      }
+      return {
+        valid: ring.length >= 4 && areaM2 > 0,
+        vertices: Math.max(0, ring.length - 1),
+        areaM2,
+        areaHa: areaM2 / 10000,
+        perimeterM,
+        centroid,
+        feature: normalized
+      };
+    }
+
+    function calculateCollectionStats(features) {
+      const validStats = (features || []).map(feature => calculateStats(feature)).filter(stats => stats && stats.valid);
+      if (!validStats.length) {
+        return { valid: false, vertices: 0, areaM2: 0, areaHa: 0, perimeterM: 0, centroid: null, polygonCount: 0, features: [] };
+      }
+      const areaM2 = validStats.reduce((acc, stats) => acc + stats.areaM2, 0);
+      const perimeterM = validStats.reduce((acc, stats) => acc + stats.perimeterM, 0);
+      const vertices = validStats.reduce((acc, stats) => acc + stats.vertices, 0);
+      const last = validStats[validStats.length - 1];
+      return {
+        valid: areaM2 > 0,
+        vertices,
+        areaM2,
+        areaHa: areaM2 / 10000,
+        perimeterM,
+        centroid: last.centroid,
+        feature: last.feature,
+        features: validStats.map(stats => stats.feature),
+        polygonStats: validStats,
+        polygonCount: validStats.length
+      };
+    }
+
+    function setMessage(text, type) {
+      message.textContent = text;
+      message.classList.remove('ok', 'err');
+      if (type) message.classList.add(type);
+    }
+
+    function setLoading(progress, text) {
+      if (loadingBar) loadingBar.style.width = Math.max(8, Math.min(100, progress || 0)) + '%';
+      if (loadingText && text) loadingText.textContent = text;
+    }
+
+    function finishLoading(text) {
+      setLoading(100, text || 'Mapa carregado com sucesso.');
+      window.setTimeout(() => {
+        if (mapLoading) mapLoading.classList.add('hidden');
+      }, 420);
+    }
+
+    function activateEarthFallback(reason) {
+      setLoading(62, reason || 'Google Earth Web não está disponível para edição embutida. Usando fallback de satélite integrado.');
+    }
+
+    function updateEarthStatus(latlng) {
+      if (latlng && Number.isFinite(latlng.lat) && Number.isFinite(latlng.lng)) {
+        earthCoordStatus.textContent = 'lat ' + latlng.lat.toFixed(6) + '  lon ' + latlng.lng.toFixed(6);
+      }
+      earthZoomStatus.textContent = 'zoom ' + map.getZoom().toFixed(1);
+    }
+
+    function syncEarthPlaceName() {
+      const count = polygonLayers().length;
+      const baseName = areaName.value.trim() || ('Area_TMG_' + DATE_AUTO);
+      earthPlaceName.textContent = count > 1 ? (baseName + ' (' + count + ' áreas)') : baseName;
+    }
+
+    function firstXmlDescendant(root, name) {
+      return Array.from(root.getElementsByTagName('*')).find(el => el.localName === name) || null;
+    }
+
+    function firstXmlChild(root, name) {
+      return Array.from(root.children || []).find(el => el.localName === name) || null;
+    }
+
+    function parseKmlText(kmlText) {
+      const xml = new DOMParser().parseFromString(String(kmlText || ''), 'application/xml');
+      if (firstXmlDescendant(xml, 'parsererror')) throw new Error('Arquivo KML inválido.');
+      const placemark = firstXmlDescendant(xml, 'Placemark') || xml;
+      const placemarkName = placemark ? firstXmlChild(placemark, 'name') : null;
+      const documentName = firstXmlDescendant(xml, 'Document') ? firstXmlChild(firstXmlDescendant(xml, 'Document'), 'name') : null;
+      const description = placemark ? firstXmlChild(placemark, 'description') : null;
+      const rings = Array.from(xml.getElementsByTagName('*')).filter(el => el.localName === 'LinearRing');
+      let coordinatesNode = null;
+      for (const ring of rings) {
+        const candidate = firstXmlChild(ring, 'coordinates');
+        if (candidate && candidate.textContent.trim()) {
+          coordinatesNode = candidate;
+          break;
+        }
+      }
+      if (!coordinatesNode) coordinatesNode = firstXmlDescendant(xml, 'coordinates');
+      if (!coordinatesNode || !coordinatesNode.textContent.trim()) throw new Error('KML sem coordenadas de polígono.');
+      let latlngs = coordinatesNode.textContent.trim().split(/\\s+/).map(item => {
+        const parts = item.split(',').map(Number);
+        return [parts[1], parts[0]];
+      }).filter(pt => Number.isFinite(pt[0]) && Number.isFinite(pt[1]));
+      if (
+        latlngs.length >= 2 &&
+        latlngs[0][0] === latlngs[latlngs.length - 1][0] &&
+        latlngs[0][1] === latlngs[latlngs.length - 1][1]
+      ) {
+        latlngs = latlngs.slice(0, -1);
+      }
+      if (latlngs.length < 3) throw new Error('KML sem polígono válido.');
+      return {
+        name: (placemarkName && placemarkName.textContent.trim()) || (documentName && documentName.textContent.trim()) || '',
+        description: description ? description.textContent.trim() : '',
+        latlngs
+      };
+    }
+
+    async function importKmlFile(file) {
+      if (!file) return;
+      kmlImportName.textContent = file.name || 'KML selecionado';
+      setMessage('Importando KML...', '');
+      try {
+        const text = await file.text();
+        const parsed = parseKmlText(text);
+        const layer = L.polygon(parsed.latlngs, polygonStyle).addTo(drawnItems);
+        bindPolygonLayer(layer);
+        if (parsed.name) areaName.value = parsed.name;
+        if (parsed.description && !areaObs.value.trim()) areaObs.value = parsed.description.slice(0, 1200);
+        const stats = updateFromCollection(false, true);
+        const bounds = layer.getBounds();
+        if (bounds && bounds.isValid()) map.fitBounds(bounds, { padding: [32, 32], maxZoom: 22 });
+        syncEarthPlaceName();
+        setMessage(stats && stats.polygonCount > 1 ? 'KML importado e somado às áreas marcadas.' : 'KML importado com sucesso.', 'ok');
+      } catch(e) {
+        kmlImportName.textContent = 'Falha ao importar KML';
+        setMessage('Erro ao importar KML: ' + (e && e.message ? e.message : e), 'err');
+      }
+    }
+
+    function initializeMapLoading() {
+      setLoading(18, 'Tentando preparar experiência tipo Google Earth.');
+      activateEarthFallback('Google Earth Web oficial não expõe uma base editável dentro deste visualizador. Ativando satélite integrado.');
+      let loadEvents = 0;
+      trackedTileLayers.forEach(layer => {
+        if (!layer || !layer.on) return;
+        layer.on('loading', () => setLoading(Math.min(72, 30 + loadEvents * 8), 'Carregando imagens de satélite...'));
+        layer.on('load', () => {
+          loadEvents += 1;
+          if (loadEvents >= 1) finishLoading('Mapa de satélite carregado. Pronto para marcar áreas.');
+        });
+        layer.on('tileerror', event => {
+          console.warn('[TMG KML] erro de tile no carregamento:', {
+            camada: layer.tmgLayerName || currentBaseName,
+            zoom: map.getZoom(),
+            tile: event && event.tile ? event.tile.src : ''
+          });
+          setLoading(74, 'Uma camada falhou; mantendo fallback de mapa disponível.');
+          window.setTimeout(() => finishLoading('Fallback de mapa pronto para uso.'), 900);
+        });
+      });
+      window.setTimeout(() => finishLoading('Visualizador pronto. Use satélite/híbrido para marcar a área.'), 4200);
+    }
+
+    function updatePanel(stats, draft=false) {
+      const valid = !!(stats && stats.valid);
+      const areaM2 = stats ? stats.areaM2 : 0;
+      const areaHa = stats ? stats.areaHa : 0;
+      const perimeterM = stats ? stats.perimeterM : 0;
+      const vertices = stats ? stats.vertices : 0;
+      const polygonCount = stats && stats.polygonCount ? stats.polygonCount : (valid ? 1 : 0);
+      metricM2.textContent = formatNumberBR(areaM2, 2);
+      metricHa.textContent = formatNumberBR(areaHa, 4);
+      metricPerimeter.textContent = formatNumberBR(perimeterM, 2) + ' m';
+      metricVertices.textContent = String(vertices);
+      metricCentroid.textContent = stats && stats.centroid
+        ? (stats.centroid[1].toFixed(6) + ', ' + stats.centroid[0].toFixed(6))
+        : '-';
+      mapStatus.textContent = (polygonCount === 1 ? 'POLÍGONO: ' : 'POLÍGONOS: ' + polygonCount + ' · ') + vertices + ' VÉRTICES · ' + formatNumberBR(areaM2, 2) + ' m² · ' + formatNumberBR(areaHa, 4) + ' ha';
+      instruction.textContent = valid ? (polygonCount > 1 ? 'Polígonos prontos para exportação.' : 'Polígono pronto para exportação.') : 'Desenhe uma área no mapa para calcular e exportar o KML.';
+      btnExportKml.disabled = !valid;
+      if (stats && stats.feature && stats.feature.geometry) {
+        const ring = stats.feature.geometry.coordinates[0].slice(0, -1);
+        coordsBox.innerHTML = ring.slice(0, 6).map((pt, idx) => (
+          (idx + 1) + '. lat ' + pt[1].toFixed(7) + ' / lon ' + pt[0].toFixed(7)
+        )).join('<br>') + (ring.length > 6 ? '<br>... +' + (ring.length - 6) + ' vértice(s)' : '');
+      } else {
+        coordsBox.textContent = 'Coordenadas principais aparecerão aqui.';
+      }
+      if (draft && vertices > 0) setMessage('Marcando polígono: finalize a área para habilitar a exportação.', '');
+      syncEarthPlaceName();
+    }
+
+    function syncHiddenPayload(feature, stats) {
+      const payload = feature && stats ? JSON.stringify(Object.assign({}, feature, {
+        properties: Object.assign({}, feature.properties || {}, {
+          source: 'TMG Marcador de KML',
+          data: areaDate.value,
+          nome_area: areaName.value,
+          observacao: areaObs.value,
+          area_m2: stats.areaM2,
+          area_ha: stats.areaHa,
+          perimetro_m: stats.perimeterM,
+          vertices: stats.vertices,
+          updated_at: new Date().toISOString()
+        })
+      })) : '';
+      try {
+        const parentDoc = window.parent && window.parent.document;
+        if (parentDoc) {
+          const inputs = Array.from(parentDoc.querySelectorAll('input'));
+          const target = inputs.find(el => el.getAttribute('aria-label') === 'kml_marker_payload');
+          if (target) {
+            const setter = Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype, 'value').set;
+            setter.call(target, payload);
+          }
+        }
+      } catch(e) {
+        console.log('Payload KML indisponível:', e);
+      }
+    }
+
+    function persistState(feature, stats) {
+      try {
+        syncEarthPlaceName();
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          feature: feature || null,
+          features: stats && Array.isArray(stats.features) ? stats.features : (feature ? [feature] : []),
+          stats: stats || null,
+          nome_area: areaName.value,
+          data: areaDate.value,
+          observacao: areaObs.value,
+          updated_at: new Date().toISOString()
+        }));
+      } catch(e) {
+        console.log('Persistência local indisponível:', e);
+      }
+    }
+
+    async function searchCityOnMap() {
+      const query = (citySearch.value || '').trim();
+      if (!query) {
+        searchHint.textContent = 'Digite o nome de uma cidade para buscar.';
+        setMessage('Digite uma cidade antes de buscar.', 'err');
+        return;
+      }
+      btnSearchCity.disabled = true;
+      searchHint.textContent = 'Buscando cidade...';
+      setMessage('Buscando cidade no mapa...', '');
+      try {
+        const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=1&q=' + encodeURIComponent(query);
+        const response = await fetch(url, {
+          headers: { 'Accept': 'application/json' }
+        });
+        if (!response.ok) throw new Error('serviço indisponível');
+        const results = await response.json();
+        if (!Array.isArray(results) || !results.length) {
+          searchHint.textContent = 'Cidade não encontrada. Tente incluir estado ou país.';
+          setMessage('Cidade não encontrada.', 'err');
+          return;
+        }
+        const item = results[0];
+        const lat = Number(item.lat);
+        const lon = Number(item.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error('coordenadas inválidas');
+        if (searchMarker) map.removeLayer(searchMarker);
+        searchMarker = L.circleMarker([lat, lon], {
+          radius: 7,
+          color: '__THEME_SOFT__',
+          weight: 3,
+          fillColor: '__THEME_PRIMARY__',
+          fillOpacity: .85
+        }).addTo(map).bindPopup(item.display_name || query);
+        map.flyTo([lat, lon], 18, { duration: .85 });
+        searchHint.textContent = item.display_name || query;
+        setMessage('Cidade localizada. Ajuste o zoom e desenhe o polígono.', 'ok');
+      } catch(e) {
+        searchHint.textContent = 'Não foi possível buscar a cidade agora.';
+        setMessage('Erro ao buscar cidade: ' + (e && e.message ? e.message : e), 'err');
+      } finally {
+        btnSearchCity.disabled = false;
+      }
+    }
+
+    function updateFromFeature(feature, draft=false, persist=false) {
+      const stats = calculateStats(feature);
+      updatePanel(stats, draft);
+      if (stats.valid && !draft) {
+        lastValidFeature = stats.feature;
+        lastStats = stats;
+        syncHiddenPayload(lastValidFeature, lastStats);
+        if (persist) persistState(lastValidFeature, lastStats);
+      }
+      return stats;
+    }
+
+    function updateFromCollection(draft=false, persist=false) {
+      const features = featuresFromLayers();
+      if (!features.length) {
+        lastValidFeature = null;
+        lastStats = null;
+        updatePanel(null);
+        syncHiddenPayload(null, null);
+        if (persist) persistState(null, null);
+        return null;
+      }
+      const stats = calculateCollectionStats(features);
+      updatePanel(stats, draft);
+      if (stats.valid && !draft) {
+        lastValidFeature = stats.feature;
+        lastStats = stats;
+        syncHiddenPayload(lastValidFeature, lastStats);
+        if (persist) persistState(lastValidFeature, lastStats);
+      }
+      return stats;
+    }
+
+    function updateFromLayer(layer, draft=false, persist=false) {
+      if (!layer) {
+        return updateFromCollection(draft, persist);
+      }
+      if (!draft) return updateFromCollection(false, persist);
+      const feature = normalizeFeature(layer.toGeoJSON(12));
+      return updateFromFeature(feature, true, persist);
+    }
+
+    function bindPolygonLayer(layer) {
+      if (!layer) return;
+      if (layer.setStyle) layer.setStyle(polygonStyle);
+      layer.on('edit', () => updateFromLayer(layer, false, true));
+    }
+
+    function loadInitialFeature() {
+      let feature = INITIAL_FEATURE;
+      let features = [];
+      let restoredFromLocalStorage = false;
+      try {
+        const stored = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '{}');
+        if (stored && stored.nome_area) areaName.value = stored.nome_area;
+        if (stored && stored.observacao) areaObs.value = stored.observacao;
+        if (stored && Array.isArray(stored.features) && stored.features.length) {
+          features = stored.features;
+          restoredFromLocalStorage = true;
+        }
+        if (!feature && stored && stored.feature) {
+          feature = stored.feature;
+          restoredFromLocalStorage = true;
+        }
+      } catch(e) {
+        console.log('Não foi possível ler estado local:', e);
+      }
+      if (!feature) {
+        try {
+          const raw = window.localStorage.getItem('tmg_kml_marker_payload') || '';
+          feature = raw ? JSON.parse(raw) : null;
+          restoredFromLocalStorage = !!feature;
+        } catch(e) {
+          feature = null;
+        }
+      }
+      if (!features.length && feature && feature.geometry) features = [feature];
+      features = features.map(item => normalizeFeature(item)).filter(Boolean);
+      if (!features.length) return;
+      try {
+        features.forEach(item => {
+          const geoLayer = L.geoJSON(item, { style: polygonStyle });
+          geoLayer.eachLayer(layer => {
+            bindPolygonLayer(layer);
+            drawnItems.addLayer(layer);
+          });
+        });
+        const bounds = drawnItems.getBounds();
+        if (bounds && bounds.isValid()) map.fitBounds(bounds, { padding: [28, 28], maxZoom: 22 });
+        updateFromCollection(false, true);
+        if (restoredFromLocalStorage) setMessage('Polígono restaurado. Pronto para edição ou exportação.', 'ok');
+      } catch(e) {
+        console.log('Não foi possível restaurar polígono:', e);
+      }
+    }
+
+    map.on(L.Draw.Event.CREATED, function(event) {
+      const layer = event.layer;
+      bindPolygonLayer(layer);
+      drawnItems.addLayer(layer);
+      const stats = updateFromCollection(false, true);
+      setMessage(stats && stats.polygonCount > 1 ? 'Novo polígono adicionado. KMLs prontos para exportação.' : 'Polígono pronto para exportação.', 'ok');
+    });
+    map.on(L.Draw.Event.EDITED, function() {
+      updateFromCollection(false, true);
+      setMessage('Área atualizada com sucesso.', 'ok');
+    });
+    map.on(L.Draw.Event.DELETED, function() {
+      updateFromCollection(false, true);
+      setMessage(firstPolygonLayer() ? 'Polígono apagado. As áreas restantes foram recalculadas.' : 'Polígono apagado. Desenhe uma nova área.', '');
+    });
+    map.on(L.Draw.Event.DRAWSTART, function() {
+      updatePanel(null, true);
+      setMessage('Clique no mapa para marcar os vértices. Use finalizar para fechar o polígono.', '');
+    });
+    map.on(L.Draw.Event.DRAWVERTEX, function(event) {
+      const latlngs = [];
+      if (event && event.layers) {
+        event.layers.eachLayer(layer => {
+          if (layer && layer.getLatLng) latlngs.push(layer.getLatLng());
+        });
+      }
+      const draftFeature = featureFromLatLngs(latlngs);
+      updateFromFeature(draftFeature, true, false);
+    });
+    map.on('draw:editvertex', function() {
+      updateFromCollection(false, false);
+    });
+    map.on('draw:editmove', function() {
+      updateFromCollection(false, false);
+    });
+    map.on('draw:drawstop', function() {
+      if (!firstPolygonLayer() && !lastValidFeature) updatePanel(null);
+    });
+
+    btnStartPolygon.onclick = function() {
+      if (!drawPolygonHandler) drawPolygonHandler = new L.Draw.Polygon(map, polygonDrawOptions);
+      drawPolygonHandler.enable();
+      setMessage('Ferramenta de polígono ativada. Clique no mapa para adicionar uma nova área.', '');
+    };
+    btnCancelDraw.onclick = function() {
+      if (drawPolygonHandler && drawPolygonHandler.enabled()) drawPolygonHandler.disable();
+      updateFromLayer(firstPolygonLayer(), false, false);
+      setMessage('Marcação cancelada.', '');
+    };
+    btnClearPolygon.onclick = function() {
+      if (drawPolygonHandler && drawPolygonHandler.enabled()) drawPolygonHandler.disable();
+      drawnItems.clearLayers();
+      lastValidFeature = null;
+      lastStats = null;
+      updatePanel(null);
+      syncHiddenPayload(null, null);
+      persistState(null, null);
+      setMessage('Todos os polígonos foram limpos. Desenhe uma nova área.', '');
+    };
+    btnCenterMap.onclick = function() {
+      const bounds = drawnItems.getBounds();
+      if (bounds && bounds.isValid()) {
+        map.fitBounds(bounds, { padding: [32, 32], maxZoom: 22 });
+        setMessage('Mapa centralizado nas áreas marcadas.', 'ok');
+      } else {
+        map.flyTo(DEFAULT_CENTER, DEFAULT_ZOOM, { duration: .65 });
+        setMessage('Mapa centralizado para nova marcação.', '');
+      }
+    };
+    areaName.addEventListener('input', () => {
+      syncEarthPlaceName();
+      persistState(lastValidFeature, lastStats);
+    });
+    areaObs.addEventListener('input', () => persistState(lastValidFeature, lastStats));
+    kmlImport.addEventListener('change', function(event) {
+      const file = event.target.files && event.target.files[0];
+      importKmlFile(file);
+      event.target.value = '';
+    });
+    btnSearchCity.onclick = searchCityOnMap;
+    citySearch.addEventListener('keydown', function(event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        searchCityOnMap();
+      }
+    });
+    map.on('mousemove', function(event) {
+      updateEarthStatus(event.latlng);
+    });
+    map.on('zoomend moveend', function() {
+      updateEarthStatus(map.getCenter());
+    });
+
+    function buildKml(feature, stats) {
+      const featureList = stats && Array.isArray(stats.features) && stats.features.length
+        ? stats.features.map(item => normalizeFeature(item)).filter(Boolean)
+        : [normalizeFeature(feature)].filter(Boolean);
+      if (!featureList.length || !stats || !stats.valid) throw new Error('Não foi possível gerar o KML sem polígono.');
+      const nome = areaName.value.trim() || ('Area_TMG_' + DATE_AUTO);
+      const data = areaDate.value.trim() || DATE_AUTO;
+      const obs = areaObs.value.trim();
+      const totalPolygons = featureList.length;
+      const placemarks = featureList.map((item, idx) => {
+        const itemStats = calculateStats(item);
+        if (!itemStats.valid) return '';
+        const ring = itemStats.feature.geometry.coordinates[0];
+        const coordsText = ring.map(pt => pt[0].toFixed(10) + ',' + pt[1].toFixed(10) + ',0').join('\\n');
+        const placemarkName = totalPolygons > 1 ? (nome + '_' + String(idx + 1).padStart(2, '0')) : nome;
+        const desc = [
+          'Nome da área: ' + placemarkName,
+          'Data: ' + data,
+          totalPolygons > 1 ? ('Total de polígonos: ' + totalPolygons) : '',
+          totalPolygons > 1 ? ('Área total: ' + formatNumberBR(stats.areaM2, 2) + ' m²') : '',
+          'Área: ' + formatNumberBR(itemStats.areaM2, 2) + ' m²',
+          'Hectares: ' + formatNumberBR(itemStats.areaHa, 4) + ' ha',
+          'Perímetro: ' + formatNumberBR(itemStats.perimeterM, 2) + ' m',
+          'Vértices: ' + itemStats.vertices,
+          obs ? ('Observação: ' + obs) : ''
+        ].filter(Boolean).map(xmlEscape).join('<br/>');
+        return `
+    <Placemark>
+      <name>${xmlEscape(placemarkName)}</name>
+      <description><![CDATA[${desc}]]></description>
+      <styleUrl>#tmg_area_style</styleUrl>
+      <ExtendedData>
+        <Data name="nome_area"><value>${xmlEscape(placemarkName)}</value></Data>
+        <Data name="data"><value>${xmlEscape(data)}</value></Data>
+        <Data name="observacao"><value>${xmlEscape(obs)}</value></Data>
+        <Data name="area_m2"><value>${itemStats.areaM2.toFixed(4)}</value></Data>
+        <Data name="area_ha"><value>${itemStats.areaHa.toFixed(6)}</value></Data>
+        <Data name="perimetro_m"><value>${itemStats.perimeterM.toFixed(4)}</value></Data>
+        <Data name="vertices"><value>${itemStats.vertices}</value></Data>
+      </ExtendedData>
+      <Polygon>
+        <extrude>0</extrude>
+        <altitudeMode>clampToGround</altitudeMode>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+${coordsText}
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>`;
+      }).filter(Boolean).join('\\n');
+      return '<?xml version="1.0" encoding="UTF-8"?>\\n' +
+`<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>${xmlEscape(nome)}</name>
+    <Style id="tmg_area_style">
+      <LineStyle><color>ff__KML_BGR__</color><width>3</width></LineStyle>
+      <PolyStyle><color>66__KML_BGR__</color><fill>1</fill><outline>1</outline></PolyStyle>
+    </Style>
+    <ExtendedData>
+      <Data name="total_poligonos"><value>${totalPolygons}</value></Data>
+      <Data name="area_total_m2"><value>${stats.areaM2.toFixed(4)}</value></Data>
+      <Data name="area_total_ha"><value>${stats.areaHa.toFixed(6)}</value></Data>
+      <Data name="perimetro_total_m"><value>${stats.perimeterM.toFixed(4)}</value></Data>
+      <Data name="vertices_total"><value>${stats.vertices}</value></Data>
+    </ExtendedData>
+${placemarks}
+  </Document>
+</kml>`;
+    }
+
+    btnExportKml.onclick = function() {
+      const stats = updateFromCollection(false, true);
+      if (!stats || !stats.valid || !lastValidFeature) {
+        setMessage('Não foi possível gerar o KML sem polígono.', 'err');
+        return;
+      }
+      try {
+        const kml = buildKml(lastValidFeature, lastStats);
+        const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = sanitizeFileName(areaName.value || ('Area_TMG_' + DATE_AUTO)) + '.kml';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        setMessage('KML gerado com sucesso.', 'ok');
+      } catch(e) {
+        setMessage('Erro ao gerar KML: ' + (e && e.message ? e.message : e), 'err');
+      }
+    };
+
+    syncEarthPlaceName();
+    updateEarthStatus(map.getCenter());
+    initializeMapLoading();
+    loadInitialFeature();
+    setTimeout(() => {
+      map.invalidateSize();
+      updateEarthStatus(map.getCenter());
+    }, 150);
+  </script>
+</body>
+</html>
+"""
+    map_html = (
+        map_html
+        .replace("__THEME_PRIMARY__", THEME_PRIMARY_COLOR)
+        .replace("__THEME_SOFT__", THEME_PRIMARY_SOFT)
+        .replace("__THEME_RGB__", THEME_PRIMARY_RGB)
+        .replace("__DATE__", data_auto)
+        .replace("__KML_BGR__", _kml_marker_kml_color(THEME_PRIMARY_COLOR, "ff")[2:])
+        .replace("__INITIAL_FEATURE__", initial_json)
+    )
+    components.html(map_html, height=805, scrolling=False)
+
+def render_marcador_kml() -> None:
+    _render_kml_marker_css()
+    st.subheader("🗺️ Marcador de KML")
+
+    payload = _kml_marker_payload()
+    feature = _kml_marker_feature_from_payload(payload)
+    coords = _kml_marker_polygon_coords(feature)
+
+    st.session_state.setdefault("kml_area_nome", f"Area_TMG_{date.today().strftime('%Y%m%d')}")
+    st.session_state.setdefault("kml_area_obs", "")
+
+    st.markdown(
+        "<div class='kml-page-intro'>Desenhe uma área no mapa para calcular e exportar o KML. "
+        "Use as ferramentas do mapa para criar, editar, corrigir, apagar ou finalizar o polígono.</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div class='kml-marker-shell'>", unsafe_allow_html=True)
+    render_kml_marker_map(feature if coords else None)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _maturation_project_ready_for_backend(project: dict) -> bool:
+    if not isinstance(project, dict):
+        return False
+    orthos = project.get("orthos")
+    grid_ratios = project.get("gridRatios")
+    return bool(isinstance(orthos, list) and orthos and isinstance(grid_ratios, list) and len(grid_ratios) >= 4)
+
+
+def _maturation_safe_int(value, fallback: int) -> int:
+    try:
+        return max(1, int(value))
+    except Exception:
+        return fallback
+
+
+def _maturation_grid_from_project(project: dict) -> dict:
+    config = project.get("config") if isinstance(project.get("config"), dict) else {}
+    return {
+        "quadra": str(config.get("quadra") or project.get("quadra") or "Maturacao_Soja").strip() or "Maturacao_Soja",
+        "rows": _maturation_safe_int(config.get("rows") or project.get("rows"), 5),
+        "cols": _maturation_safe_int(config.get("cols") or project.get("cols"), 5),
+        "gridRatios": project.get("gridRatios") or [],
+        "dateGridRatios": project.get("dateGridRatios") or {},
+        "dateOffsets": project.get("dateOffsets") or {},
+    }
+
+
+def _maturation_project_signature(project: dict) -> str:
+    if not isinstance(project, dict):
+        return ""
+    orthos = []
+    for item in project.get("orthos") or []:
+        if isinstance(item, dict):
+            orthos.append({
+                "name": item.get("name", ""),
+                "date": item.get("date", ""),
+                "width": item.get("width", 0),
+                "height": item.get("height", 0),
+                "b64_len": len(str(item.get("b64", ""))),
+            })
+    payload = {
+        "orthos": orthos,
+        "config": project.get("config") or {},
+        "gridRatios": project.get("gridRatios") or [],
+        "dateGridRatios": project.get("dateGridRatios") or {},
+        "dateOffsets": project.get("dateOffsets") or {},
+        "manualReviews": project.get("manualReviews") or {},
+    }
+    try:
+        return hashlib.md5(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    except Exception:
+        return hashlib.md5(str(payload).encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _apply_maturation_manual_reviews(results_df: pd.DataFrame, project: dict) -> pd.DataFrame:
+    reviews = project.get("manualReviews") if isinstance(project, dict) else {}
+    if results_df is None or results_df.empty or not isinstance(reviews, dict) or not reviews:
+        return results_df
+    out = results_df.copy()
+    for idx, row in out.iterrows():
+        review = reviews.get(f"{row.get('Data_Ortofoto', '')}|{row.get('Parcela', '')}")
+        if not isinstance(review, dict):
+            continue
+        stage = str(review.get("stage") or "").strip()
+        obs = str(review.get("obs") or "").strip()
+        if stage:
+            out.at[idx, "Estagio_Manual"] = stage
+        if obs or stage:
+            out.at[idx, "Observacao"] = obs or "Estágio corrigido manualmente."
+    return out
+
+
+def _maturation_display_detail_df(results_df: pd.DataFrame) -> pd.DataFrame:
+    if results_df is None or results_df.empty:
+        return pd.DataFrame()
+    display = results_df.copy()
+    display["Estágio"] = display.apply(
+        lambda row: str(row.get("Estagio_Manual") or row.get("Estagio_Calculado") or ""),
+        axis=1,
+    )
+    rename = {
+        "Data_Ortofoto": "Data da Ortofoto",
+        "Pixels_Validos": "Pixels Válidos",
+        "Perc_Verde": "% Verde",
+        "Perc_Amarelo": "% Amarelo",
+        "Perc_Marrom_Seco": "% Marrom/Seco",
+        "Perc_Solo_Palhada": "% Solo/Palhada",
+        "Perc_Verde_Util": "% Verde Útil",
+        "Perc_Vegetacao_Util": "% Vegetação Útil",
+        "Contabilizar": "Contabilizar",
+        "Perc_Sombra": "% Sombra",
+        "ExG_Medio": "ExG Médio",
+        "ExR_Medio": "ExR Médio",
+        "GLI_Medio": "GLI Médio",
+        "VARI_Medio": "VARI Médio",
+        "Indice_Verde": "Índice Verde",
+        "Indice_Maturacao": "Índice Maturação",
+        "Observacao": "Observação",
+    }
+    columns = [
+        "Quadra",
+        "Parcela",
+        "Disparo",
+        "Tiro",
+        "Data_Ortofoto",
+        "Perc_Verde",
+        "Perc_Amarelo",
+        "Perc_Marrom_Seco",
+        "Perc_Solo_Palhada",
+        "Perc_Verde_Util",
+        "Perc_Vegetacao_Util",
+        "Contabilizar",
+        "Perc_Sombra",
+        "Indice_Maturacao",
+        "Estágio",
+        "Observacao",
+    ]
+    columns = [col for col in columns if col in display.columns]
+    return display[columns].rename(columns=rename)
+
+
+def _maturation_display_summary_df(summary_df: pd.DataFrame) -> pd.DataFrame:
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame()
+    rename = {
+        "Primeira_Data_R7": "Primeira Data R7",
+        "Primeira_Data_R7_5": "Primeira Data R7.5",
+        "Primeira_Data_R8": "Primeira Data R8",
+        "Contabilizada": "Contabilizada",
+        "Dias_Ate_R8": "Dias até R8",
+        "Perc_Verde_Inicial": "% Verde Inicial",
+        "Perc_Verde_Final": "% Verde Final",
+        "Reducao_Verde": "Redução Verde",
+        "Indice_Maturacao_Inicial": "Índice Maturação Inicial",
+        "Indice_Maturacao_Final": "Índice Maturação Final",
+        "Aumento_Maturacao": "Aumento Maturação",
+        "Estagio_Final": "Estágio Final",
+        "Observacao": "Observação",
+    }
+    return summary_df.rename(columns=rename)
+
+
+def _render_maturation_backend_panel(initial_project: dict) -> None:
+    st.markdown(
+        f"""
+        <div style='
+            border:1px solid rgba({THEME_PRIMARY_RGB},.42);
+            border-radius:14px;
+            padding:12px 14px;
+            margin:8px 0 14px 0;
+            background:
+              linear-gradient(120deg,rgba(255,255,255,.08),transparent 34%),
+              linear-gradient(145deg,rgba(2,14,36,.94),rgba(18,62,100,.72),rgba({THEME_PRIMARY_RGB},.12));
+            box-shadow:0 12px 24px rgba(0,0,0,.30),0 0 20px rgba({THEME_PRIMARY_RGB},.16),inset 0 1px 0 rgba(255,255,255,.12);
+        '>
+          <div style='color:#fff;font-weight:950;letter-spacing:1px;text-transform:uppercase;font-size:.88rem;text-shadow:0 1px 0 #020e24,0 0 14px rgba({THEME_PRIMARY_RGB},.42);'>
+            Motor Python/OpenCV de Maturação
+          </div>
+          <div style='color:#dffbff;font-size:.78rem;margin-top:5px;line-height:1.45;'>
+            Reabra um projeto salvo pelo visualizador para rodar a análise modular por recorte de parcela, gerar resumo temporal, Excel e mapa PNG.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if not HAS_SOYBEAN_MATURATION_BACKEND:
+        st.warning(f"Motor Python/OpenCV indisponível: {SOYBEAN_MATURATION_BACKEND_ERROR}")
+        return
+    if not _maturation_project_ready_for_backend(initial_project):
+        st.info("Para usar o motor Python/OpenCV, marque o grid no visualizador, salve o projeto e reabra o JSON aqui.")
+        return
+
+    grid = _maturation_grid_from_project(initial_project)
+    orthos = list(initial_project.get("orthos") or [])
+    project_sig = _maturation_project_signature(initial_project)
+    adjusted_dates = len(grid.get("dateGridRatios") or {})
+
+    with st.expander("🔬 Análise Python/OpenCV tipo pliman", expanded=False):
+        st.caption(
+            "Implementação própria em Python: HSV, índices RGB, recorte por parcela, resumo temporal e exportação Excel. "
+            "As extremidades ajustadas por período no visualizador são respeitadas."
+        )
+        meta_cols = st.columns(4)
+        meta_cols[0].metric("Datas", len(orthos))
+        meta_cols[1].metric("Parcelas", grid["rows"] * grid["cols"])
+        meta_cols[2].metric("Grid", f"{grid['rows']} x {grid['cols']}")
+        meta_cols[3].metric("Ajustes por data", adjusted_dates)
+
+        tab_config, tab_results = st.tabs(["Configuração", "Resultados e Exportações"])
+        with tab_config:
+            st.markdown("##### Limites de classificação")
+            c1, c2, c3, c4 = st.columns(4)
+            r6_min = c1.number_input("R6 verde mínimo (%)", 0.0, 100.0, float(DEFAULT_MATURATION_CONFIG.get("r6_verde_min", 65)), 1.0, key="mat_py_r6")
+            r7_min = c2.number_input("R7 verde mínimo (%)", 0.0, 100.0, float(DEFAULT_MATURATION_CONFIG.get("r7_verde_min", 35)), 1.0, key="mat_py_r7")
+            r75_min = c3.number_input("R7.5 verde mínimo (%)", 0.0, 100.0, float(DEFAULT_MATURATION_CONFIG.get("r75_verde_min", 20)), 1.0, key="mat_py_r75")
+            sombra_max = c4.number_input("Sombra V máximo", 0, 255, int(DEFAULT_MATURATION_CONFIG.get("sombra_v_max", 35)), 1, key="mat_py_shadow")
+
+            st.markdown("##### Máscaras HSV")
+            hsv_cols = st.columns(3)
+            with hsv_cols[0]:
+                verde_h_min = st.number_input("Verde H mín.", 0, 179, int(DEFAULT_MATURATION_CONFIG.get("verde_h_min", 35)), key="mat_py_green_h_min")
+                verde_h_max = st.number_input("Verde H máx.", 0, 179, int(DEFAULT_MATURATION_CONFIG.get("verde_h_max", 90)), key="mat_py_green_h_max")
+                verde_s_min = st.number_input("Verde S mín.", 0, 255, int(DEFAULT_MATURATION_CONFIG.get("verde_s_min", 35)), key="mat_py_green_s_min")
+                verde_v_min = st.number_input("Verde V mín.", 0, 255, int(DEFAULT_MATURATION_CONFIG.get("verde_v_min", 35)), key="mat_py_green_v_min")
+            with hsv_cols[1]:
+                amarelo_h_min = st.number_input("Amarelo H mín.", 0, 179, int(DEFAULT_MATURATION_CONFIG.get("amarelo_h_min", 18)), key="mat_py_yellow_h_min")
+                amarelo_h_max = st.number_input("Amarelo H máx.", 0, 179, int(DEFAULT_MATURATION_CONFIG.get("amarelo_h_max", 38)), key="mat_py_yellow_h_max")
+                amarelo_s_min = st.number_input("Amarelo S mín.", 0, 255, int(DEFAULT_MATURATION_CONFIG.get("amarelo_s_min", 30)), key="mat_py_yellow_s_min")
+                amarelo_v_min = st.number_input("Amarelo V mín.", 0, 255, int(DEFAULT_MATURATION_CONFIG.get("amarelo_v_min", 45)), key="mat_py_yellow_v_min")
+            with hsv_cols[2]:
+                marrom_h_min = st.number_input("Marrom H mín.", 0, 179, int(DEFAULT_MATURATION_CONFIG.get("marrom_h_min", 5)), key="mat_py_brown_h_min")
+                marrom_h_max = st.number_input("Marrom H máx.", 0, 179, int(DEFAULT_MATURATION_CONFIG.get("marrom_h_max", 25)), key="mat_py_brown_h_max")
+                marrom_s_min = st.number_input("Marrom S mín.", 0, 255, int(DEFAULT_MATURATION_CONFIG.get("marrom_s_min", 20)), key="mat_py_brown_s_min")
+                marrom_s_max = st.number_input("Marrom S máx.", 0, 255, int(DEFAULT_MATURATION_CONFIG.get("marrom_s_max", 180)), key="mat_py_brown_s_max")
+                marrom_v_min = st.number_input("Marrom V mín.", 0, 255, int(DEFAULT_MATURATION_CONFIG.get("marrom_v_min", 30)), key="mat_py_brown_v_min")
+                marrom_v_max = st.number_input("Marrom V máx.", 0, 255, int(DEFAULT_MATURATION_CONFIG.get("marrom_v_max", 200)), key="mat_py_brown_v_max")
+
+            opt_cols = st.columns(3)
+            ignorar_solo = opt_cols[0].checkbox("Ignorar solo no índice final", value=bool(DEFAULT_MATURATION_CONFIG.get("ignorar_solo_no_indice", False)), key="mat_py_ignore_soil")
+            suavizar = opt_cols[1].checkbox("Suavizar imagem", value=bool(DEFAULT_MATURATION_CONFIG.get("suavizar_imagem", False)), key="mat_py_blur")
+            clahe = opt_cols[2].checkbox("Aplicar CLAHE", value=bool(DEFAULT_MATURATION_CONFIG.get("aplicar_clahe", False)), key="mat_py_clahe")
+
+            config = {
+                "r6_verde_min": r6_min,
+                "r7_verde_min": r7_min,
+                "r75_verde_min": r75_min,
+                "sombra_v_max": sombra_max,
+                "verde_h_min": verde_h_min,
+                "verde_h_max": verde_h_max,
+                "verde_s_min": verde_s_min,
+                "verde_v_min": verde_v_min,
+                "amarelo_h_min": amarelo_h_min,
+                "amarelo_h_max": amarelo_h_max,
+                "amarelo_s_min": amarelo_s_min,
+                "amarelo_v_min": amarelo_v_min,
+                "marrom_h_min": marrom_h_min,
+                "marrom_h_max": marrom_h_max,
+                "marrom_s_min": marrom_s_min,
+                "marrom_s_max": marrom_s_max,
+                "marrom_v_min": marrom_v_min,
+                "marrom_v_max": marrom_v_max,
+                "ignorar_solo_no_indice": ignorar_solo,
+                "suavizar_imagem": suavizar,
+                "aplicar_clahe": clahe,
+            }
+
+            if st.button("🔬 Recalcular maturação com Python/OpenCV", key="mat_py_run", use_container_width=True):
+                if not _maturation_project_ready_for_backend(initial_project):
+                    st.error("Marque o grid e salve/reabra o projeto antes de analisar.")
+                else:
+                    progress_bar = st.progress(0)
+                    status_slot = st.empty()
+
+                    def _progress(pct, message):
+                        progress_bar.progress(min(100, max(0, int(float(pct)))))
+                        status_slot.caption(str(message))
+
+                    try:
+                        _progress(1, "Iniciando análise temporal por parcelas...")
+                        results_df = analyze_grid_temporal_maturation(orthos, None, grid, config, progress_callback=_progress)
+                        results_df = _apply_maturation_manual_reviews(results_df, initial_project)
+                        summary_df = build_temporal_summary(results_df)
+                        st.session_state["mat_py_results_df"] = results_df
+                        st.session_state["mat_py_summary_df"] = summary_df
+                        st.session_state["mat_py_grid"] = grid
+                        st.session_state["mat_py_orthos"] = orthos
+                        st.session_state["mat_py_config"] = config
+                        st.session_state["mat_py_project_sig"] = project_sig
+                        _progress(100, "Análise Python/OpenCV concluída.")
+                        st.success("Maturação temporal calculada com sucesso.")
+                    except Exception as exc:
+                        st.error(f"Erro na análise Python/OpenCV: {exc}")
+
+        with tab_results:
+            results_df = st.session_state.get("mat_py_results_df")
+            summary_df = st.session_state.get("mat_py_summary_df")
+            if results_df is None or summary_df is None or getattr(results_df, "empty", True):
+                st.info("Execute a análise na aba Configuração para gerar tabelas, gráfico, Excel e PNG.")
+            else:
+                if st.session_state.get("mat_py_project_sig") != project_sig:
+                    st.warning("O projeto carregado mudou depois da última análise. Recalcule para atualizar os resultados.")
+
+                r7_count = int(summary_df.get("Primeira_Data_R7", pd.Series(dtype=str)).astype(str).str.strip().ne("").sum()) if not summary_df.empty else 0
+                r8_count = int(summary_df.get("Primeira_Data_R8", pd.Series(dtype=str)).astype(str).str.strip().ne("").sum()) if not summary_df.empty else 0
+                result_cols = st.columns(4)
+                result_cols[0].metric("Linhas detalhadas", len(results_df))
+                result_cols[1].metric("Parcelas no resumo", len(summary_df))
+                result_cols[2].metric("Atingiram R7", r7_count)
+                result_cols[3].metric("Atingiram R8", r8_count)
+
+                display_detail = _maturation_display_detail_df(results_df)
+                display_summary = _maturation_display_summary_df(summary_df)
+                st.markdown("##### Tabela detalhada")
+                st.dataframe(display_detail, use_container_width=True, hide_index=True, height=310)
+                st.markdown("##### Resumo temporal")
+                st.dataframe(display_summary, use_container_width=True, hide_index=True, height=260)
+
+                chart_cols = st.columns([1, 1])
+                with chart_cols[0]:
+                    parcelas = sorted(results_df["Parcela"].astype(str).unique().tolist())
+                    selected_parcela = st.selectbox("Gráfico de evolução da parcela", parcelas, key="mat_py_chart_parcel")
+                    series = results_df[results_df["Parcela"].astype(str) == selected_parcela].copy()
+                    series["Data_Ortofoto"] = pd.to_datetime(series["Data_Ortofoto"], errors="coerce")
+                    series = series.sort_values("Data_Ortofoto").set_index("Data_Ortofoto")
+                    st.line_chart(series[["Perc_Verde", "Indice_Maturacao"]])
+                with chart_cols[1]:
+                    stage_series = results_df.copy()
+                    stage_series["Estágio"] = stage_series.apply(
+                        lambda row: str(row.get("Estagio_Manual") or row.get("Estagio_Calculado") or "Indefinido"),
+                        axis=1,
+                    )
+                    stage_counts = (
+                        stage_series.groupby(["Data_Ortofoto", "Estágio"], dropna=False)
+                        .size()
+                        .reset_index(name="Parcelas")
+                        .pivot(index="Data_Ortofoto", columns="Estágio", values="Parcelas")
+                        .fillna(0)
+                    )
+                    st.bar_chart(stage_counts)
+
+                dl_cols = st.columns(4)
+                csv_detail = display_detail.to_csv(index=False, sep=";").encode("utf-8-sig")
+                csv_summary = display_summary.to_csv(index=False, sep=";").encode("utf-8-sig")
+                dl_cols[0].download_button("Baixar CSV detalhado", csv_detail, "maturacao_temporal_detalhada_python.csv", "text/csv", use_container_width=True)
+                dl_cols[1].download_button("Baixar CSV resumo", csv_summary, "maturacao_temporal_resumo_python.csv", "text/csv", use_container_width=True)
+
+                try:
+                    excel_buf = BytesIO()
+                    export_maturation_excel(results_df, summary_df, excel_buf, st.session_state.get("mat_py_config") or {})
+                    dl_cols[2].download_button(
+                        "Baixar Excel",
+                        excel_buf.getvalue(),
+                        "maturacao_temporal_soja_python.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                except Exception as exc:
+                    dl_cols[2].warning(f"Excel indisponível: {exc}")
+
+                sorted_orthos = sorted(orthos, key=lambda it: (str(it.get("date", "")), int(it.get("order", 0) or 0)))
+                date_options = [str(item.get("date") or f"Data {idx + 1}") for idx, item in enumerate(sorted_orthos)]
+                if date_options:
+                    selected_date = st.selectbox("Data do mapa PNG", date_options, key="mat_py_png_date")
+                    if dl_cols[3].button("Gerar PNG do mapa", use_container_width=True, key="mat_py_make_png"):
+                        try:
+                            date_idx = date_options.index(selected_date)
+                            date_df = results_df[results_df["Data_Ortofoto"].astype(str) == selected_date]
+                            overlay = draw_maturation_grid_overlay(
+                                sorted_orthos[date_idx],
+                                {**grid, "date_index": date_idx},
+                                date_df,
+                            )
+                            png_buf = BytesIO()
+                            overlay.save(png_buf, format="PNG")
+                            st.session_state["mat_py_png_bytes"] = png_buf.getvalue()
+                            st.session_state["mat_py_png_name"] = f"mapa_maturacao_python_{selected_date}.png"
+                            st.success("PNG do mapa de maturação gerado.")
+                        except Exception as exc:
+                            st.error(f"Erro ao gerar PNG: {exc}")
+                    if st.session_state.get("mat_py_png_bytes"):
+                        st.download_button(
+                            "Baixar PNG gerado",
+                            st.session_state["mat_py_png_bytes"],
+                            st.session_state.get("mat_py_png_name", "mapa_maturacao_python.png"),
+                            "image/png",
+                            use_container_width=True,
+                        )
+
+
+def render_maturacao_temporal_soja() -> None:
+    st.markdown(
+        """
+        <div style='
+            border:1px solid rgba(0,229,255,.42);
+            border-radius:14px;
+            padding:16px 18px;
+            margin-bottom:14px;
+            background:
+              linear-gradient(120deg,rgba(255,255,255,.08),transparent 34%),
+              linear-gradient(145deg,rgba(2,14,36,.95),rgba(18,62,100,.72),rgba(0,229,255,.10));
+            box-shadow:0 16px 32px rgba(0,0,0,.32),0 0 24px rgba(0,229,255,.16),inset 0 1px 0 rgba(255,255,255,.14);
+        '>
+          <div style='color:#fff;font-weight:950;letter-spacing:1.4px;text-transform:uppercase;font-size:1rem;text-shadow:0 2px 0 #020e24,0 0 16px rgba(0,229,255,.42);'>
+            🌱 Maturação Temporal da Soja
+          </div>
+          <div style='color:#dffbff;font-size:.82rem;margin-top:6px;line-height:1.45;'>
+            Importe ortofotos da mesma área em datas diferentes, marque o grid na primeira data e acompanhe R6/R7/R7.5/R8 por parcela.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    initial_project = {}
+
+    mat_files = _resettable_ortho_uploader(
+        "📷 Importar sequência de ortofotos da mesma área",
+        accept_multiple_files=True,
+        key="mat_temporal_ortos",
+        help="PNG · JPG · TIF/GeoTIFF · JP2 · IMG · ECW. Informe a data de cada ortofoto antes de abrir o visualizador.",
+    )
+
+    mat_items = []
+    for mat_file in mat_files or []:
+        try:
+            mat_items.append({"name": mat_file.name, "raw": mat_file.getbuffer().tobytes()})
+        except Exception:
+            continue
+
+    if mat_items:
+        if len(mat_items) > 12:
+            st.warning("Foram anexadas mais de 12 ortofotos. Para manter o visualizador leve, serão usadas as 12 primeiras.")
+            mat_items = mat_items[:12]
+
+        st.caption("Revise a ordem cronológica na tabela. Para renomear uma ortofoto, edite a coluna Nome.")
+        st.markdown(
+            """
+            <div class="tmg-mat-edit-table">
+              <div class="tmg-mat-edit-head">
+                <span>Arquivo original</span><span>Nome</span><span>Data</span><span>Ordem</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        mat_entries = []
+        for idx, item in enumerate(mat_items):
+            file_col, name_col, date_col, order_col = st.columns([2.2, 2.2, 1.35, .8])
+            key_hash = hashlib.md5(f"mat-edit-{idx}-{item['name']}-{len(item['raw'])}".encode("utf-8")).hexdigest()[:10]
+            with file_col:
+                st.markdown(f"<div class='tmg-mat-file-cell'>{html.escape(item['name'])}</div>", unsafe_allow_html=True)
+            with name_col:
+                mat_name = st.text_input(
+                    "Nome",
+                    value=Path(item["name"]).stem,
+                    key=f"mat_temporal_table_name_{key_hash}",
+                    label_visibility="collapsed",
+                )
+            with date_col:
+                raw_date_text = st.text_input(
+                    "Data",
+                    value=date.today().isoformat(),
+                    key=f"mat_temporal_table_date_{key_hash}",
+                    label_visibility="collapsed",
+                    placeholder="AAAA-MM-DD",
+                )
+            with order_col:
+                mat_order = st.number_input(
+                    "Ordem",
+                    min_value=1,
+                    max_value=99,
+                    value=idx + 1,
+                    step=1,
+                    key=f"mat_temporal_table_order_{key_hash}",
+                    label_visibility="collapsed",
+                )
+            mat_name = str(mat_name or Path(item["name"]).stem).strip() or Path(item["name"]).stem
+            try:
+                mat_order = int(mat_order or (idx + 1))
+            except Exception:
+                mat_order = idx + 1
+            raw_date_text = str(raw_date_text or date.today().isoformat()).strip()
+            mat_date_iso = ""
+            for date_fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%Y"):
+                try:
+                    mat_date_iso = datetime.strptime(raw_date_text.replace("/", "-"), date_fmt.replace("/", "-")).date().isoformat()
+                    break
+                except Exception:
+                    pass
+            if not mat_date_iso:
+                mat_date_iso = date.today().isoformat()
+            mat_entries.append({
+                "order": max(1, min(99, mat_order)),
+                "upload_order": idx,
+                "name": mat_name,
+                "original_name": item["name"],
+                "date": mat_date_iso,
+                "raw": item["raw"],
+            })
+    else:
+        mat_entries = []
+
+    mat_orthos = []
+    mat_errors = []
+    if mat_entries:
+        total_entries = max(1, len(mat_entries))
+        progress_slot = st.empty()
+        for idx, item in enumerate(sorted(mat_entries, key=lambda it: (it["order"], it["date"], it.get("upload_order", 0))), start=1):
+            try:
+                pct = int(8 + (idx - 1) * 82 / total_entries)
+                update_tmg_loading(progress_slot, pct, f"Preparando ortofoto temporal {idx}/{total_entries}: {Path(item['name']).name}")
+                b64, dims, err, spatial = processar_ortofoto(item["raw"], item["name"])
+                if err:
+                    mat_errors.append(f"{item['name']}: {err}")
+                    continue
+                mat_orthos.append({
+                    "order": int(item["order"]),
+                    "upload_order": int(item.get("upload_order", 0)),
+                    "name": item["name"],
+                    "date": item["date"],
+                    "b64": b64,
+                    "width": int(dims[0]),
+                    "height": int(dims[1]),
+                    "orig_width": int((spatial or {}).get("orig_width") or dims[0]),
+                    "orig_height": int((spatial or {}).get("orig_height") or dims[1]),
+                })
+            except Exception as exc:
+                mat_errors.append(f"{item.get('name', 'Ortofoto')}: {exc}")
+        if mat_orthos:
+            update_tmg_loading(progress_slot, 100, "Linha temporal preparada com sucesso.")
+            time.sleep(0.05)
+            clear_tmg_loading(progress_slot)
+
+    for message in mat_errors:
+        st.warning(message)
+
+    project_has_orthos = bool(isinstance(initial_project, dict) and initial_project.get("orthos"))
+    if not mat_orthos and not project_has_orthos:
+        st.markdown(
+            """
+            <div style='height:520px;border:1px dashed rgba(0,229,255,.28);border-radius:14px;background:rgba(2,14,36,.58);
+                        display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:#9edfec;text-align:center;'>
+              <div style='font-size:3rem;'>🌱</div>
+              <div style='font-size:.95rem;letter-spacing:1.4px;text-transform:uppercase;color:#fff;font-weight:900;'>Maturação Temporal da Soja</div>
+              <div style='max-width:620px;font-size:.82rem;line-height:1.5;'>
+                Importe uma sequência de ortofotos, ajuste a ordem cronológica, marque o grid na primeira ortofoto,
+                analise HSV e exporte o Excel final.
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    mat_orthos = sorted(mat_orthos, key=lambda it: (it["order"], it["date"], it.get("upload_order", 0)))
+    mat_html = r"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script async src="https://docs.opencv.org/4.x/opencv.js" onload="initOpenCvRuntime()"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#020e24; color:#fff; font-family:'Segoe UI',Arial,sans-serif; }
+  #matRoot {
+    width:100%; height:870px; position:relative; display:grid; grid-template-columns:minmax(0,1fr) 342px; gap:12px; padding:12px;
+    background:
+      radial-gradient(circle at 10% 0%, rgba(__THEME_RGB__,.18), transparent 42%),
+      linear-gradient(135deg,#020e24 0%,#061525 50%,#0d2b45 100%);
+  }
+  #matViewer, .mat-side {
+    border:1px solid rgba(__THEME_RGB__,.54); border-radius:14px; overflow:hidden;
+    background:
+      linear-gradient(120deg,rgba(255,255,255,.08),transparent 32%),
+      linear-gradient(145deg,rgba(2,14,36,.94),rgba(18,62,100,.76),rgba(__THEME_RGB__,.12));
+    box-shadow:0 16px 32px rgba(0,0,0,.40),0 0 26px rgba(__THEME_RGB__,.18),inset 0 1px 0 rgba(255,255,255,.14);
+  }
+  #matViewer { position:relative; min-width:0; user-select:none; cursor:grab; }
+  #matViewer:active { cursor:grabbing; }
+  #matCanvas { position:absolute; inset:0; display:block; width:100%; height:100%; background:#061525; }
+  .mat-side { padding:10px; overflow:auto; scrollbar-width:thin; scrollbar-color:__THEME_PRIMARY__ rgba(2,14,36,.92); }
+  .mat-side::-webkit-scrollbar { width:8px; }
+  .mat-side::-webkit-scrollbar-track { background:rgba(2,14,36,.92); }
+  .mat-side::-webkit-scrollbar-thumb { background:linear-gradient(180deg,__THEME_PRIMARY__,#04d98b); border-radius:999px; }
+  .mat-title {
+    padding:8px 9px; border:1px solid rgba(__THEME_RGB__,.42); border-radius:8px; margin-bottom:8px;
+    background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.04) 52%,rgba(0,0,0,.18) 53%),linear-gradient(145deg,rgba(2,14,36,.96),rgba(18,62,100,.78));
+    color:#fff; font-size:13px; font-weight:950; letter-spacing:1.4px; text-transform:uppercase;
+    text-shadow:0 2px 0 rgba(0,0,0,.88),0 0 16px rgba(__THEME_RGB__,.46);
+  }
+  .mat-section {
+    border:1px solid rgba(__THEME_RGB__,.24); border-radius:9px; padding:8px; margin:8px 0;
+    background:rgba(2,14,36,.54); box-shadow:inset 0 1px 0 rgba(255,255,255,.08);
+  }
+  .mat-sub { color:#9edfec; font-size:10px; line-height:1.35; font-weight:750; margin:4px 0 7px; }
+  .row { display:grid; grid-template-columns:112px minmax(0,1fr); gap:7px; align-items:center; margin:5px 0; color:#dffbff; font-size:10px; font-weight:850; }
+  .row label { text-transform:uppercase; letter-spacing:.6px; color:#fff; text-shadow:0 1px 0 rgba(0,0,0,.75); }
+  input, select, textarea {
+    width:100%; border-radius:7px; border:1px solid rgba(__THEME_RGB__,.48);
+    background:linear-gradient(145deg,rgba(2,14,36,.92),rgba(13,43,69,.78));
+    color:#fff; padding:6px 7px; font-size:11px; font-weight:800; outline:none;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 0 12px rgba(__THEME_RGB__,.10);
+    color-scheme:dark;
+  }
+  input::placeholder, textarea::placeholder { color:rgba(224,247,255,.72); opacity:1; }
+  select option {
+    background:#08233d !important;
+    color:#ffffff !important;
+    font-weight:850;
+  }
+  select option:checked,
+  select option:hover {
+    background:#0f5f88 !important;
+    color:#ffffff !important;
+  }
+  input[type="date"]::-webkit-calendar-picker-indicator {
+    filter:invert(1) brightness(1.6) drop-shadow(0 0 5px rgba(__THEME_RGB__,.70));
+    opacity:.95;
+  }
+  textarea { min-height:58px; resize:vertical; font-family:'Segoe UI',Arial,sans-serif; }
+  .btn-grid { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
+  .btn-grid.three { grid-template-columns:1fr 1fr 1fr; }
+  .btn-grid.one { grid-template-columns:1fr; }
+  .btn-grid .full { grid-column:1/-1; }
+  .mat-btn {
+    min-height:32px; border-radius:8px; border:1px solid rgba(__THEME_RGB__,.52);
+    background:linear-gradient(120deg,rgba(255,255,255,.12),transparent 34%),linear-gradient(145deg,rgba(2,14,36,.96),rgba(18,62,100,.82),rgba(__THEME_RGB__,.20));
+    color:#fff; font-size:10px; font-weight:950; letter-spacing:.35px; cursor:pointer;
+    text-shadow:0 1px 0 rgba(0,0,0,.86),0 0 10px rgba(__THEME_RGB__,.30);
+    box-shadow:0 8px 16px rgba(0,0,0,.26),0 0 14px rgba(__THEME_RGB__,.14),inset 0 1px 0 rgba(255,255,255,.14);
+    transition:.18s ease;
+  }
+  .mat-btn:hover { transform:translateY(-1px); border-color:__THEME_SOFT__; box-shadow:0 12px 22px rgba(0,0,0,.34),0 0 22px rgba(__THEME_RGB__,.28),inset 0 1px 0 rgba(255,255,255,.20); }
+  .mat-btn.active { border-color:#ffd21f; color:#ffd21f; box-shadow:0 0 18px rgba(255,210,31,.25),inset 0 1px 0 rgba(255,255,255,.18); }
+  .mat-btn.primary { background:linear-gradient(120deg,rgba(255,255,255,.16),transparent 34%),linear-gradient(145deg,__THEME_PRIMARY__,#027fa0); border-color:__THEME_SOFT__; }
+  .mat-btn.orange { border-color:#ff9f1c; color:#ffd7a0; background:linear-gradient(145deg,rgba(62,31,0,.92),rgba(2,14,36,.90)); }
+  .mat-btn.green { border-color:#00d084; color:#c9ffe8; background:linear-gradient(145deg,rgba(0,66,42,.72),rgba(2,14,36,.90)); }
+  .mat-btn.red { border-color:#ff5555; color:#ffd1d1; background:linear-gradient(145deg,rgba(80,15,20,.76),rgba(2,14,36,.90)); }
+  .badge {
+    position:absolute; z-index:30; pointer-events:none; border:1px solid rgba(__THEME_RGB__,.45); border-radius:9px;
+    background:rgba(2,14,36,.84); color:#dffbff; padding:6px 9px; font-size:10px; font-weight:900;
+    box-shadow:0 8px 18px rgba(0,0,0,.34),0 0 14px rgba(__THEME_RGB__,.14); text-shadow:0 1px 0 rgba(0,0,0,.85);
+  }
+  #zoomBadge { top:12px; left:12px; }
+  #coordBadge { bottom:12px; left:12px; color:#9edfec; }
+  #hintBadge { right:12px; bottom:12px; text-align:right; max-width:360px; }
+  #dateBadge { top:12px; right:12px; color:#fff; }
+  .progress { height:12px; overflow:hidden; border-radius:999px; border:1px solid rgba(__THEME_RGB__,.40); background:rgba(255,255,255,.10); margin:7px 0; }
+  .progress i { display:block; width:0%; height:100%; border-radius:999px; background:linear-gradient(90deg,__THEME_PRIMARY__,#ff9f1c); box-shadow:0 0 14px rgba(__THEME_RGB__,.50); transition:width .22s ease; }
+  .metrics { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:7px; }
+  .metric { min-height:54px; border:1px solid rgba(__THEME_RGB__,.28); border-radius:8px; padding:7px; background:rgba(2,14,36,.54); }
+  .metric span { display:block; color:#bfefff; font-size:9px; font-weight:950; text-transform:uppercase; letter-spacing:.7px; }
+  .metric b { display:block; margin-top:5px; color:#fff; font-size:15px; font-weight:950; text-shadow:0 1px 0 #000,0 0 10px rgba(__THEME_RGB__,.35); }
+  .date-list { max-height:155px; overflow:auto; border:1px solid rgba(__THEME_RGB__,.20); border-radius:8px; background:rgba(2,14,36,.40); padding:5px; }
+  .date-item { padding:6px; border-radius:6px; border:1px solid transparent; color:#dffbff; font-size:10px; cursor:pointer; margin-bottom:4px; background:rgba(255,255,255,.025); }
+  .date-item.active { border-color:rgba(__THEME_RGB__,.52); background:rgba(__THEME_RGB__,.16); color:#fff; }
+  .date-item b { display:block; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .date-item span { color:#9edfec; font-size:9px; }
+  .legend { display:grid; grid-template-columns:1fr 1fr; gap:4px; color:#dffbff; font-size:9px; margin-top:6px; }
+  .leg { display:flex; align-items:center; gap:5px; }
+  .sw { width:13px; height:13px; border-radius:3px; border:1px solid rgba(255,255,255,.30); }
+  .table-box {
+    max-height:150px; overflow:auto; border:1px solid rgba(__THEME_RGB__,.44); border-radius:8px; margin-top:7px;
+    background:linear-gradient(180deg,rgba(10,44,72,.90),rgba(2,14,36,.92));
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.10),0 0 14px rgba(__THEME_RGB__,.12);
+  }
+  table { width:100%; border-collapse:collapse; font-size:9px; color:#f5fbff; background:transparent; }
+  th {
+    position:sticky; top:0; z-index:2; background:linear-gradient(180deg,#0b4c78,#08233d);
+    color:#fff; padding:6px 5px; border-bottom:1px solid rgba(__THEME_RGB__,.48);
+    text-shadow:0 1px 0 rgba(0,0,0,.86); font-weight:950;
+  }
+  td {
+    padding:5px 4px; border-bottom:1px solid rgba(__THEME_RGB__,.16); text-align:center;
+    color:#f5fbff; font-weight:800; text-shadow:0 1px 0 rgba(0,0,0,.72);
+  }
+  tbody tr:nth-child(odd) { background:rgba(8,34,58,.82); }
+  tbody tr:nth-child(even) { background:rgba(15,56,88,.70); }
+  tbody tr:hover { background:rgba(__THEME_RGB__,.20); }
+  #graphCanvas { width:100%; height:116px; border:1px solid rgba(__THEME_RGB__,.25); border-radius:8px; background:rgba(2,14,36,.50); margin-top:6px; }
+  .mat-modal {
+    position:absolute; inset:12px; z-index:90; display:none; align-items:center; justify-content:center;
+    background:rgba(2,14,36,.72); backdrop-filter:blur(8px);
+  }
+  .mat-modal.open { display:flex; }
+  .mat-modal-card {
+    width:min(980px,calc(100% - 24px)); max-height:calc(100% - 24px); overflow:auto;
+    border:1px solid rgba(__THEME_RGB__,.62); border-radius:14px; padding:12px;
+    background:
+      linear-gradient(120deg,rgba(255,255,255,.10),transparent 34%),
+      linear-gradient(145deg,rgba(2,14,36,.98),rgba(18,62,100,.90),rgba(__THEME_RGB__,.14));
+    box-shadow:0 24px 48px rgba(0,0,0,.55),0 0 30px rgba(__THEME_RGB__,.22),inset 0 1px 0 rgba(255,255,255,.14);
+  }
+  .mat-modal-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px; }
+  .mat-modal-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .modal-table { max-height:430px; }
+  .file-trigger { position:relative; overflow:hidden; }
+  .file-trigger input { position:absolute; inset:0; opacity:0; cursor:pointer; }
+  @media(max-width:980px) {
+    body { overflow:auto; }
+    #matRoot { height:auto; grid-template-columns:1fr; }
+    #matViewer { height:620px; }
+    .mat-side { max-height:none; }
+    .mat-modal-grid { grid-template-columns:1fr; }
+  }
+</style>
+</head>
+<body>
+<div id="matRoot">
+  <div id="matViewer">
+    <canvas id="matCanvas"></canvas>
+    <div class="badge" id="zoomBadge">1.00×</div>
+    <div class="badge" id="dateBadge">Data --</div>
+    <div class="badge" id="coordBadge">X:0 Y:0</div>
+    <div class="badge" id="hintBadge">Scroll=Zoom · Drag=Pan<br>Grid na 1ª ortofoto · Ajuste extremidades por data</div>
+  </div>
+  <aside class="mat-side">
+    <div class="mat-title">Maturação Temporal da Soja</div>
+    <div class="mat-sub" id="cvStatus">OpenCV.js: carregando. Fallback HSV manual disponível.</div>
+
+    <div class="mat-section">
+      <div class="row"><label>Quadra</label><input id="quadraInput" value="Maturacao_Soja"></div>
+      <div class="row"><label>Grid ativo</label><select id="gridSelect"></select></div>
+      <div class="btn-grid">
+        <button class="mat-btn green" id="btnSaveGrid">Salvar Grid</button>
+        <button class="mat-btn" id="btnAddGrid">Adicionar Grid</button>
+      </div>
+      <div class="row"><label>Disparos</label><input id="rowsInput" type="number" min="1" max="300" value="5"></div>
+      <div class="row"><label>Tiros</label><input id="colsInput" type="number" min="1" max="300" value="5"></div>
+      <div style="display:none;">
+        <select id="viewMode"><option value="single" selected>Data individual</option></select>
+        <select id="dateSelect"></select>
+        <select id="compareSelect"></select>
+      </div>
+      <div class="date-list" id="dateList"></div>
+    </div>
+
+    <div class="mat-section">
+      <div class="btn-grid">
+        <button class="mat-btn orange" id="btnMarkGrid">⊞ Marcar Grid</button>
+        <button class="mat-btn" id="btnCornerMode">◰ Ajustar Extremidades</button>
+        <button class="mat-btn" id="btnFit">⤢ Centralizar</button>
+        <button class="mat-btn red full" id="btnClearGrid">Limpar Grid</button>
+      </div>
+      <div style="display:none;">
+        <button class="mat-btn" id="btnAdjustMode">Ajustar Data</button>
+        <input id="adjustStep" type="number" min="1" max="100" value="5">
+        <button class="mat-btn" id="btnUp">↑</button>
+        <button class="mat-btn" id="btnDown">↓</button>
+        <button class="mat-btn" id="btnLeft">←</button>
+        <button class="mat-btn" id="btnRight">→</button>
+        <button class="mat-btn red" id="btnResetOffset">Reset</button>
+        <button class="mat-btn" id="btnCopyOffset">Copiar</button>
+      </div>
+      <div class="mat-sub">O grid base é marcado na primeira ortofoto. Em cada ortofoto, ative Ajustar Extremidades e arraste os 4 pontos para alinhar o grid.</div>
+    </div>
+
+    <div class="mat-section">
+      <div class="btn-grid">
+        <button class="mat-btn primary" id="btnAnalyze">Analisar HSV</button>
+        <button class="mat-btn green" id="btnPlay">▶ Animar</button>
+        <button class="mat-btn" id="btnPrev">◀ Data</button>
+        <button class="mat-btn" id="btnNext">Data ▶</button>
+      </div>
+      <div class="progress"><i id="progressBar"></i></div>
+      <div class="mat-sub" id="statusText">Marque o grid na primeira data e execute a análise.</div>
+      <div class="row"><label>Limite R8</label>
+        <select id="r8ThresholdSelect">
+          <option value="75" selected>75% amarelo/seco</option>
+          <option value="70">70% amarelo/seco</option>
+          <option value="65">65% amarelo/seco</option>
+          <option value="60">60% amarelo/seco</option>
+          <option value="55">55% amarelo/seco</option>
+          <option value="50">50% amarelo/seco</option>
+        </select>
+      </div>
+      <div class="row"><label>Filtro mapa</label>
+        <select id="stageFilter">
+          <option value="all" selected>Todas as parcelas</option>
+          <option value="only_r8">Somente chegaram R8</option>
+          <option value="only_not_r8">Somente não chegaram R8</option>
+          <option value="R6">R6</option>
+          <option value="R7I">R7 inicial</option>
+          <option value="R7M">R7 médio</option>
+          <option value="R7A">R7 avançado</option>
+          <option value="R8">R8</option>
+        </select>
+      </div>
+      <div class="row"><label>Grid HSV</label>
+        <select id="gridFillMode">
+          <option value="transparent" selected>Transparente</option>
+          <option value="color">Colorido</option>
+          <option value="outline">Só borda</option>
+        </select>
+      </div>
+      <div class="row"><label>Opacidade</label><input id="gridOpacity" type="range" min="0" max="70" value="24"></div>
+      <div class="metrics">
+        <div class="metric"><span>Ortofotos</span><b id="metricDates">0</b></div>
+        <div class="metric"><span>Válidas</span><b id="metricParcels">0</b></div>
+        <div class="metric"><span>Maduras</span><b id="metricR7">0</b></div>
+        <div class="metric"><span>Sem Resultado</span><b id="metricR8">0</b></div>
+      </div>
+      <div class="legend">
+        <span class="leg"><i class="sw" style="background:#25c96f"></i>R6</span>
+        <span class="leg"><i class="sw" style="background:#b0da3a"></i>R7 inicial</span>
+        <span class="leg"><i class="sw" style="background:#ffd84d"></i>R7 médio</span>
+        <span class="leg"><i class="sw" style="background:#ff9f1c"></i>R7 avançado</span>
+        <span class="leg"><i class="sw" style="background:#b75e2e"></i>R8</span>
+      </div>
+    </div>
+
+    <div class="mat-section">
+      <div class="mat-title">Controle de Dessecação</div>
+      <div class="row"><label>Quadra</label><input id="dessecQuadraInfo" value="Maturacao_Soja" readonly></div>
+      <div class="row"><label>Data dessecação</label><input id="quadraDessecDate" type="date"></div>
+      <div class="btn-grid one">
+        <button class="mat-btn green" id="btnSaveDessec">Salvar data da quadra</button>
+      </div>
+      <div class="mat-sub" id="dessecStatus">Informe a data de dessecação do grid/quadra ativo. Cada grid pode ter uma data diferente.</div>
+      <div class="table-box" id="dessecList"></div>
+    </div>
+
+    <div class="mat-section" id="reviewBox">
+      <div class="mat-sub" id="selectedInfo">Clique em uma parcela para visualizar. Duplo clique marca/desmarca como NC.</div>
+      <input id="manualStage" type="hidden" value="">
+      <textarea id="manualObs" placeholder="Observação manual por parcela"></textarea>
+      <div class="btn-grid">
+        <button class="mat-btn green" id="btnSaveReview">Salvar revisão</button>
+        <button class="mat-btn red" id="btnClearReview">Limpar revisão</button>
+      </div>
+      <canvas id="graphCanvas" width="300" height="116"></canvas>
+    </div>
+
+    <div class="mat-section">
+      <div class="btn-grid">
+        <button class="mat-btn orange" id="btnExcel">Exportar Excel</button>
+        <button class="mat-btn" id="btnOpenSummary">Resumo</button>
+      </div>
+    </div>
+  </aside>
+  <div class="mat-modal" id="summaryModal" aria-hidden="true">
+    <div class="mat-modal-card">
+      <div class="mat-modal-head">
+        <div>
+          <div class="mat-title" style="margin:0;">Resumo da Maturação</div>
+          <div class="mat-sub">Resumo da data selecionada e resultado temporal por parcela.</div>
+        </div>
+        <button class="mat-btn red" id="btnCloseSummary">Fechar</button>
+      </div>
+      <div class="mat-modal-grid">
+        <div>
+          <div class="mat-sub">Resumo da data selecionada</div>
+          <div class="table-box modal-table" id="tableBox"></div>
+        </div>
+        <div>
+          <div class="mat-sub">Resultado temporal por parcela</div>
+          <div class="table-box modal-table" id="resultBox"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const SERVER_ORTHOS = __ORTHOS__;
+const INITIAL_PROJECT = __PROJECT__;
+let OPENCV_READY = false;
+function initOpenCvRuntime(){
+  try {
+    if (!window.cv) return;
+    if (cv.Mat) {
+      OPENCV_READY = true;
+      document.getElementById('cvStatus').textContent = 'OpenCV.js ativo: análise HSV em modo OpenCV.';
+    } else {
+      cv['onRuntimeInitialized'] = () => {
+        OPENCV_READY = true;
+        document.getElementById('cvStatus').textContent = 'OpenCV.js ativo: análise HSV em modo OpenCV.';
+      };
+    }
+  } catch(e) {}
+}
+
+const viewer = document.getElementById('matViewer');
+const canvas = document.getElementById('matCanvas');
+const ctx = canvas.getContext('2d', { alpha:false });
+const graphCanvas = document.getElementById('graphCanvas');
+const graphCtx = graphCanvas.getContext('2d');
+const zoomBadge = document.getElementById('zoomBadge');
+const dateBadge = document.getElementById('dateBadge');
+const coordBadge = document.getElementById('coordBadge');
+const statusText = document.getElementById('statusText');
+const progressBar = document.getElementById('progressBar');
+const quadraInput = document.getElementById('quadraInput');
+const gridSelect = document.getElementById('gridSelect');
+const rowsInput = document.getElementById('rowsInput');
+const colsInput = document.getElementById('colsInput');
+const viewMode = document.getElementById('viewMode');
+const dateSelect = document.getElementById('dateSelect');
+const compareSelect = document.getElementById('compareSelect');
+const gridFillMode = document.getElementById('gridFillMode');
+const gridOpacity = document.getElementById('gridOpacity');
+const r8ThresholdSelect = document.getElementById('r8ThresholdSelect');
+const stageFilter = document.getElementById('stageFilter');
+const dateList = document.getElementById('dateList');
+const tableBox = document.getElementById('tableBox');
+const resultBox = document.getElementById('resultBox');
+const summaryModal = document.getElementById('summaryModal');
+const btnOpenSummary = document.getElementById('btnOpenSummary');
+const btnCloseSummary = document.getElementById('btnCloseSummary');
+const selectedInfo = document.getElementById('selectedInfo');
+const manualStage = document.getElementById('manualStage');
+const manualObs = document.getElementById('manualObs');
+const dessecQuadraInfo = document.getElementById('dessecQuadraInfo');
+const quadraDessecDate = document.getElementById('quadraDessecDate');
+const dessecStatus = document.getElementById('dessecStatus');
+const dessecList = document.getElementById('dessecList');
+
+let orthos = (INITIAL_PROJECT && Array.isArray(INITIAL_PROJECT.orthos) && INITIAL_PROJECT.orthos.length) ? INITIAL_PROJECT.orthos : SERVER_ORTHOS;
+orthos = (orthos || []).slice().sort((a,b) => Number(a.order || 0) - Number(b.order || 0) || String(a.date || '').localeCompare(String(b.date || '')) || Number(a.upload_order || 0) - Number(b.upload_order || 0));
+let activeIdx = 0;
+let compareIdx = Math.min(1, Math.max(0, orthos.length - 1));
+let gridRatios = (INITIAL_PROJECT && Array.isArray(INITIAL_PROJECT.gridRatios)) ? INITIAL_PROJECT.gridRatios.slice(0,4) : [];
+let dateOffsets = (INITIAL_PROJECT && INITIAL_PROJECT.dateOffsets) ? INITIAL_PROJECT.dateOffsets : {};
+let dateGridRatios = (INITIAL_PROJECT && INITIAL_PROJECT.dateGridRatios) ? INITIAL_PROJECT.dateGridRatios : {};
+let manualReviews = (INITIAL_PROJECT && INITIAL_PROJECT.manualReviews) ? INITIAL_PROJECT.manualReviews : {};
+let dessecacao = normalizeDessecacaoState(INITIAL_PROJECT && (INITIAL_PROJECT.dessecacao || INITIAL_PROJECT.desiccationState));
+let detailedRows = (INITIAL_PROJECT && Array.isArray(INITIAL_PROJECT.detailedRows)) ? INITIAL_PROJECT.detailedRows : [];
+let summaryRows = (INITIAL_PROJECT && Array.isArray(INITIAL_PROJECT.summaryRows)) ? INITIAL_PROJECT.summaryRows : [];
+let gridProfiles = Array.isArray(INITIAL_PROJECT && INITIAL_PROJECT.gridProfiles) ? INITIAL_PROJECT.gridProfiles : [];
+let activeGridId = (INITIAL_PROJECT && INITIAL_PROJECT.activeGridId) ? String(INITIAL_PROJECT.activeGridId) : '';
+let selectedParcel = null;
+let markGridMode = false;
+let adjustMode = false;
+let cornerAdjustMode = false;
+let dragging = false;
+let draggingGrid = false;
+let draggingPoint = -1;
+let lastMouse = {x:0,y:0};
+let scale = 1, ox = 0, oy = 0, dpr = window.devicePixelRatio || 1;
+let playing = false, playTimer = null;
+let matDrawFrame = 0;
+let gridAdjustDirty = false;
+const STORAGE_KEY = 'tmg_maturacao_temporal_soja_v1';
+const ANALYSIS_MAX_SIZE = 1400;
+const MIN_USEFUL_PCT_FOR_MATURITY = 12;
+const MAX_SOIL_PCT_FOR_COUNT = 88;
+const YELLOW_STAGE_SWITCH_PCT = 68;
+const ADVANCED_MATURITY_USEFUL_PCT = 82;
+
+function fmt(v, d=2){ return Number(v || 0).toLocaleString('pt-BR', {minimumFractionDigits:d, maximumFractionDigits:d}); }
+function safe(v){ return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function setProgress(p, text){ progressBar.style.width = Math.max(0, Math.min(100, p || 0)) + '%'; if(text) statusText.textContent = text; }
+function rows(){ return Math.max(1, Math.min(300, parseInt(rowsInput.value) || 1)); }
+function cols(){ return Math.max(1, Math.min(300, parseInt(colsInput.value) || 1)); }
+function currentOrtho(){ return orthos[activeIdx] || null; }
+function normalizeDateText(value){
+  const text = String(value || '').trim();
+  if(!text) return '';
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(m) return `${m[1]}-${m[2]}-${m[3]}`;
+  const d = new Date(text);
+  return Number.isFinite(d.getTime()) ? d.toISOString().slice(0,10) : '';
+}
+function dateObj(value){
+  const iso = normalizeDateText(value);
+  if(!iso) return null;
+  const d = new Date(iso + 'T00:00:00');
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+function daysBetween(start, end){
+  const d0 = dateObj(start), d1 = dateObj(end);
+  if(!d0 || !d1) return '';
+  return Math.round((d1 - d0) / 86400000);
+}
+function normalizeDessecacaoState(raw){
+  const out = {quadras:{}, parcelas:{}};
+  if(!raw || typeof raw !== 'object') return out;
+  if(raw.quadras && typeof raw.quadras === 'object') {
+    Object.entries(raw.quadras).forEach(([k,v]) => { const iso = normalizeDateText(v); if(iso) out.quadras[String(k)] = iso; });
+  }
+  if(raw.parcelas && typeof raw.parcelas === 'object') {
+    Object.entries(raw.parcelas).forEach(([k,v]) => { const iso = normalizeDateText(v); if(iso) out.parcelas[String(k)] = iso; });
+  }
+  if(raw.quadraDate) {
+    const iso = normalizeDateText(raw.quadraDate);
+    if(iso) out.quadras.Maturacao_Soja = iso;
+  }
+  return out;
+}
+function activeQuadraName(){ return quadraInput.value.trim() || 'Maturacao_Soja'; }
+function dessecParcelKey(quadra, parcela){ return String(quadra || '') + '|' + String(parcela || ''); }
+function dessecDateFor(quadra, parcela){
+  return dessecacao.quadras[quadra] || '';
+}
+function isOnOrAfter(dateValue, cutoffValue){
+  const a = normalizeDateText(dateValue), b = normalizeDateText(cutoffValue);
+  return !!(a && b && a >= b);
+}
+function offsetFor(idx){ if(!dateOffsets[idx]) dateOffsets[idx] = {x:0,y:0}; return dateOffsets[idx]; }
+function hasDateGridRatios(idx){
+  return idx !== 0 && Array.isArray(dateGridRatios[idx]) && dateGridRatios[idx].length === 4;
+}
+function gridRatiosForDate(idx){
+  if(idx === 0) return gridRatios;
+  if(hasDateGridRatios(idx)) return dateGridRatios[idx];
+  if(gridRatios.length !== 4) return [];
+  const off = offsetFor(idx);
+  return gridRatios.map(p => ({x:p.x + off.x, y:p.y + off.y}));
+}
+function ensureDateGridRatios(idx){
+  if(idx === 0) return gridRatios;
+  if(!hasDateGridRatios(idx)){
+    dateGridRatios[idx] = gridRatiosForDate(idx).map(p => ({x:p.x, y:p.y}));
+    dateOffsets[idx] = {x:0,y:0};
+  }
+  return dateGridRatios[idx];
+}
+function setActiveGridPoint(pointIndex, imagePoint){
+  const o = currentOrtho();
+  if(!o || pointIndex < 0) return;
+  const ratioPoint = {
+    x: Math.max(-0.25, Math.min(1.25, imagePoint.x / Math.max(1, o.width))),
+    y: Math.max(-0.25, Math.min(1.25, imagePoint.y / Math.max(1, o.height)))
+  };
+  if(activeIdx === 0){
+    gridRatios[pointIndex] = ratioPoint;
+  } else {
+    const ratios = ensureDateGridRatios(activeIdx);
+    ratios[pointIndex] = ratioPoint;
+  }
+}
+function cloneState(obj){ return JSON.parse(JSON.stringify(obj || {})); }
+function makeGridProfileId(){ return 'grid_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7); }
+function normalizeGridProfile(profile, fallbackIndex=0){
+  const safeProfile = profile && typeof profile === 'object' ? profile : {};
+  return {
+    id: String(safeProfile.id || makeGridProfileId()),
+    name: String(safeProfile.name || safeProfile.quadra || ('Quadra_' + (fallbackIndex + 1))),
+    rows: Math.max(1, Math.min(300, parseInt(safeProfile.rows || rowsInput.value || 5) || 5)),
+    cols: Math.max(1, Math.min(300, parseInt(safeProfile.cols || colsInput.value || 5) || 5)),
+    gridRatios: Array.isArray(safeProfile.gridRatios) ? safeProfile.gridRatios.slice(0,4) : [],
+    dateOffsets: cloneState(safeProfile.dateOffsets || {}),
+    dateGridRatios: cloneState(safeProfile.dateGridRatios || {})
+  };
+}
+function currentGridProfile(){
+  return gridProfiles.find(p => String(p.id) === String(activeGridId)) || null;
+}
+function currentGridProfilePayload(id=activeGridId, name=activeQuadraName()){
+  return normalizeGridProfile({
+    id: id || makeGridProfileId(),
+    name,
+    rows: rows(),
+    cols: cols(),
+    gridRatios: gridRatios.slice(0,4),
+    dateOffsets: cloneState(dateOffsets),
+    dateGridRatios: cloneState(dateGridRatios)
+  });
+}
+function syncActiveGridProfile(){
+  if(!Array.isArray(gridProfiles)) gridProfiles = [];
+  if(!activeGridId){
+    activeGridId = makeGridProfileId();
+    gridProfiles.push(currentGridProfilePayload(activeGridId));
+    return;
+  }
+  const idx = gridProfiles.findIndex(p => String(p.id) === String(activeGridId));
+  const oldName = idx >= 0 ? gridProfiles[idx].name : activeQuadraName();
+  const nextProfile = currentGridProfilePayload(activeGridId);
+  if(oldName && oldName !== nextProfile.name && dessecacao.quadras[oldName] && !dessecacao.quadras[nextProfile.name]){
+    dessecacao.quadras[nextProfile.name] = dessecacao.quadras[oldName];
+    delete dessecacao.quadras[oldName];
+  }
+  if(idx >= 0) gridProfiles[idx] = nextProfile;
+  else gridProfiles.push(nextProfile);
+}
+function renderGridSelect(){
+  if(!gridSelect) return;
+  gridSelect.innerHTML = '';
+  gridProfiles.forEach((profile, idx) => {
+    const label = (idx + 1) + ' · ' + profile.name;
+    gridSelect.add(new Option(label, profile.id));
+  });
+  gridSelect.value = activeGridId;
+}
+function applyGridProfile(id, syncCurrent=true, render=true){
+  if(syncCurrent) syncActiveGridProfile();
+  const profile = gridProfiles.find(p => String(p.id) === String(id));
+  if(!profile) return;
+  activeGridId = profile.id;
+  quadraInput.value = profile.name || 'Maturacao_Soja';
+  rowsInput.value = profile.rows || rowsInput.value;
+  colsInput.value = profile.cols || colsInput.value;
+  gridRatios = Array.isArray(profile.gridRatios) ? profile.gridRatios.slice(0,4) : [];
+  dateOffsets = cloneState(profile.dateOffsets || {});
+  dateGridRatios = cloneState(profile.dateGridRatios || {});
+  selectedParcel = null;
+  if(render){
+    renderGridSelect();
+    renderDessecList();
+    renderTables();
+    updateMetrics();
+    renderDateList();
+    drawGraph();
+    draw();
+    persistState();
+  }
+}
+function initGridProfiles(){
+  gridProfiles = Array.isArray(gridProfiles) ? gridProfiles.map(normalizeGridProfile) : [];
+  if(!gridProfiles.length){
+    const defaultName = activeQuadraName();
+    gridProfiles = [currentGridProfilePayload(activeGridId || makeGridProfileId(), defaultName)];
+  }
+  if(!activeGridId || !gridProfiles.some(p => String(p.id) === String(activeGridId))) activeGridId = gridProfiles[0].id;
+  applyGridProfile(activeGridId, false, false);
+  renderGridSelect();
+}
+function addGridProfile(){
+  syncActiveGridProfile();
+  const nextNumber = gridProfiles.length + 1;
+  const profile = normalizeGridProfile({
+    id: makeGridProfileId(),
+    name: 'Quadra_' + String(nextNumber).padStart(2,'0'),
+    rows: rows(),
+    cols: cols(),
+    gridRatios: [],
+    dateOffsets: {},
+    dateGridRatios: {}
+  }, nextNumber - 1);
+  gridProfiles.push(profile);
+  applyGridProfile(profile.id, false, true);
+  markGridMode = false;
+  document.getElementById('btnMarkGrid').classList.remove('active');
+  setProgress(100, 'Novo grid criado. Marque os 4 cantos da ' + profile.name + '.');
+}
+function saveGridProfile(){
+  syncActiveGridProfile();
+  renderGridSelect();
+  renderDessecList();
+  persistState();
+  setProgress(100, 'Grid ' + activeQuadraName() + ' salvo com data de dessecação própria.');
+}
+function removeRowsForQuadra(quadra){
+  detailedRows = detailedRows.filter(row => row.Quadra !== quadra);
+  summaryRows = summaryRows.filter(row => row.Quadra !== quadra);
+}
+function reviewKey(idx, parcel){ return activeQuadraName() + '|' + (orthos[idx]?.date || idx) + '|' + parcel; }
+function parcelLabel(r,c){ return 'T' + (cols() - c) + ' D' + (rows() - r); }
+function tiroLabel(c){ return cols() - c; }
+function disparoLabel(r){ return rows() - r; }
+function delay(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+
+function rgbToHsv(r,g,b){
+  r/=255; g/=255; b/=255;
+  const max=Math.max(r,g,b), min=Math.min(r,g,b), d=max-min;
+  let h=0;
+  if(d){
+    if(max===r) h=((g-b)/d)%6;
+    else if(max===g) h=(b-r)/d+2;
+    else h=(r-g)/d+4;
+    h*=60; if(h<0) h+=360;
+  }
+  return [h/2, max===0 ? 0 : (d/max)*255, max*255];
+}
+function classifyPixel(h,s,v,r=0,g=0,b=0){
+  const exg = (2 * g) - r - b;
+  const activeGreen = (
+    h >= 36 && h <= 92 &&
+    s >= 34 && v >= 32 &&
+    g >= r * .78 && g >= b * .88 &&
+    exg > 6
+  );
+  const yellowGreen = (
+    !activeGreen &&
+    h >= 25 && h <= 46 &&
+    s >= 26 && v >= 42 &&
+    g >= b * .86 &&
+    r >= b * .78
+  );
+  const yellowBrown = !activeGreen && (
+    yellowGreen ||
+    (h >= 12 && h <= 36 && s >= 24 && v >= 42 && r >= b * .82) ||
+    (h >= 3 && h <= 26 && s >= 18 && v >= 24 && v <= 218 && r >= g * .70)
+  );
+  if(activeGreen) return 0;
+  if(yellowBrown) return 1;
+  return 2;
+}
+function stageFromGreen(greenPct){
+  const maturePct = Math.max(0, Math.min(100, 100 - Number(greenPct || 0)));
+  return stageFromMaturePct(maturePct);
+}
+function r8Threshold(){
+  const value = Number(r8ThresholdSelect ? r8ThresholdSelect.value : 75);
+  return [75,70,65,60,55,50].includes(value) ? value : 75;
+}
+function stageFromMaturePct(maturePct){
+  const pct = Math.max(0, Math.min(100, Number(maturePct || 0)));
+  if(pct >= r8Threshold()) return 'R8';
+  if(pct >= 61) return 'R7 avançado';
+  if(pct >= 41) return 'R7 médio';
+  if(pct >= 21) return 'R7 inicial';
+  return 'R6';
+}
+function stageFromMaturity(greenPct, yellowPct, soilPct, total){
+  const usefulPct = Number(greenPct || 0) + Number(yellowPct || 0);
+  if(!total) return 'Sem dados';
+  if(usefulPct < MIN_USEFUL_PCT_FOR_MATURITY || Number(soilPct || 0) >= MAX_SOIL_PCT_FOR_COUNT) return 'Sem leitura confiável';
+  const yellowTotalPct = Number(yellowPct || 0);
+  const matureUsefulPct = yellowTotalPct * 100 / Math.max(.001, usefulPct);
+  return stageFromMaturePct(Math.max(yellowTotalPct, matureUsefulPct));
+}
+function isCountableStage(stage){
+  const s = String(stage || '').toLowerCase();
+  if(!s || s.includes('sem dados') || s.includes('sem leitura') || s.includes('indefinido') || s.includes('vazia') || s.includes('colhida') || s.includes('dessecado')) return false;
+  return ['R6','R7I','R7M','R7A','R8'].includes(stageCode(stage));
+}
+function isCountableRow(row){
+  if(!row) return false;
+  if(String(row['Contabilizar'] || '').toLowerCase() === 'não') return false;
+  return isCountableStage(row['Estágio']);
+}
+function stageCode(stage){
+  const s = String(stage || '');
+  const low = s.toLowerCase();
+  if(low.includes('dessecado') || low.includes('vazia') || low.includes('colhida')) return 'NC';
+  if(low.includes('sem leitura') || low.includes('sem dados') || low.includes('indefinido')) return 'Indefinido';
+  if(s.includes('R8')) return 'R8';
+  if(s.includes('R7.5') || low.includes('r7 avançado') || low.includes('r7 avancado') || low.includes('avançada') || low.includes('avancada')) return 'R7A';
+  if(low.includes('r7 médio') || low.includes('r7 medio')) return 'R7M';
+  if(low.includes('r7 inicial')) return 'R7I';
+  if(s.includes('R7')) return 'R7M';
+  if(s.includes('R6') || low.includes('imatura')) return 'R6';
+  if(low.includes('maduro') || low.includes('madura')) return 'R8';
+  if(low.includes('maturação intermediária')) return 'R7M';
+  if(low.includes('início de maturação') || low.includes('inicio de maturacao')) return 'R7I';
+  if(low.includes('verde') || low.includes('vegetativo')) return 'R6';
+  return 'Indefinido';
+}
+function isMatureStage(stage){ return stageCode(stage) === 'R8'; }
+function stageColor(stage, alpha=.48){
+  const code = stageCode(stage);
+  if(code === 'R8') return `rgba(183,94,46,${alpha})`;
+  if(code === 'R7A') return `rgba(255,159,28,${alpha})`;
+  if(code === 'R7M') return `rgba(255,216,77,${alpha})`;
+  if(code === 'R7I') return `rgba(176,218,58,${alpha})`;
+  if(code === 'R6') return `rgba(37,201,111,${alpha})`;
+  if(code === 'NC') return `rgba(255,42,72,${Math.min(.62, Math.max(alpha, .38))})`;
+  return `rgba(150,150,150,${alpha})`;
+}
+function gridFillAlpha(opts={}){
+  const mode = gridFillMode ? String(gridFillMode.value || 'transparent') : 'transparent';
+  if(mode === 'outline') return 0;
+  let alpha = gridOpacity ? Number(gridOpacity.value || 24) / 100 : .24;
+  if(!Number.isFinite(alpha)) alpha = .24;
+  alpha = Math.max(0, Math.min(.70, alpha));
+  if(mode === 'transparent') alpha = Math.min(alpha, .35);
+  if(opts.compare) alpha = Math.min(alpha, .30);
+  return alpha;
+}
+
+function loadImages(){
+  let loaded = 0;
+  orthos.forEach((o, idx) => {
+    o.img = new Image();
+    o.loaded = false;
+    o.img.onload = () => {
+      o.loaded = true;
+      o.width = o.img.naturalWidth || o.width;
+      o.height = o.img.naturalHeight || o.height;
+      loaded++;
+      setProgress(Math.round(loaded * 100 / Math.max(1, orthos.length)), 'Carregando ortofotos: ' + loaded + '/' + orthos.length);
+      if(loaded === orthos.length){ fitView(); setProgress(100, 'Ortofotos carregadas. Marque o grid na primeira data.'); }
+      renderDateList();
+      draw();
+    };
+    o.img.onerror = () => { o.loaded = false; loaded++; renderDateList(); draw(); };
+    o.img.src = String(o.b64 || '').startsWith('data:') ? o.b64 : 'data:image/jpeg;base64,' + o.b64;
+  });
+}
+
+function populateControls(){
+  dateSelect.innerHTML = '';
+  compareSelect.innerHTML = '';
+  orthos.forEach((o, idx) => {
+    const label = (idx + 1) + ' · ' + (o.date || '-') + ' · ' + (o.name || 'Ortofoto');
+    dateSelect.add(new Option(label, idx));
+    compareSelect.add(new Option(label, idx));
+  });
+  dateSelect.value = String(activeIdx);
+  compareSelect.value = String(compareIdx);
+  document.getElementById('metricDates').textContent = orthos.length;
+  document.getElementById('metricParcels').textContent = rows() * cols();
+}
+
+function renderDateList(){
+  dateList.innerHTML = orthos.map((o, idx) => {
+    const rowsThis = detailedRows.filter(r => r.__idx === idx);
+    const r8 = rowsThis.filter(r => isCountableRow(r) && isMatureStage(r['Estágio'])).length;
+    const active = idx === activeIdx ? ' active' : '';
+    return `<div class="date-item${active}" data-idx="${idx}">
+      <b>${safe(idx + 1)} · ${safe(o.name || 'Ortofoto')}</b>
+      <span>${safe(o.date || '-')} · ${o.loaded ? 'carregada' : 'aguardando'} · Maduro: ${r8}</span>
+    </div>`;
+  }).join('');
+  dateList.querySelectorAll('.date-item').forEach(el => {
+    el.onclick = () => { activeIdx = Number(el.dataset.idx || 0); dateSelect.value = String(activeIdx); renderDateList(); draw(); updateSelectedPanel(); };
+  });
+  dateBadge.textContent = orthos[activeIdx] ? ((orthos[activeIdx].date || '-') + ' · ' + (orthos[activeIdx].name || 'Ortofoto')) : 'Sem data';
+}
+
+function renderDessecList(){
+  const quadra = activeQuadraName();
+  if(dessecQuadraInfo) dessecQuadraInfo.value = quadra;
+  if(quadraDessecDate) quadraDessecDate.value = dessecacao.quadras[quadra] || '';
+  const entries = [];
+  gridProfiles.forEach(profile => {
+    const data = dessecacao.quadras[profile.name] || '';
+    if(data) entries.push({tipo:'Grid', alvo:profile.name, data});
+  });
+  if(!dessecList) return;
+  if(!entries.length){
+    dessecList.innerHTML = '<div class="mat-sub" style="padding:8px;">Nenhuma data de dessecação por grid cadastrada.</div>';
+    return;
+  }
+  dessecList.innerHTML = '<table><thead><tr><th>Grid</th><th>Data dessecação</th></tr></thead><tbody>' +
+    entries.map(e => `<tr><td>${safe(e.alvo)}</td><td>${safe(e.data)}</td></tr>`).join('') +
+    '</tbody></table>';
+}
+function saveQuadraDessecDate(){
+  const quadra = activeQuadraName();
+  const iso = normalizeDateText(quadraDessecDate ? quadraDessecDate.value : '');
+  if(iso) dessecacao.quadras[quadra] = iso;
+  else delete dessecacao.quadras[quadra];
+  renderDessecList();
+  syncActiveGridProfile();
+  persistState();
+  setProgress(100, iso ? 'Data de dessecação geral salva para ' + quadra + '.' : 'Data de dessecação geral removida.');
+}
+
+function resizeCanvas(){
+  const r = viewer.getBoundingClientRect();
+  const nextW = Math.max(1, Math.floor(r.width * dpr));
+  const nextH = Math.max(1, Math.floor(r.height * dpr));
+  if(canvas.width !== nextW || canvas.height !== nextH){
+    canvas.width = nextW;
+    canvas.height = nextH;
+    canvas.style.width = r.width + 'px';
+    canvas.style.height = r.height + 'px';
+  }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+function scheduleDraw(){
+  if(matDrawFrame) return;
+  matDrawFrame = window.requestAnimationFrame(() => {
+    matDrawFrame = 0;
+    draw();
+  });
+}
+function fitView(){
+  resizeCanvas();
+  const o = currentOrtho();
+  if(!o || !o.width || !o.height) return;
+  const w = viewer.clientWidth, h = viewer.clientHeight;
+  scale = Math.min((w - 44) / o.width, (h - 44) / o.height);
+  if(!Number.isFinite(scale) || scale <= 0) scale = 1;
+  ox = (w - o.width * scale) / 2;
+  oy = (h - o.height * scale) / 2;
+  draw();
+}
+function screenToImage(x,y){ return {x:(x - ox) / scale, y:(y - oy) / scale}; }
+function imageToScreen(p){ return {x:ox + p.x * scale, y:oy + p.y * scale}; }
+function bilerp(p0,p1,p2,p3,u,v){
+  const tx=(1-u)*p0.x+u*p1.x, ty=(1-u)*p0.y+u*p1.y;
+  const bx=(1-u)*p3.x+u*p2.x, by=(1-u)*p3.y+u*p2.y;
+  return {x:(1-v)*tx+v*bx, y:(1-v)*ty+v*by};
+}
+function gridPointsFor(idx){
+  const pts = gridCornerPointsFor(idx);
+  return pts.length === 4 ? pts : [];
+}
+function gridCornerPointsFor(idx){
+  const o = orthos[idx];
+  if(!o) return [];
+  const ratios = gridRatiosForDate(idx);
+  return (ratios || []).slice(0,4).map(p => ({x:p.x * o.width, y:p.y * o.height}));
+}
+function cellPoly(idx,r,c){
+  const gp = gridPointsFor(idx);
+  if(gp.length !== 4) return null;
+  const R=rows(), C=cols(), u0=c/C, u1=(c+1)/C, v0=r/R, v1=(r+1)/R;
+  return [
+    bilerp(gp[0],gp[1],gp[2],gp[3],u0,v0),
+    bilerp(gp[0],gp[1],gp[2],gp[3],u1,v0),
+    bilerp(gp[0],gp[1],gp[2],gp[3],u1,v1),
+    bilerp(gp[0],gp[1],gp[2],gp[3],u0,v1)
+  ];
+}
+function pointInPolygon(x,y,poly){
+  let inside=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const xi=poly[i].x, yi=poly[i].y, xj=poly[j].x, yj=poly[j].y;
+    const intersect=((yi>y)!==(yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi+1e-12)+xi);
+    if(intersect) inside=!inside;
+  }
+  return inside;
+}
+function parcelAt(idx, pt){
+  if(gridRatios.length !== 4) return null;
+  for(let r=0;r<rows();r++){
+    for(let c=0;c<cols();c++){
+      const poly = cellPoly(idx,r,c);
+      if(poly && pointInPolygon(pt.x, pt.y, poly)) return {r,c, parcel:parcelLabel(r,c), tiro:tiroLabel(c), disparo:disparoLabel(r)};
+    }
+  }
+  return null;
+}
+function resultFor(idx, parcel, quadra=activeQuadraName()){
+  return detailedRows.find(r => r.__idx === idx && r['Parcela'] === parcel && r['Quadra'] === quadra) || null;
+}
+function summaryFor(parcel, quadra=activeQuadraName()){
+  return summaryRows.find(r => r.Parcela === parcel && r.Quadra === quadra) || null;
+}
+function parcelReachedR8(summary){
+  return !!(summary && (summary['Data_R8'] || summary['Data_Maturacao'] || summary['Primeira Data R8']));
+}
+function shouldDisplayParcelOnMap(stage, summary){
+  const filter = stageFilter ? String(stageFilter.value || 'all') : 'all';
+  if(filter === 'all') return true;
+  if(filter === 'only_r8') return parcelReachedR8(summary);
+  if(filter === 'only_not_r8') return summary ? !parcelReachedR8(summary) : false;
+  return stageCode(stage) === filter;
+}
+
+function drawGridOverlay(idx, transform, opts={}){
+  const cornerPoints = gridCornerPointsFor(idx);
+  if(!cornerPoints.length) return;
+  const hasFullGrid = cornerPoints.length === 4;
+  const R=rows(), C=cols();
+  const toScreen = transform || imageToScreen;
+  ctx.save();
+  ctx.lineJoin='round';
+  if(hasFullGrid){
+    const lightweightGridDraw = !opts.compare && (draggingPoint >= 0 || draggingGrid) && (R * C > 64);
+    if(lightweightGridDraw){
+      const pts = cornerPoints.map(toScreen);
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(0,229,255,.10)';
+      ctx.strokeStyle = 'rgba(0,229,255,.96)';
+      ctx.lineWidth = 2.5;
+      ctx.shadowColor = 'rgba(0,229,255,.52)';
+      ctx.shadowBlur = 10;
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      for(let r=0;r<R;r++){
+        for(let c=0;c<C;c++){
+          const poly = cellPoly(idx,r,c);
+          if(!poly) continue;
+          const label = parcelLabel(r,c);
+          const res = resultFor(idx,label);
+          const review = manualReviews[reviewKey(idx,label)] || {};
+          const stageForDraw = res ? res['Estágio'] : review.stage;
+          const summary = summaryFor(label);
+          const displayParcel = shouldDisplayParcelOnMap(stageForDraw, summary);
+          const pts = poly.map(toScreen);
+          const fillAlpha = gridFillAlpha(opts);
+          if(stageForDraw && fillAlpha > 0 && displayParcel){
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
+            ctx.closePath();
+            ctx.fillStyle = stageFilter && stageFilter.value === 'only_not_r8' ? `rgba(150,160,170,${Math.max(.22, fillAlpha)})` : stageColor(stageForDraw, fillAlpha);
+            ctx.fill();
+          }
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x, pts[0].y);
+          for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
+          ctx.closePath();
+          const selected = selectedParcel && selectedParcel.parcel === label && idx === activeIdx;
+          const codeForDraw = stageCode(stageForDraw);
+          ctx.strokeStyle = selected ? '#ffffff' : (!displayParcel ? 'rgba(130,160,170,.34)' : (codeForDraw === 'NC' ? 'rgba(255,42,72,.96)' : 'rgba(0,229,255,.92)'));
+          ctx.lineWidth = selected ? 3 : (!displayParcel ? .8 : 1.5);
+          ctx.shadowColor = selected ? 'rgba(255,255,255,.7)' : (codeForDraw === 'NC' ? 'rgba(255,42,72,.58)' : 'rgba(0,229,255,.45)');
+          ctx.shadowBlur = selected ? 12 : 5;
+          ctx.stroke();
+          const cx = pts.reduce((a,p)=>a+p.x,0)/4, cy = pts.reduce((a,p)=>a+p.y,0)/4;
+          if(displayParcel && (opts.compare || scale > .05) && (C * R <= 500)){
+            ctx.shadowBlur=3; ctx.fillStyle='#fff'; ctx.font='bold 10px Segoe UI,Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
+            ctx.fillText(label, cx, cy);
+            if(stageForDraw){ ctx.font='bold 9px Segoe UI,Arial'; ctx.fillText(stageCode(stageForDraw), cx, cy + 12); }
+          }
+        }
+      }
+    }
+  }
+  if(!opts.compare){
+    if(cornerPoints.length > 1 && cornerPoints.length < 4){
+      const guide = cornerPoints.map(toScreen);
+      ctx.beginPath();
+      ctx.moveTo(guide[0].x, guide[0].y);
+      for(let i=1;i<guide.length;i++) ctx.lineTo(guide[i].x, guide[i].y);
+      ctx.strokeStyle = 'rgba(255,210,31,.82)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([8, 7]);
+      ctx.shadowColor = 'rgba(255,210,31,.45)';
+      ctx.shadowBlur = 8;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    cornerPoints.forEach((p,i) => {
+      const s = toScreen(p);
+      ctx.beginPath(); ctx.arc(s.x,s.y,8,0,Math.PI*2);
+      ctx.fillStyle = draggingPoint === i ? '#fff' : '__THEME_PRIMARY__';
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#020e24'; ctx.font='bold 10px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(i+1,s.x,s.y);
+    });
+    if(markGridMode && idx === 0 && cornerPoints.length < 4){
+      const next = cornerPoints.length + 1;
+      ctx.fillStyle='rgba(2,14,36,.86)';
+      ctx.strokeStyle='rgba(255,210,31,.58)';
+      ctx.lineWidth=1;
+      ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(14, 52, 242, 32, 8) : ctx.rect(14, 52, 242, 32);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle='#ffd21f';
+      ctx.font='bold 12px Segoe UI,Arial';
+      ctx.textAlign='left'; ctx.textBaseline='middle';
+      ctx.fillText('Ponto ' + next + ' de 4: clique no próximo canto', 26, 68);
+    }
+  }
+  ctx.restore();
+}
+function drawCompare(){
+  resizeCanvas();
+  const w = viewer.clientWidth, h = viewer.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const pair = [activeIdx, compareIdx];
+  pair.forEach((idx, panel) => {
+    const o = orthos[idx];
+    const x0 = panel === 0 ? 0 : w/2;
+    const pw = w/2;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x0,0,pw,h); ctx.clip();
+    ctx.fillStyle='#061525'; ctx.fillRect(x0,0,pw,h);
+    if(o && o.img && o.loaded){
+      const sc = Math.min((pw-30)/o.width, (h-44)/o.height);
+      const px = x0 + (pw - o.width*sc)/2;
+      const py = (h - o.height*sc)/2;
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality='high';
+      ctx.drawImage(o.img, px, py, o.width*sc, o.height*sc);
+      const transform = p => ({x:px + p.x*sc, y:py + p.y*sc});
+      drawGridOverlay(idx, transform, {compare:true});
+      ctx.fillStyle='rgba(2,14,36,.86)'; ctx.fillRect(x0+12,12,Math.min(330,pw-24),30);
+      ctx.strokeStyle='rgba(__THEME_RGB__,.45)'; ctx.strokeRect(x0+12,12,Math.min(330,pw-24),30);
+      ctx.fillStyle='#fff'; ctx.font='bold 12px Segoe UI'; ctx.textAlign='left'; ctx.textBaseline='middle';
+      ctx.fillText((o.date || '-') + ' · ' + (o.name || 'Ortofoto'), x0+22, 27);
+    }
+    ctx.restore();
+  });
+  ctx.strokeStyle='rgba(__THEME_RGB__,.55)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(w/2,0); ctx.lineTo(w/2,h); ctx.stroke();
+}
+function draw(){
+  if(viewMode.value === 'compare') { drawCompare(); return; }
+  resizeCanvas();
+  const w = viewer.clientWidth, h = viewer.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const o = currentOrtho();
+  ctx.fillStyle='#061525'; ctx.fillRect(0,0,w,h);
+  if(o && o.img && o.loaded){
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality='high';
+    ctx.drawImage(o.img, ox, oy, o.width*scale, o.height*scale);
+    drawGridOverlay(activeIdx);
+  } else {
+    ctx.fillStyle='#9edfec'; ctx.font='bold 16px Segoe UI'; ctx.textAlign='center'; ctx.fillText('Carregando ortofoto...', w/2, h/2);
+  }
+  zoomBadge.textContent = scale.toFixed(2) + '×';
+  dateBadge.textContent = o ? ((o.date || '-') + ' · ' + (o.name || 'Ortofoto')) : 'Sem data';
+}
+
+function buildAnalysisSource(idx){
+  const o = orthos[idx];
+  if(!o || !o.img || !o.loaded) throw new Error('Ortofoto não carregada: ' + (o && o.name ? o.name : idx));
+  const sc = Math.min(1, ANALYSIS_MAX_SIZE / Math.max(o.width, o.height));
+  const aw = Math.max(1, Math.round(o.width * sc));
+  const ah = Math.max(1, Math.round(o.height * sc));
+  const c = document.createElement('canvas');
+  c.width = aw; c.height = ah;
+  const cx = c.getContext('2d', {willReadFrequently:true});
+  cx.drawImage(o.img, 0, 0, aw, ah);
+  const rgba = cx.getImageData(0,0,aw,ah).data;
+  const rgbData = new Uint8Array(aw * ah * 3);
+  for(let i=0,j=0;i<rgba.length;i+=4,j+=3){
+    rgbData[j]=rgba[i]; rgbData[j+1]=rgba[i+1]; rgbData[j+2]=rgba[i+2];
+  }
+  if(OPENCV_READY && window.cv && cv.Mat){
+    try {
+      const src = cv.imread(c);
+      const rgb = new cv.Mat();
+      const hsv = new cv.Mat();
+      cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+      cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+      const hsvData = new Uint8Array(hsv.data);
+      src.delete(); rgb.delete(); hsv.delete();
+      return {w:aw,h:ah,scale:sc,hsvData,rgbData,mode:'OpenCV.js HSV calibrado'};
+    } catch(e) {
+      console.warn('OpenCV.js falhou, usando fallback HSV manual', e);
+    }
+  }
+  const hsvData = new Uint8Array(aw * ah * 3);
+  for(let i=0,j=0;i<rgba.length;i+=4,j+=3){
+    const hsv = rgbToHsv(rgba[i], rgba[i+1], rgba[i+2]);
+    hsvData[j]=Math.round(hsv[0]); hsvData[j+1]=Math.round(hsv[1]); hsvData[j+2]=Math.round(hsv[2]);
+  }
+  return {w:aw,h:ah,scale:sc,hsvData,rgbData,mode:'HSV manual calibrado'};
+}
+function analyzeParcelFromSource(src, poly){
+  const sp = poly.map(p => ({x:p.x * src.scale, y:p.y * src.scale}));
+  const minX = Math.max(0, Math.floor(Math.min(...sp.map(p=>p.x))));
+  const maxX = Math.min(src.w - 1, Math.ceil(Math.max(...sp.map(p=>p.x))));
+  const minY = Math.max(0, Math.floor(Math.min(...sp.map(p=>p.y))));
+  const maxY = Math.min(src.h - 1, Math.ceil(Math.max(...sp.map(p=>p.y))));
+  let green=0, yellow=0, soil=0, total=0;
+  for(let y=minY;y<=maxY;y++){
+    for(let x=minX;x<=maxX;x++){
+      if(!pointInPolygon(x + .5, y + .5, sp)) continue;
+      const k = (y * src.w + x) * 3;
+      const bucket = classifyPixel(src.hsvData[k], src.hsvData[k+1], src.hsvData[k+2], src.rgbData[k], src.rgbData[k+1], src.rgbData[k+2]);
+      if(bucket === 0) green++;
+      else if(bucket === 1) yellow++;
+      else soil++;
+      total++;
+    }
+  }
+  if(!total) return {greenPct:0,yellowPct:0,soilPct:0,greenUsefulPct:0,maturityPct:0,usefulPct:0,stage:'Sem dados', total:0};
+  const greenPct = green * 100 / total;
+  const yellowPct = yellow * 100 / total;
+  const soilPct = soil * 100 / total;
+  const useful = green + yellow;
+  const usefulPct = useful * 100 / total;
+  const greenUsefulPct = useful ? green * 100 / useful : 0;
+  const maturityPct = useful ? yellow * 100 / useful : 0;
+  const stage = stageFromMaturity(greenPct,yellowPct,soilPct,total);
+  const countable = isCountableStage(stage);
+  const reason = !countable && stage === 'Sem leitura confiável' ? 'Parcela vazia/colhida ou sem leitura confiável: baixa vegetação útil ou solo/palhada dominante.' : '';
+  return {greenPct,yellowPct,soilPct,greenUsefulPct,maturityPct,usefulPct,stage,countable,reason,total};
+}
+
+async function analyzeAll(){
+  if(orthos.length < 1){ alert('Importe ortofotos para analisar.'); return; }
+  const missingDate = orthos.find(o => !normalizeDateText(o.date));
+  if(missingDate){ alert('Informe a data da ortofoto antes de iniciar a análise temporal de maturação.'); return; }
+  syncActiveGridProfile();
+  const originalGridId = activeGridId;
+  const profilesToAnalyze = gridProfiles.filter(profile => Array.isArray(profile.gridRatios) && profile.gridRatios.length === 4);
+  if(!profilesToAnalyze.length){ alert('Marque os 4 pontos de pelo menos um grid na primeira ortofoto.'); return; }
+  const ignoredProfiles = gridProfiles.length - profilesToAnalyze.length;
+  const invalidDessec = [
+    ...Object.values(dessecacao.quadras || {})
+  ].find(v => v && !normalizeDateText(v));
+  if(invalidDessec){ alert('Existe data de dessecação inválida. Revise o controle de dessecação antes de analisar.'); return; }
+  const analyzedQuadras = new Set(profilesToAnalyze.map(profile => profile.name));
+  detailedRows = detailedRows.filter(row => !analyzedQuadras.has(row.Quadra));
+  summaryRows = summaryRows.filter(row => !analyzedQuadras.has(row.Quadra));
+  const totalWork = profilesToAnalyze.reduce((acc, profile) => acc + orthos.length * Math.max(1, profile.rows || 1) * Math.max(1, profile.cols || 1), 0);
+  let done = 0;
+  let modeUsed = '';
+  setProgress(1, ignoredProfiles > 0 ? ('Validando linha temporal. ' + ignoredProfiles + ' grid(s) sem 4 pontos serão ignorados.') : 'Validando datas e ordenando linha temporal...');
+  for(const profile of profilesToAnalyze){
+    applyGridProfile(profile.id, false, false);
+    const R=rows(), C=cols();
+    const quadra = activeQuadraName();
+    for(let idx=0; idx<orthos.length; idx++){
+      const o = orthos[idx];
+      const src = buildAnalysisSource(idx);
+      modeUsed = src.mode;
+      for(let r=0;r<R;r++){
+        for(let c=0;c<C;c++){
+          const poly = cellPoly(idx,r,c);
+          const parcel = parcelLabel(r,c);
+          const dataOrto = normalizeDateText(o.date || '');
+          const dataDessec = dessecDateFor(quadra, parcel);
+          if(dataDessec && isOnOrAfter(dataOrto, dataDessec)){
+            detailedRows.push({
+              __idx: idx,
+              Quadra: quadra,
+              Parcela: parcel,
+              Disparo: disparoLabel(r),
+              Tiro: tiroLabel(c),
+              'Data da Ortofoto': dataOrto,
+              '% Verde': '',
+              '% Amarelo/Marrom': '',
+              '% Solo/Palhada': '',
+              '% Verde Útil': '',
+              'Índice Maturação': '',
+              '% Vegetação Útil': '',
+              'Percentual_Maturacao': '',
+              'Usada_na_Analise': 'Não',
+              'Motivo_Descarte': 'Após data de dessecação',
+              'Data_Dessecacao': dataDessec,
+              'Contabilizar': 'Não',
+              'Estágio': 'Dessecado / Não contabilizar',
+              'Estagio_Detectado': 'Dessecado / Não contabilizar',
+              'Observação': 'Ortofoto igual ou posterior à data de dessecação da quadra.'
+            });
+            done++;
+            continue;
+          }
+          const base = analyzeParcelFromSource(src, poly);
+          const key = reviewKey(idx, parcel);
+          const review = manualReviews[key] || {};
+          const finalStage = review.stage || base.stage;
+          const finalStageText = String(finalStage || '').toLowerCase();
+          const manuallyEmpty = !!review.stage && (finalStageText.includes('vazia') || finalStageText.includes('colhida'));
+          const countable = review.stage ? isCountableStage(review.stage) : !!base.countable;
+          const used = countable ? 'Sim' : 'Não';
+          const discard = countable ? '' : (manuallyEmpty ? 'Parcela vazia marcada manualmente' : (base.reason || 'Sem leitura confiável'));
+          const detectedStage = manuallyEmpty ? 'Parcela vazia' : finalStage;
+          const obs = review.obs || (manuallyEmpty ? 'Parcela vazia marcada manualmente.' : (review.stage ? 'Estágio corrigido manualmente.' : (base.reason || 'Classificação automática por HSV.')));
+          detailedRows.push({
+            __idx: idx,
+            Quadra: quadra,
+            Parcela: parcel,
+            Disparo: disparoLabel(r),
+            Tiro: tiroLabel(c),
+            'Data da Ortofoto': dataOrto,
+            '% Verde': Number(base.greenPct.toFixed(2)),
+            '% Amarelo/Marrom': Number(base.yellowPct.toFixed(2)),
+            '% Solo/Palhada': Number(base.soilPct.toFixed(2)),
+            '% Verde Útil': Number(base.greenUsefulPct.toFixed(2)),
+            'Índice Maturação': Number(base.maturityPct.toFixed(2)),
+            '% Vegetação Útil': Number(base.usefulPct.toFixed(2)),
+            'Percentual_Maturacao': manuallyEmpty ? '' : Number(base.maturityPct.toFixed(2)),
+            'Usada_na_Analise': used,
+            'Motivo_Descarte': discard,
+            'Data_Dessecacao': dataDessec || '',
+            'Contabilizar': countable ? 'Sim' : 'Não',
+            'Estágio': finalStage,
+            'Estagio_Detectado': detectedStage,
+            'Observação': obs
+          });
+          done++;
+        }
+      }
+      setProgress(done * 100 / totalWork, 'Analisando ' + quadra + ' · ortofoto ' + (idx + 1) + '/' + orthos.length + ': ' + (o.name || 'Ortofoto') + ' · ' + modeUsed);
+      await delay(25);
+    }
+  }
+  applyGridProfile(originalGridId, false, false);
+  buildSummaryRows();
+  renderGridSelect();
+  renderDessecList();
+  updateMetrics();
+  renderTables();
+  drawGraph();
+  draw();
+  persistState();
+  setProgress(100, 'Área calculada com sucesso. Análise de maturação concluída com ' + modeUsed + '.');
+}
+function buildSummaryRows(){
+  const grouped = {};
+  detailedRows.forEach(row => {
+    const key = row.Quadra + '|' + row.Parcela + '|' + row.Disparo + '|' + row.Tiro;
+    if(!grouped[key]) grouped[key] = [];
+    grouped[key].push(row);
+  });
+  summaryRows = Object.values(grouped).map(rowsArr => {
+    rowsArr.sort((a,b) => String(a['Data da Ortofoto']).localeCompare(String(b['Data da Ortofoto'])));
+    const first = rowsArr[0];
+    const validRows = rowsArr.filter(isCountableRow);
+    const r7 = validRows.find(row => ['R7I','R7M','R7A','R8'].includes(stageCode(row['Estágio'])));
+    const r75 = validRows.find(row => ['R7A','R8'].includes(stageCode(row['Estágio'])));
+    const mature = validRows.find(row => stageCode(row['Estágio']) === 'R8');
+    const firstDate = normalizeDateText(orthos[0]?.date || first['Data da Ortofoto']);
+    const dataR8 = mature ? mature['Data da Ortofoto'] : '';
+    const dataDessec = rowsArr.find(row => row['Data_Dessecacao'])?.['Data_Dessecacao'] || dessecDateFor(first.Quadra, first.Parcela) || '';
+    const periodoDias = dataR8 ? daysBetween(firstDate, dataR8) : '';
+    const periodo = dataR8 && periodoDias !== '' ? `${periodoDias} dias após primeira imagem` : '';
+    const hasDessecDiscard = rowsArr.some(row => row['Motivo_Descarte'] === 'Após data de dessecação');
+    const hasEmptyManual = rowsArr.some(row => {
+      const text = String((row['Estagio_Detectado'] || row['Estágio'] || '') + ' ' + (row['Motivo_Descarte'] || '') + ' ' + (row['Observação'] || '')).toLowerCase();
+      return text.includes('parcela vazia') || text.includes('vazia/colhida') || text.includes('vazia marcada') || text.includes('colhida');
+    });
+    const bestRow = validRows.reduce((best, row) => {
+      const pct = Number(row['Percentual_Maturacao'] ?? row['Índice Maturação'] ?? row['% Amarelo/Marrom'] ?? -1);
+      const bestPct = best ? Number(best['Percentual_Maturacao'] ?? best['Índice Maturação'] ?? best['% Amarelo/Marrom'] ?? -1) : -1;
+      return pct > bestPct ? row : best;
+    }, null);
+    const maxPct = bestRow ? Number(bestRow['Percentual_Maturacao'] ?? bestRow['Índice Maturação'] ?? bestRow['% Amarelo/Marrom'] ?? 0) : '';
+    const maxDate = bestRow ? bestRow['Data da Ortofoto'] : '';
+    const finalStage = mature ? 'R8' : (bestRow ? bestRow['Estágio'] : (hasEmptyManual ? 'Parcela vazia' : 'Sem leitura confiável'));
+    let statusFinal = '';
+    let obsFinal = '';
+    if(mature){
+      statusFinal = 'Maturada';
+      obsFinal = 'Chegou ao R8';
+    } else if(hasEmptyManual){
+      statusFinal = 'Parcela vazia';
+      obsFinal = 'Parcela vazia não contabilizada na análise HSV';
+    } else {
+      statusFinal = 'Não chegou ao R8';
+      obsFinal = bestRow ? ('Parou em ' + finalStage + ' com ' + fmt(maxPct,2) + '% de maturação' + (maxDate ? ' em ' + maxDate : '')) : 'Sem leitura confiável na linha temporal';
+      if(dataDessec || hasDessecDiscard) obsFinal += '. Data de dessecação considerada.';
+    }
+    const manual = rowsArr.some(row => String(row['Observação'] || '').toLowerCase().includes('manual'));
+    const counted = validRows.length > 0;
+    return {
+      Quadra: first.Quadra,
+      Parcela: first.Parcela,
+      Disparo: first.Disparo,
+      Tiro: first.Tiro,
+      'Contabilizada': counted ? 'Sim' : 'Não',
+      'Primeira Data R7': r7 ? r7['Data da Ortofoto'] : '',
+      'Primeira Data R7.5': r75 ? r75['Data da Ortofoto'] : '',
+      'Primeira Data R8': dataR8,
+      'Data_R8': dataR8,
+      'Data_Maturacao': dataR8,
+      'Periodo_Maturacao': periodo,
+      'Data_Dessecacao': dataDessec,
+      'Dias até R8': periodoDias,
+      'Estágio Final': finalStage,
+      'Estagio_Final': finalStage,
+      'Maior_%_Maturacao': maxPct === '' ? '' : Number(Number(maxPct).toFixed(2)),
+      'Data_Maior_Estagio': maxDate,
+      'Status_Final': statusFinal,
+      'Observação': manual ? 'Contém correção manual. ' + obsFinal : obsFinal
+    };
+  }).sort((a,b) => Number(a.Disparo)-Number(b.Disparo) || Number(a.Tiro)-Number(b.Tiro));
+}
+function updateMetrics(){
+  document.getElementById('metricDates').textContent = orthos.length;
+  const countedRows = summaryRows.filter(r => r['Contabilizada'] !== 'Não').length;
+  document.getElementById('metricParcels').textContent = summaryRows.length ? countedRows : rows() * cols();
+  document.getElementById('metricR7').textContent = summaryRows.filter(r => r['Data_R8'] || r['Data_Maturacao']).length;
+  document.getElementById('metricR8').textContent = summaryRows.filter(r => r['Status_Final'] === 'Não chegou ao R8').length;
+}
+function renderTables(){
+  const rowsToShow = detailedRows.filter(r => r.__idx === activeIdx && r.Quadra === activeQuadraName()).slice(0, 80);
+  if(!rowsToShow.length){
+    tableBox.innerHTML = '<div class="mat-sub" style="padding:8px;">Execute a análise para ver a tabela da data ativa.</div>';
+    renderResultTable();
+    return;
+  }
+  tableBox.innerHTML = '<table><thead><tr><th>Parcela</th><th>Verde</th><th>Amarelo/Seco</th><th>Estágio</th><th>R8</th></tr></thead><tbody>' +
+    rowsToShow.map(r => `<tr><td>${safe(r.Parcela)}</td><td>${fmt(r['% Verde Útil'] ?? r['% Verde'],2)}%</td><td>${fmt(r['Índice Maturação'] ?? r['% Amarelo/Marrom'],2)}%</td><td>${safe(r['Estagio_Detectado'] || r['Estágio'])}</td><td>${stageCode(r['Estágio']) === 'R8' ? 'Sim' : 'Não'}</td></tr>`).join('') +
+    '</tbody></table>';
+  renderResultTable();
+}
+function renderResultTable(){
+  if(!resultBox) return;
+  if(!summaryRows.length){
+    resultBox.innerHTML = '<div class="mat-sub" style="padding:8px;">O resultado final por parcela aparece após a análise temporal.</div>';
+    return;
+  }
+  const rowsToShow = summaryRows.filter(r => r.Quadra === activeQuadraName()).slice(0, 80);
+  resultBox.innerHTML = '<table><thead><tr><th>Parcela</th><th>Status</th><th>Data R8</th><th>Estágio final</th><th>Maior %</th></tr></thead><tbody>' +
+    rowsToShow.map(r => `<tr><td>${safe(r.Parcela)}</td><td>${safe(r['Status_Final'] || '-')}</td><td>${safe(r['Data_R8'] || r['Data_Maturacao'] || '-')}</td><td>${safe(r['Estagio_Final'] || r['Estágio Final'] || '-')}</td><td>${r['Maior_%_Maturacao'] === '' ? '-' : fmt(r['Maior_%_Maturacao'],2) + '%'}</td></tr>`).join('') +
+    '</tbody></table>';
+}
+
+function updateSelectedPanel(){
+  renderDessecList();
+  if(!selectedParcel){
+    selectedInfo.textContent = 'Clique em uma parcela para visualizar. Duplo clique marca/desmarca como NC.';
+    manualStage.value = '';
+    manualObs.value = '';
+    drawGraph();
+    return;
+  }
+  const key = reviewKey(activeIdx, selectedParcel.parcel);
+  const review = manualReviews[key] || {};
+  const res = resultFor(activeIdx, selectedParcel.parcel);
+  selectedInfo.textContent = selectedParcel.parcel + ' · Data ' + (orthos[activeIdx]?.date || '-') + (res ? ' · Verde útil ' + fmt(res['% Verde Útil'] ?? res['% Verde'],2) + '% · Matur. ' + fmt(res['Índice Maturação'] ?? res['% Amarelo/Marrom'],2) + '%' + (res['Contabilizar'] === 'Não' ? ' · Não contabilizada' : '') : '');
+  manualStage.value = review.stage || '';
+  manualObs.value = review.obs || '';
+  drawGraph();
+}
+function applyReview(){
+  if(!selectedParcel){ alert('Clique em uma parcela primeiro.'); return; }
+  const key = reviewKey(activeIdx, selectedParcel.parcel);
+  const stage = manualStage.value;
+  const obs = manualObs.value.trim();
+  if(stage || obs) manualReviews[key] = {stage, obs};
+  else delete manualReviews[key];
+  const stageText = String(stage || '').toLowerCase();
+  const manualEmpty = !!stage && (stageText.includes('parcela vazia') || stageText.includes('vazia') || stageText.includes('colhida'));
+  detailedRows.forEach(row => {
+    if(row.__idx === activeIdx && row.Parcela === selectedParcel.parcel){
+      if(stage) row['Estágio'] = stage;
+      if(stage) row['Contabilizar'] = isCountableStage(stage) ? 'Sim' : 'Não';
+      if(stage) row['Estagio_Detectado'] = manualEmpty ? 'Parcela vazia' : stage;
+      if(stage) row['Usada_na_Analise'] = isCountableStage(stage) ? 'Sim' : 'Não';
+      if(stage && manualEmpty) {
+        row['Motivo_Descarte'] = 'Parcela vazia marcada manualmente';
+        row['Percentual_Maturacao'] = '';
+      } else if(stage && !isCountableStage(stage)) row['Motivo_Descarte'] = stageCode(stage) === 'NC' ? 'Revisão manual: não contabilizar' : 'Revisão manual: sem leitura confiável';
+      if(stage && isCountableStage(stage)) row['Motivo_Descarte'] = '';
+      row['Observação'] = obs || (manualEmpty ? 'Parcela vazia marcada manualmente.' : (stage ? 'Estágio corrigido manualmente.' : 'Classificação automática por HSV.'));
+    }
+  });
+  buildSummaryRows();
+  updateMetrics();
+  renderTables();
+  persistState();
+  draw();
+  drawGraph();
+  setProgress(100, 'Revisão manual salva para ' + selectedParcel.parcel + '.');
+}
+function isManualEmptyStage(stage){
+  const text = String(stage || '').toLowerCase();
+  return text.includes('parcela vazia') || text.includes('vazia') || text.includes('colhida');
+}
+function automaticRowForParcel(hit){
+  const o = orthos[activeIdx];
+  const poly = cellPoly(activeIdx, hit.r, hit.c);
+  if(!o || !poly) return null;
+  const parcel = hit.parcel;
+  const quadra = quadraInput.value.trim() || 'Maturacao_Soja';
+  const dataOrto = normalizeDateText(o.date || '');
+  const dataDessec = dessecDateFor(quadra, parcel);
+  if(dataDessec && isOnOrAfter(dataOrto, dataDessec)){
+    return {
+      __idx: activeIdx,
+      Quadra: quadra,
+      Parcela: parcel,
+      Disparo: hit.disparo,
+      Tiro: hit.tiro,
+      'Data da Ortofoto': dataOrto,
+      '% Verde': '',
+      '% Amarelo/Marrom': '',
+      '% Solo/Palhada': '',
+      '% Verde Útil': '',
+      'Índice Maturação': '',
+      '% Vegetação Útil': '',
+      'Percentual_Maturacao': '',
+      'Usada_na_Analise': 'Não',
+      'Motivo_Descarte': 'Após data de dessecação',
+      'Data_Dessecacao': dataDessec,
+      'Contabilizar': 'Não',
+      'Estágio': 'Dessecado / Não contabilizar',
+      'Estagio_Detectado': 'Dessecado / Não contabilizar',
+      'Observação': 'Ortofoto igual ou posterior à data de dessecação.'
+    };
+  }
+  try {
+    const src = buildAnalysisSource(activeIdx);
+    const base = analyzeParcelFromSource(src, poly);
+    const countable = !!base.countable;
+    const discard = countable ? '' : (base.reason || 'Sem leitura confiável');
+    return {
+      __idx: activeIdx,
+      Quadra: quadra,
+      Parcela: parcel,
+      Disparo: hit.disparo,
+      Tiro: hit.tiro,
+      'Data da Ortofoto': dataOrto,
+      '% Verde': Number(base.greenPct.toFixed(2)),
+      '% Amarelo/Marrom': Number(base.yellowPct.toFixed(2)),
+      '% Solo/Palhada': Number(base.soilPct.toFixed(2)),
+      '% Verde Útil': Number(base.greenUsefulPct.toFixed(2)),
+      'Índice Maturação': Number(base.maturityPct.toFixed(2)),
+      '% Vegetação Útil': Number(base.usefulPct.toFixed(2)),
+      'Percentual_Maturacao': Number(base.maturityPct.toFixed(2)),
+      'Usada_na_Analise': countable ? 'Sim' : 'Não',
+      'Motivo_Descarte': discard,
+      'Data_Dessecacao': dataDessec || '',
+      'Contabilizar': countable ? 'Sim' : 'Não',
+      'Estágio': base.stage,
+      'Estagio_Detectado': base.stage,
+      'Observação': base.reason || 'Classificação automática por HSV.'
+    };
+  } catch(err) {
+    console.warn('Não foi possível recalcular a parcela automática', err);
+    return null;
+  }
+}
+function restoreAutomaticParcel(hit){
+  const rowIdx = detailedRows.findIndex(row => row.__idx === activeIdx && row.Parcela === hit.parcel);
+  if(rowIdx < 0) return false;
+  const autoRow = automaticRowForParcel(hit);
+  if(!autoRow) return false;
+  detailedRows[rowIdx] = autoRow;
+  buildSummaryRows();
+  updateMetrics();
+  renderTables();
+  return true;
+}
+function markParcelEmptyByDoubleClick(hit){
+  if(!hit){ return; }
+  selectedParcel = hit;
+  const key = reviewKey(activeIdx, hit.parcel);
+  const currentReview = manualReviews[key] || {};
+  const currentRow = resultFor(activeIdx, hit.parcel);
+  const alreadyManualEmpty = isManualEmptyStage(currentReview.stage) || String(currentRow?.['Motivo_Descarte'] || '').toLowerCase().includes('parcela vazia marcada manualmente');
+  if(alreadyManualEmpty){
+    delete manualReviews[key];
+    manualStage.value = '';
+    manualObs.value = '';
+    const restored = restoreAutomaticParcel(hit);
+    updateSelectedPanel();
+    persistState();
+    draw();
+    drawGraph();
+    setProgress(100, restored ? hit.parcel + ' voltou para a análise automática.' : hit.parcel + ' teve a marcação NC removida. Execute a análise para recalcular se necessário.');
+    return;
+  }
+  const obs = 'Parcela vazia marcada por duplo clique.';
+  manualReviews[key] = {stage:'Parcela vazia', obs};
+  manualStage.value = 'Parcela vazia';
+  manualObs.value = obs;
+  let changed = false;
+  detailedRows.forEach(row => {
+    if(row.__idx === activeIdx && row.Parcela === hit.parcel){
+      row['Estágio'] = 'Parcela vazia';
+      row['Estagio_Detectado'] = 'Parcela vazia';
+      row['Contabilizar'] = 'Não';
+      row['Usada_na_Analise'] = 'Não';
+      row['Motivo_Descarte'] = 'Parcela vazia marcada manualmente';
+      row['Percentual_Maturacao'] = '';
+      row['Observação'] = obs;
+      changed = true;
+    }
+  });
+  if(changed){
+    buildSummaryRows();
+    updateMetrics();
+    renderTables();
+  }
+  updateSelectedPanel();
+  persistState();
+  draw();
+  drawGraph();
+  setProgress(100, hit.parcel + ' marcada como Parcela vazia. Ela não será contabilizada na análise HSV.');
+}
+function clearReview(){
+  if(!selectedParcel) return;
+  delete manualReviews[reviewKey(activeIdx, selectedParcel.parcel)];
+  manualStage.value = '';
+  manualObs.value = '';
+  setProgress(100, 'Revisão limpa. Execute a análise novamente se quiser recalcular estágio automático.');
+  persistState();
+}
+function drawGraph(){
+  graphCtx.clearRect(0,0,graphCanvas.width,graphCanvas.height);
+  graphCtx.fillStyle='rgba(2,14,36,.92)'; graphCtx.fillRect(0,0,graphCanvas.width,graphCanvas.height);
+  graphCtx.strokeStyle='rgba(__THEME_RGB__,.28)'; graphCtx.strokeRect(.5,.5,graphCanvas.width-1,graphCanvas.height-1);
+  graphCtx.fillStyle='#9edfec'; graphCtx.font='10px Segoe UI'; graphCtx.fillText(selectedParcel ? ('% verde útil · ' + selectedParcel.parcel) : 'Selecione uma parcela para ver evolução', 10, 16);
+  if(!selectedParcel) return;
+  const series = orthos.map((o, idx) => {
+    const r = resultFor(idx, selectedParcel.parcel);
+    return {date:o.date, value:(r && isCountableRow(r)) ? Number(r['% Verde Útil'] ?? r['% Verde']) : null, stage:r ? r['Estágio'] : ''};
+  }).filter(p => p.value !== null);
+  if(series.length < 1) return;
+  const left=24, right=10, top=24, bottom=22, W=graphCanvas.width-left-right, H=graphCanvas.height-top-bottom;
+  graphCtx.strokeStyle='rgba(255,255,255,.18)';
+  for(let i=0;i<=4;i++){
+    const y=top+H*i/4; graphCtx.beginPath(); graphCtx.moveTo(left,y); graphCtx.lineTo(left+W,y); graphCtx.stroke();
+  }
+  graphCtx.beginPath();
+  series.forEach((p,i) => {
+    const x = left + (series.length === 1 ? W/2 : W*i/(series.length-1));
+    const y = top + H * (1 - p.value/100);
+    if(i===0) graphCtx.moveTo(x,y); else graphCtx.lineTo(x,y);
+  });
+  graphCtx.strokeStyle='__THEME_PRIMARY__'; graphCtx.lineWidth=2; graphCtx.stroke();
+  series.forEach((p,i) => {
+    const x = left + (series.length === 1 ? W/2 : W*i/(series.length-1));
+    const y = top + H * (1 - p.value/100);
+    graphCtx.fillStyle=stageColor(p.stage || stageFromGreen(p.value),1); graphCtx.beginPath(); graphCtx.arc(x,y,4,0,Math.PI*2); graphCtx.fill();
+  });
+}
+
+function toCsv(rows, columns){
+  const sep=';';
+  return '\uFEFF' + columns.join(sep) + '\n' + rows.map(row => columns.map(col => {
+    const value = String(row[col] ?? '').replace(/"/g,'""');
+    return '"' + value + '"';
+  }).join(sep)).join('\n');
+}
+function downloadText(name, mime, text){
+  const blob = new Blob([text], {type:mime});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+function resultadoMaturacaoRows(){
+  const seen = new Set();
+  const rowsOut = [];
+  summaryRows.forEach(r => {
+    const key = [r.Quadra, r.Parcela, r.Disparo, r.Tiro].map(v => String(v ?? '')).join('|');
+    if(seen.has(key)) return;
+    seen.add(key);
+    rowsOut.push({
+      Quadra: r.Quadra,
+      Parcela: r.Parcela,
+      Disparo: r.Disparo,
+      Tiro: r.Tiro,
+      Status: r['Status_Final'] || '',
+      Data_R8: r['Data_R8'] || r['Data_Maturacao'] || r['Primeira Data R8'] || '',
+      Estagio_Final: r['Estagio_Final'] || r['Estágio Final'] || '',
+      Maior_Percentual_Maturacao: r['Maior_%_Maturacao'] === '' ? '' : r['Maior_%_Maturacao'],
+      Data_Maior_Estagio: r['Data_Maior_Estagio'] || '',
+      Observacao: r['Observação'] || ''
+    });
+  });
+  return rowsOut;
+}
+function linhaTemporalRows(){
+  return detailedRows.map(r => ({
+    Quadra: r.Quadra,
+    Parcela: r.Parcela,
+    Disparo: r.Disparo,
+    Tiro: r.Tiro,
+    Data_Ortofoto: r['Data da Ortofoto'] || '',
+    Percentual_Verde: r['% Verde Útil'] === '' ? (r['% Verde'] ?? '') : (r['% Verde Útil'] ?? r['% Verde'] ?? ''),
+    Percentual_Amarelo_Seco: r['Percentual_Maturacao'] === '' ? '' : (r['Percentual_Maturacao'] ?? r['Índice Maturação'] ?? r['% Amarelo/Marrom'] ?? ''),
+    Estagio_Detectado: r['Estagio_Detectado'] || r['Estágio'] || '',
+    Chegou_R8: stageCode(r['Estágio']) === 'R8' ? 'Sim' : 'Não'
+  }));
+}
+function resumoIndicadoresRows(){
+  const resultRows = resultadoMaturacaoRows();
+  const isEmptyResultRow = r => String((r.Status_Final || r.Status || '') + ' ' + (r.Observacao || '')).toLowerCase().includes('parcela vazia');
+  const matureRows = resultRows.filter(r => r.Data_R8);
+  const emptyRows = resultRows.filter(isEmptyResultRow);
+  const semRows = resultRows.filter(r => !r.Data_R8 && !isEmptyResultRow(r));
+  const dessecAntes = resultRows.filter(r => String(r.Observacao || '').toLowerCase().includes('dessecada antes'));
+  const dates = matureRows.map(r => r.Data_R8).filter(Boolean).sort();
+  const byDate = {};
+  matureRows.forEach(r => { byDate[r.Data_R8] = (byDate[r.Data_R8] || 0) + 1; });
+  const dessecDiscard = detailedRows.filter(r => r['Motivo_Descarte'] === 'Após data de dessecação').length;
+  const rowsOut = [
+    {Indicador:'Total de parcelas analisadas', Valor: resultRows.length},
+    {Indicador:'Parcelas maduras com resultado válido', Valor: matureRows.length},
+    {Indicador:'Parcelas sem resultado confiável', Valor: semRows.length},
+    {Indicador:'Parcelas vazias não contabilizadas', Valor: emptyRows.length},
+    {Indicador:'Parcelas dessecadas antes da maturação', Valor: dessecAntes.length},
+    {Indicador:'Primeira data de maturação encontrada', Valor: dates[0] || ''},
+    {Indicador:'Última data de maturação encontrada', Valor: dates[dates.length - 1] || ''},
+    {Indicador:'Quantidade de parcelas desconsideradas por dessecação', Valor: dessecDiscard},
+    {Indicador:'', Valor:''},
+    {Indicador:'Quantidade de parcelas maduras por data', Valor:''}
+  ];
+  Object.keys(byDate).sort().forEach(date => rowsOut.push({Indicador:date, Valor:byDate[date]}));
+  return rowsOut;
+}
+function worksheetFromRows(rows, columns){
+  const normalized = rows.map(r => Object.fromEntries(columns.map(c => [c, r[c] ?? ''])));
+  const ws = XLSX.utils.json_to_sheet(normalized, {header:columns});
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
+  ws['!autofilter'] = {ref: XLSX.utils.encode_range(range)};
+  ws['!freeze'] = {xSplit:0, ySplit:1};
+  ws['!cols'] = columns.map(col => {
+    const maxLen = Math.max(String(col).length, ...normalized.map(row => String(row[col] ?? '').length));
+    return {wch: Math.min(Math.max(maxLen + 2, 12), 42)};
+  });
+  return ws;
+}
+function exportDetailedCsv(){
+  if(!detailedRows.length){ alert('Execute a análise primeiro.'); return; }
+  const rowsOut = linhaTemporalRows();
+  const colsOut = ['Quadra','Parcela','Disparo','Tiro','Data_Ortofoto','Percentual_Verde','Percentual_Amarelo_Seco','Estagio_Detectado','Chegou_R8'];
+  downloadText('maturacao_linha_temporal.csv','text/csv;charset=utf-8',toCsv(rowsOut, colsOut));
+}
+function exportSummaryCsv(){
+  if(!summaryRows.length){ alert('Execute a análise primeiro.'); return; }
+  const rowsOut = resultadoMaturacaoRows();
+  const colsOut = ['Quadra','Parcela','Disparo','Tiro','Status','Data_R8','Estagio_Final','Maior_Percentual_Maturacao','Data_Maior_Estagio','Observacao'];
+  downloadText('resultado_maturacao.csv','text/csv;charset=utf-8',toCsv(rowsOut, colsOut));
+}
+async function exportExcel(){
+  if(!detailedRows.length){ alert('Execute a análise primeiro.'); return; }
+  if(!summaryRows.length){ alert('Execute a análise temporal completa antes de gerar o Excel final.'); return; }
+  if(typeof XLSX === 'undefined'){ alert('Biblioteca Excel não carregou. Use CSV.'); return; }
+  setProgress(96, 'Gerando Excel final com Resultado Final e Linha Temporal...');
+  const resultCols = ['Quadra','Parcela','Disparo','Tiro','Status','Data_R8','Estagio_Final','Maior_Percentual_Maturacao','Data_Maior_Estagio','Observacao'];
+  const timelineCols = ['Quadra','Parcela','Disparo','Tiro','Data_Ortofoto','Percentual_Verde','Percentual_Amarelo_Seco','Estagio_Detectado','Chegou_R8'];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, worksheetFromRows(resultadoMaturacaoRows(), resultCols), 'Resultado_Final');
+  XLSX.utils.book_append_sheet(wb, worksheetFromRows(linhaTemporalRows(), timelineCols), 'Linha_Temporal');
+  XLSX.writeFile(wb, 'resultado_maturacao_temporal_soja.xlsx');
+  setProgress(100, 'Excel final gerado com sucesso: Resultado Final e Linha Temporal.');
+}
+function exportPng(){
+  draw();
+  const a=document.createElement('a');
+  a.href=canvas.toDataURL('image/png');
+  a.download='mapa_maturacao_' + (orthos[activeIdx]?.date || 'data') + '.png';
+  a.click();
+}
+function projectPayload(){
+  syncActiveGridProfile();
+  return {
+    version: 'TMG_MATURACAO_TEMPORAL_SOJA_V1',
+    savedAt: new Date().toISOString(),
+    orthos: orthos.map(o => ({name:o.name,date:o.date,b64:o.b64,width:o.width,height:o.height,orig_width:o.orig_width,orig_height:o.orig_height,order:o.order,upload_order:o.upload_order})),
+    config: {quadra:quadraInput.value, rows:rows(), cols:cols()},
+    gridRatios, dateOffsets, dateGridRatios, gridProfiles, activeGridId, manualReviews, dessecacao, detailedRows, summaryRows
+  };
+}
+function saveProject(){
+  downloadText('projeto_maturacao_temporal_soja.json','application/json;charset=utf-8',JSON.stringify(projectPayload(), null, 2));
+}
+function persistState(lightweight=false){
+  try {
+    syncActiveGridProfile();
+    const payload = {
+      config:{quadra:quadraInput.value, rows:rows(), cols:cols()},
+      gridRatios, dateOffsets, dateGridRatios, gridProfiles, activeGridId, manualReviews, dessecacao, activeIdx, compareIdx
+    };
+    if(lightweight){
+      try {
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+        if(Array.isArray(saved.detailedRows)) payload.detailedRows = saved.detailedRows;
+        if(Array.isArray(saved.summaryRows)) payload.summaryRows = saved.summaryRows;
+      } catch(e) {}
+    } else {
+      payload.detailedRows = detailedRows;
+      payload.summaryRows = summaryRows;
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  } catch(e) {}
+}
+function restoreLocalState(){
+  if(INITIAL_PROJECT && Object.keys(INITIAL_PROJECT).length) {
+    if(INITIAL_PROJECT.config){
+      quadraInput.value = INITIAL_PROJECT.config.quadra || quadraInput.value;
+      rowsInput.value = INITIAL_PROJECT.config.rows || rowsInput.value;
+      colsInput.value = INITIAL_PROJECT.config.cols || colsInput.value;
+    }
+    return;
+  }
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    if(saved.config){ quadraInput.value = saved.config.quadra || quadraInput.value; rowsInput.value = saved.config.rows || rowsInput.value; colsInput.value = saved.config.cols || colsInput.value; }
+    if(Array.isArray(saved.gridRatios)) gridRatios = saved.gridRatios.slice(0,4);
+    if(saved.dateOffsets) dateOffsets = saved.dateOffsets;
+    if(saved.dateGridRatios) dateGridRatios = saved.dateGridRatios;
+    if(Array.isArray(saved.gridProfiles)) gridProfiles = saved.gridProfiles;
+    if(saved.activeGridId) activeGridId = String(saved.activeGridId);
+    if(saved.manualReviews) manualReviews = saved.manualReviews;
+    if(saved.dessecacao || saved.desiccationState) dessecacao = normalizeDessecacaoState(saved.dessecacao || saved.desiccationState);
+    if(Array.isArray(saved.detailedRows)) detailedRows = saved.detailedRows;
+    if(Array.isArray(saved.summaryRows)) summaryRows = saved.summaryRows;
+    activeIdx = Math.min(Math.max(0, Number(saved.activeIdx || 0)), Math.max(0, orthos.length-1));
+    compareIdx = Math.min(Math.max(0, Number(saved.compareIdx || compareIdx)), Math.max(0, orthos.length-1));
+  } catch(e) {}
+}
+function openProject(file){
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const p = JSON.parse(reader.result);
+      if(!p || !Array.isArray(p.orthos) || !p.orthos.length) throw new Error('Projeto sem ortofotos.');
+      orthos = p.orthos.sort((a,b) => Number(a.order || 0) - Number(b.order || 0) || String(a.date || '').localeCompare(String(b.date || '')) || Number(a.upload_order || 0) - Number(b.upload_order || 0));
+      gridRatios = Array.isArray(p.gridRatios) ? p.gridRatios.slice(0,4) : [];
+      dateOffsets = p.dateOffsets || {};
+      dateGridRatios = p.dateGridRatios || {};
+      gridProfiles = Array.isArray(p.gridProfiles) ? p.gridProfiles : [];
+      activeGridId = p.activeGridId || '';
+      manualReviews = p.manualReviews || {};
+      dessecacao = normalizeDessecacaoState(p.dessecacao || p.desiccationState);
+      detailedRows = Array.isArray(p.detailedRows) ? p.detailedRows : [];
+      summaryRows = Array.isArray(p.summaryRows) ? p.summaryRows : [];
+      if(p.config){ quadraInput.value = p.config.quadra || quadraInput.value; rowsInput.value = p.config.rows || rowsInput.value; colsInput.value = p.config.cols || colsInput.value; }
+      activeIdx=0; compareIdx=Math.min(1,orthos.length-1);
+      initGridProfiles(); populateControls(); loadImages(); renderDessecList(); renderTables(); updateMetrics(); setProgress(100,'Projeto reaberto com sucesso.');
+    } catch(e) { alert('Erro ao reabrir projeto: ' + e.message); }
+  };
+  reader.readAsText(file);
+}
+
+function shiftOffset(dx,dy,persistNow=true){
+  const o = currentOrtho(); if(!o) return;
+  if(hasDateGridRatios(activeIdx)){
+    const ratios = ensureDateGridRatios(activeIdx);
+    const rx = dx / Math.max(1,o.width);
+    const ry = dy / Math.max(1,o.height);
+    dateGridRatios[activeIdx] = ratios.map(p => ({x:p.x + rx, y:p.y + ry}));
+    if(persistNow){ persistState(); renderDateList(); draw(); }
+    else { gridAdjustDirty = true; scheduleDraw(); }
+    return;
+  }
+  const off = offsetFor(activeIdx);
+  off.x += dx / Math.max(1,o.width);
+  off.y += dy / Math.max(1,o.height);
+  if(persistNow){ persistState(); draw(); }
+  else { gridAdjustDirty = true; scheduleDraw(); }
+}
+function copyOffsetToFollowing(){
+  if(gridRatios.length !== 4) return;
+  const ratios = gridRatiosForDate(activeIdx).map(p => ({x:p.x, y:p.y}));
+  for(let i=activeIdx+1;i<orthos.length;i++){
+    if(i === 0) continue;
+    dateGridRatios[i] = ratios.map(p => ({x:p.x, y:p.y}));
+    dateOffsets[i] = {x:0,y:0};
+  }
+  persistState(); renderDateList(); draw(); setProgress(100,'Extremidades do grid copiadas para as próximas datas.');
+}
+
+viewer.addEventListener('wheel', e => {
+  if(viewMode.value === 'compare') return;
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  const ix = (mx - ox) / scale, iy = (my - oy) / scale;
+  scale = Math.max(0.03, Math.min(80, scale * (e.deltaY < 0 ? 1.18 : 1/1.18)));
+  ox = mx - ix * scale; oy = my - iy * scale;
+  draw();
+}, {passive:false});
+viewer.addEventListener('dblclick', e => {
+  if(viewMode.value === 'compare' || markGridMode) return;
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  const pt = screenToImage(e.clientX - r.left, e.clientY - r.top);
+  const hit = parcelAt(activeIdx, pt);
+  if(hit) markParcelEmptyByDoubleClick(hit);
+}, {passive:false});
+viewer.addEventListener('mousedown', e => {
+  if(viewMode.value === 'compare') return;
+  const r = canvas.getBoundingClientRect();
+  const pt = screenToImage(e.clientX - r.left, e.clientY - r.top);
+  lastMouse = {x:e.clientX, y:e.clientY};
+  if(markGridMode){
+    if(activeIdx !== 0){ activeIdx = 0; dateSelect.value = '0'; }
+    const o = currentOrtho();
+    if(o && gridRatios.length < 4){
+      gridRatios.push({x:pt.x / o.width, y:pt.y / o.height});
+      if(gridRatios.length === 4){ markGridMode=false; document.getElementById('btnMarkGrid').classList.remove('active'); setProgress(100,'Grid marcado. Execute a análise HSV para gerar o resultado temporal.'); }
+      persistState(); draw(); return;
+    }
+  }
+  const gp = gridPointsFor(activeIdx);
+  for(let i=0;i<gp.length;i++){
+    const s = imageToScreen(gp[i]);
+    if((activeIdx === 0 || cornerAdjustMode) && Math.hypot((e.clientX-r.left)-s.x,(e.clientY-r.top)-s.y) < 16){ draggingPoint=i; return; }
+  }
+  if(adjustMode && gridRatios.length === 4 && parcelAt(activeIdx, pt)){ draggingGrid=true; return; }
+  const hit = parcelAt(activeIdx, pt);
+  if(hit){ selectedParcel=hit; updateSelectedPanel(); draw(); return; }
+  dragging=true;
+});
+window.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  const pt = screenToImage(e.clientX - r.left, e.clientY - r.top);
+  coordBadge.textContent = 'X:' + Math.round(pt.x) + ' Y:' + Math.round(pt.y);
+  if(draggingPoint >= 0){
+    setActiveGridPoint(draggingPoint, pt);
+    gridAdjustDirty = true;
+    scheduleDraw();
+    return;
+  }
+  if(draggingGrid){
+    shiftOffset(e.clientX - lastMouse.x, e.clientY - lastMouse.y, false);
+    lastMouse = {x:e.clientX, y:e.clientY};
+    return;
+  }
+  if(dragging){ ox += e.clientX - lastMouse.x; oy += e.clientY - lastMouse.y; lastMouse={x:e.clientX,y:e.clientY}; scheduleDraw(); }
+});
+window.addEventListener('mouseup', () => {
+  const shouldSaveGridAdjust = gridAdjustDirty || draggingPoint >= 0 || draggingGrid;
+  dragging=false; draggingGrid=false; draggingPoint=-1;
+  if(shouldSaveGridAdjust){
+    gridAdjustDirty = false;
+    persistState(true);
+    renderDateList();
+    draw();
+  }
+});
+window.addEventListener('resize', () => { fitView(); });
+
+dateSelect.onchange = () => { activeIdx = Number(dateSelect.value || 0); renderDateList(); renderTables(); updateSelectedPanel(); draw(); persistState(); };
+compareSelect.onchange = () => { compareIdx = Number(compareSelect.value || 0); draw(); persistState(); };
+viewMode.onchange = () => draw();
+if(gridFillMode){
+  gridFillMode.onchange = () => {
+    if(gridOpacity){
+      if(gridFillMode.value === 'color') gridOpacity.value = '46';
+      else if(gridFillMode.value === 'outline') gridOpacity.value = '0';
+      else gridOpacity.value = '24';
+    }
+    draw();
+    setProgress(100, gridFillMode.value === 'outline' ? 'Grid HSV em modo só borda.' : 'Transparência do grid HSV ajustada.');
+  };
+}
+if(gridOpacity){
+  gridOpacity.oninput = () => draw();
+}
+if(stageFilter){
+  stageFilter.onchange = () => draw();
+}
+if(r8ThresholdSelect){
+  r8ThresholdSelect.onchange = () => {
+    setProgress(100, 'Limite R8 ajustado para ' + r8ThresholdSelect.value + '%. Execute a análise HSV para recalcular.');
+    draw();
+  };
+}
+rowsInput.onchange = colsInput.onchange = () => { syncActiveGridProfile(); updateMetrics(); draw(); persistState(); };
+quadraInput.onchange = () => { syncActiveGridProfile(); renderGridSelect(); renderDessecList(); persistState(); };
+if(gridSelect) gridSelect.onchange = () => applyGridProfile(gridSelect.value, true, true);
+document.getElementById('btnSaveGrid').onclick = saveGridProfile;
+document.getElementById('btnAddGrid').onclick = addGridProfile;
+document.getElementById('btnMarkGrid').onclick = () => {
+  activeIdx = 0; dateSelect.value='0'; gridRatios=[]; dateOffsets={}; dateGridRatios={}; removeRowsForQuadra(activeQuadraName()); selectedParcel=null; markGridMode=true;
+  document.getElementById('btnMarkGrid').classList.add('active');
+  setProgress(0,'Marque os 4 cantos do grid na primeira ortofoto.');
+  syncActiveGridProfile();
+  persistState();
+  renderTables(); updateMetrics(); renderDateList(); draw();
+};
+document.getElementById('btnAdjustMode').onclick = () => { adjustMode=!adjustMode; document.getElementById('btnAdjustMode').classList.toggle('active', adjustMode); };
+document.getElementById('btnCornerMode').onclick = () => {
+  if(gridRatios.length !== 4){ alert('Marque o grid base na primeira ortofoto antes de ajustar extremidades por data.'); return; }
+  cornerAdjustMode=!cornerAdjustMode;
+  document.getElementById('btnCornerMode').classList.toggle('active', cornerAdjustMode);
+  setProgress(100, cornerAdjustMode ? 'Ajuste de extremidades ativo. Arraste os 4 pontos do grid nesta data.' : 'Ajuste de extremidades desativado.');
+};
+document.getElementById('btnFit').onclick = fitView;
+document.getElementById('btnClearGrid').onclick = () => {
+  if(confirm('Limpar o grid ativo, ajustes e resultados desta quadra?')){
+    const quadra = activeQuadraName();
+    gridRatios=[]; dateOffsets={}; dateGridRatios={}; selectedParcel=null;
+    removeRowsForQuadra(quadra);
+    syncActiveGridProfile();
+    persistState(); renderTables(); updateMetrics(); renderDateList(); draw();
+  }
+};
+document.getElementById('btnUp').onclick = () => shiftOffset(0, -Number(document.getElementById('adjustStep').value || 5));
+document.getElementById('btnDown').onclick = () => shiftOffset(0, Number(document.getElementById('adjustStep').value || 5));
+document.getElementById('btnLeft').onclick = () => shiftOffset(-Number(document.getElementById('adjustStep').value || 5), 0);
+document.getElementById('btnRight').onclick = () => shiftOffset(Number(document.getElementById('adjustStep').value || 5), 0);
+document.getElementById('btnResetOffset').onclick = () => { dateOffsets[activeIdx] = {x:0,y:0}; if(activeIdx !== 0) delete dateGridRatios[activeIdx]; persistState(); renderDateList(); draw(); };
+document.getElementById('btnCopyOffset').onclick = copyOffsetToFollowing;
+if(quadraDessecDate) quadraDessecDate.onchange = saveQuadraDessecDate;
+document.getElementById('btnSaveDessec').onclick = saveQuadraDessecDate;
+document.getElementById('btnAnalyze').onclick = analyzeAll;
+document.getElementById('btnPrev').onclick = () => { activeIdx = (activeIdx - 1 + orthos.length) % orthos.length; dateSelect.value=String(activeIdx); renderDateList(); renderTables(); updateSelectedPanel(); draw(); };
+document.getElementById('btnNext').onclick = () => { activeIdx = (activeIdx + 1) % orthos.length; dateSelect.value=String(activeIdx); renderDateList(); renderTables(); updateSelectedPanel(); draw(); };
+document.getElementById('btnPlay').onclick = () => {
+  playing = !playing;
+  document.getElementById('btnPlay').textContent = playing ? '⏸ Pausar' : '▶ Animar';
+  if(playing) playTimer = setInterval(() => { activeIdx=(activeIdx+1)%orthos.length; dateSelect.value=String(activeIdx); renderDateList(); renderTables(); updateSelectedPanel(); draw(); }, 1200);
+  else clearInterval(playTimer);
+};
+document.getElementById('btnSaveReview').onclick = applyReview;
+document.getElementById('btnClearReview').onclick = clearReview;
+const onlyExcelButton = document.getElementById('btnExcel');
+if(onlyExcelButton) onlyExcelButton.onclick = exportExcel;
+function openSummaryModal(){
+  if(!summaryModal) return;
+  renderTables();
+  summaryModal.classList.add('open');
+  summaryModal.setAttribute('aria-hidden', 'false');
+}
+function closeSummaryModal(){
+  if(!summaryModal) return;
+  summaryModal.classList.remove('open');
+  summaryModal.setAttribute('aria-hidden', 'true');
+}
+if(btnOpenSummary) btnOpenSummary.onclick = openSummaryModal;
+if(btnCloseSummary) btnCloseSummary.onclick = closeSummaryModal;
+if(summaryModal){
+  summaryModal.addEventListener('click', e => {
+    if(e.target === summaryModal) closeSummaryModal();
+  });
+}
+
+restoreLocalState();
+initGridProfiles();
+populateControls();
+renderDateList();
+renderDessecList();
+renderTables();
+updateMetrics();
+loadImages();
+setTimeout(() => { if(!OPENCV_READY) document.getElementById('cvStatus').textContent = 'OpenCV.js ainda não carregou. A análise usará fallback HSV manual se necessário.'; }, 4500);
+</script>
+</body>
+</html>
+"""
+    orthos_json = json.dumps(mat_orthos, ensure_ascii=False).replace("</", "<\\/")
+    project_json = json.dumps(initial_project or {}, ensure_ascii=False).replace("</", "<\\/")
+    mat_html = (
+        mat_html
+        .replace("__ORTHOS__", orthos_json)
+        .replace("__PROJECT__", project_json)
+        .replace("__THEME_PRIMARY__", THEME_PRIMARY_COLOR)
+        .replace("__THEME_SOFT__", THEME_PRIMARY_SOFT)
+        .replace("__THEME_RGB__", THEME_PRIMARY_RGB)
+    )
+    components.html(mat_html, height=895, scrolling=False)
+
+
+# ==========================================
 # SIDEBAR[cite: 1]
 # ==========================================
 current_user = _auth_current_user()
@@ -15114,7 +18132,7 @@ with st.sidebar:
     if show_culture_modules and not is_partners_page and st.session_state.get("cultura_selecionada") not in (None, "", "PARCEIROS"):
         render_cultura_ambiente_card(topo=False)
         ambiente_info = _cultura_ambiente_info()
-        if st.button(f"{ambiente_info['icone']} Ambiente {ambiente_info['nome']}", key="btn_ambiente_cultura_atual", use_container_width=True):
+        if st.button(f"{ambiente_info['icone']} {ambiente_info['nome']}", key="btn_ambiente_cultura_atual", use_container_width=True):
             st.session_state.cultura_selecionada = None
             st.session_state.pagina_ativa = "Checklist"
             app_rerun()
@@ -15154,6 +18172,9 @@ with st.sidebar:
             if _auth_menu_allowed("menu_ortomosaicos", current_user) and st.button("🛰️ Gerar Ortomosaicos", key="btn_orto"):
                 ir_para('Ortomosaicos')
 
+            if _auth_menu_allowed("menu_kml", current_user) and st.button("🧭 Marcador de KML", key="btn_marcador_kml"):
+                ir_para('MarcadorKML')
+
             # NOVO - Botão Análises de Fenotipagem controlado por permissão do usuário
             if _auth_allowed_phenotyping(current_user):
                 if st.button("📈 Análises de Fenotipagem", key="btn_visualizador"):
@@ -15174,7 +18195,6 @@ with st.sidebar:
             ir_para('Config')
 
     if st.button("🚪 Sair", key="btn_logout"):
-        _mark_tmg_page_transition("Login")
         st.session_state.logged_in = False
         st.session_state.auth_user = None
         st.session_state.cultura_selecionada = None
@@ -15247,12 +18267,12 @@ with main_container:
         chk_bytes, chk_name = _uploaded_ortho_bytes(chk_file)
 
         if chk_bytes:
-            chk_viewer_slot = st.empty()
-            # Atualizado Unpack para o spatial_meta
-            chk_b64, chk_dims, chk_err, chk_spatial = processar_ortofoto(chk_bytes, chk_name, viewer_slot=chk_viewer_slot, viewer_height=980, viewer_title="Visualizador de Ortofoto · Anotação de Parcelas")
+            with st.container():
+                # Atualizado Unpack para o spatial_meta
+                chk_b64, chk_dims, chk_err, chk_spatial = processar_ortofoto(chk_bytes, chk_name)
 
             if chk_err:
-                render_tmg_ortho_error_frame("Visualizador de Ortofoto · Anotação de Parcelas", f"Erro: {chk_err}", "Tente importar outra ortofoto.", 980, container=chk_viewer_slot)
+                st.error(f"Erro: {chk_err}")
             else:
                 cw, ch = chk_dims
                 chk_storage_id = json.dumps(_tv_hash_bytes(chk_bytes)[:32])
@@ -15520,6 +18540,30 @@ let activeCell = null;
 let activeNota = 0;
 
 const img = new Image();
+let drawQueued = false;
+let drawFrameId = 0;
+let assessmentDirty = true;
+
+function markAssessmentDirty() {{
+  assessmentDirty = true;
+}}
+
+function requestDraw() {{
+  if(drawQueued) return;
+  drawQueued = true;
+  drawFrameId = window.requestAnimationFrame(() => {{
+    drawQueued = false;
+    drawNow();
+  }});
+}}
+
+function drawImmediate() {{
+  if(drawQueued) {{
+    window.cancelAnimationFrame(drawFrameId);
+    drawQueued = false;
+  }}
+  drawNow();
+}}
 
 const notaBtns = document.getElementById('notaBtns');
 for(let n=1; n<=9; n++) {{
@@ -15685,6 +18729,7 @@ function saveActiveGrid(showMsg=false) {{
     rows: parseInt(inpRows.value)||1,
     cols: parseInt(inpCols.value)||1
   }};
+  markAssessmentDirty();
   updateGridSelect();
   persistGrids();
   if(showMsg) gridStatus.textContent = 'Grid salvo: ' + activeGridName + ' · todos continuam visíveis no visualizador';
@@ -15778,8 +18823,8 @@ function deleteActiveGrid() {{
   draw();
 }}
 
-function getExportGridRecords() {{
-  saveActiveGrid(false);
+function getExportGridRecords(saveCurrent=true) {{
+  if(saveCurrent) saveActiveGrid(false);
   return Object.keys(savedGrids).map(name => {{
     const rec = savedGrids[name] || {{}};
     return {{
@@ -15803,19 +18848,27 @@ function escHtml(value) {{
 function renderAssessmentPanel() {{
   if(!assessmentSummary) return;
   const rows = [];
-  getExportGridRecords().forEach(grid => {{
-    const R=parseInt(grid.rows)||1, C=parseInt(grid.cols)||1;
-    for(let r=0;r<R;r++) for(let c=0;c<C;c++) {{
-      const ann=(grid.annotations[r]||{{}})[c];
-      if(ann && ann.nota) rows.push({{
-        grid:grid.name,
+  Object.keys(savedGrids).forEach(name => {{
+    const rec = savedGrids[name] || {{}};
+    const anns = name === activeGridName ? annotations : (rec.annotations || {{}});
+    const gridName = name;
+    Object.keys(anns).forEach(rKey => {{
+      const r = parseInt(rKey);
+      if(!Number.isFinite(r)) return;
+      Object.keys(anns[rKey] || {{}}).forEach(cKey => {{
+        const c = parseInt(cKey);
+        if(!Number.isFinite(c)) return;
+        const ann = anns[rKey][cKey];
+        if(ann && ann.nota) rows.push({{
+        grid:gridName,
         tiro:c+1,
         disparo:r+1,
         parcela:'D'+(r+1)+' T'+(c+1),
         nota:ann.nota,
         obs:ann.obs || ''
+        }});
       }});
-    }}
+    }});
   }});
   if(rows.length===0) {{
     assessmentSummary.innerHTML = '<div class="assessment-empty">Nenhuma nota registrada ainda. Use Anotar Parcela ou Nota Rápida no visualizador.</div>';
@@ -15831,14 +18884,35 @@ function renderAssessmentPanel() {{
   assessmentSummary.innerHTML = html;
 }}
 
+function cellIsVisible(quad, margin=90) {{
+  if(!quad) return false;
+  const xs = [quad.tl.x, quad.tr.x, quad.br.x, quad.bl.x].map(x => ox + x * sc);
+  const ys = [quad.tl.y, quad.tr.y, quad.br.y, quad.bl.y].map(y => oy + y * sc);
+  return Math.max(...xs) >= -margin && Math.min(...xs) <= cv.width + margin &&
+         Math.max(...ys) >= -margin && Math.min(...ys) <= cv.height + margin;
+}}
+
+function drawImageViewport() {{
+  if(!imgW || !imgH) return;
+  const pad = 64 / Math.max(sc, 0.0001);
+  const sx = Math.max(0, (-ox / sc) - pad);
+  const sy = Math.max(0, (-oy / sc) - pad);
+  const sw = Math.min(imgW - sx, (cv.width / sc) + pad * 2);
+  const sh = Math.min(imgH - sy, (cv.height / sc) + pad * 2);
+  if(sw > 0 && sh > 0) ctx.drawImage(img, sx, sy, sw, sh, sx, sy, sw, sh);
+}}
+
 function drawGridRecord(gridName, rec, isActive) {{
-  const pts = isActive ? points : clonePoints(rec.points);
+  const pts = isActive ? points : (rec.points || []);
   if(!pts || pts.length===0) return;
 
   const showSummary = cbShowSummary.checked;
   const R=parseInt(isActive ? inpRows.value : rec.rows)||1;
   const C=parseInt(isActive ? inpCols.value : rec.cols)||1;
-  const anns = isActive ? annotations : cloneAnnotations(rec.annotations);
+  const totalCells = Math.max(1, R * C);
+  const drawAllLabels = showSummary && totalCells <= 1800;
+  const drawInactiveLabels = drawAllLabels && totalCells <= 900;
+  const anns = isActive ? annotations : (rec.annotations || {{}});
 
   function quadFor(r,c) {{
     if(pts.length < 4) return null;
@@ -15853,35 +18927,49 @@ function drawGridRecord(gridName, rec, isActive) {{
 
   if(pts.length===4) {{
     const p0=pts[0],p1=pts[1],p2=pts[2],p3=pts[3];
-    for(let r=0; r<R; r++) {{
-      for(let c=0; c<C; c++) {{
-        const ann = anns[r] && anns[r][c];
-        const quad=quadFor(r,c);
-        if(!quad) continue;
+    Object.keys(anns || {{}}).forEach(rKey => {{
+      const r = parseInt(rKey);
+      if(!Number.isFinite(r) || r < 0 || r >= R) return;
+      Object.keys(anns[rKey] || {{}}).forEach(cKey => {{
+        const c = parseInt(cKey);
+        if(!Number.isFinite(c) || c < 0 || c >= C) return;
+        const ann = anns[rKey][cKey];
+        if(!ann) return;
+        const quad = quadFor(r,c);
+        if(!cellIsVisible(quad)) return;
         const tl=quad.tl, tr=quad.tr, br=quad.br, bl=quad.bl;
-        if(ann) {{
-          const nota = ann.nota;
-          ctx.beginPath();
-          ctx.moveTo(tl.x,tl.y); ctx.lineTo(tr.x,tr.y);
-          ctx.lineTo(br.x,br.y); ctx.lineTo(bl.x,bl.y);
-          ctx.closePath();
-          ctx.fillStyle=getNotaFillColor(Number(nota)||1); ctx.fill();
-        }}
-        if(isActive && activeCell && activeCell.r===r && activeCell.c===c) {{
-          ctx.beginPath();
-          ctx.moveTo(tl.x,tl.y); ctx.lineTo(tr.x,tr.y);
-          ctx.lineTo(br.x,br.y); ctx.lineTo(bl.x,bl.y);
-          ctx.closePath();
-          ctx.fillStyle='rgba(255,140,0,0.20)'; ctx.fill();
-          ctx.save();
-          ctx.strokeStyle='rgba(255,210,0,0.98)';
-          ctx.lineWidth=3/sc;
-          ctx.shadowColor='rgba(255,210,0,0.65)'; ctx.shadowBlur=8/sc;
-          ctx.stroke(); ctx.restore();
-        }}
-        if(showSummary) {{
-          const idTextSize = Math.max(5, Math.min(40, parseFloat(inpIdTextSize.value)||12));
-          const noteTextSize = Math.max(5, Math.min(40, parseFloat(inpNoteTextSize.value)||10));
+        const nota = ann.nota;
+        ctx.beginPath();
+        ctx.moveTo(tl.x,tl.y); ctx.lineTo(tr.x,tr.y);
+        ctx.lineTo(br.x,br.y); ctx.lineTo(bl.x,bl.y);
+        ctx.closePath();
+        ctx.fillStyle=getNotaFillColor(Number(nota)||1); ctx.fill();
+      }});
+    }});
+    if(isActive && activeCell) {{
+      const quad = quadFor(activeCell.r, activeCell.c);
+      if(quad && cellIsVisible(quad)) {{
+        const tl=quad.tl, tr=quad.tr, br=quad.br, bl=quad.bl;
+        ctx.beginPath();
+        ctx.moveTo(tl.x,tl.y); ctx.lineTo(tr.x,tr.y);
+        ctx.lineTo(br.x,br.y); ctx.lineTo(bl.x,bl.y);
+        ctx.closePath();
+        ctx.fillStyle='rgba(255,140,0,0.20)'; ctx.fill();
+        ctx.save();
+        ctx.strokeStyle='rgba(255,210,0,0.98)';
+        ctx.lineWidth=3/sc;
+        ctx.shadowColor='rgba(255,210,0,0.65)'; ctx.shadowBlur=8/sc;
+        ctx.stroke(); ctx.restore();
+      }}
+    }}
+    if(drawAllLabels && (isActive || drawInactiveLabels)) {{
+      const idTextSize = Math.max(5, Math.min(40, parseFloat(inpIdTextSize.value)||12));
+      const noteTextSize = Math.max(5, Math.min(40, parseFloat(inpNoteTextSize.value)||10));
+      for(let r=0; r<R; r++) {{
+        for(let c=0; c<C; c++) {{
+          const ann = anns[r] && anns[r][c];
+          const quad=quadFor(r,c);
+          if(!cellIsVisible(quad, 40)) continue;
           const hasNota = ann && ann.nota;
           const obsTxt = hasNota ? resumoObs(ann.obs) : '';
           const lines = ['D'+(r+1)+' T'+(c+1)];
@@ -15902,6 +18990,42 @@ function drawGridRecord(gridName, rec, isActive) {{
           ctx.restore();
         }}
       }}
+    }} else if(showSummary && !isActive) {{
+      const quad = quadFor(0, 0);
+      if(quad && cellIsVisible(quad, 40)) {{
+        ctx.save();
+        ctx.globalAlpha = 0.86;
+        ctx.shadowColor='rgba(0,0,0,0.85)'; ctx.shadowBlur=4/sc;
+        ctx.fillStyle='#d7ecff';
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.font='bold '+(12/sc)+'px Arial';
+        ctx.fillText(gridName, quad.cx, quad.cy);
+        ctx.restore();
+      }}
+    }}
+    if(drawAllLabels && isActive === false) {{
+      // labels already rendered above for small inactive grids
+    }}
+    if(drawAllLabels === false && isActive) {{
+      Object.keys(anns || {{}}).forEach(rKey => {{
+        const r = parseInt(rKey);
+        if(!Number.isFinite(r) || r < 0 || r >= R) return;
+        Object.keys(anns[rKey] || {{}}).forEach(cKey => {{
+          const c = parseInt(cKey);
+          if(!Number.isFinite(c) || c < 0 || c >= C) return;
+          const ann = anns[rKey][cKey];
+          if(!ann || !ann.nota) return;
+          const quad=quadFor(r,c);
+          if(!cellIsVisible(quad, 40)) return;
+          ctx.save();
+          ctx.shadowColor='rgba(0,0,0,0.85)'; ctx.shadowBlur=4/sc;
+          ctx.fillStyle='#ffffff';
+          ctx.textAlign='center'; ctx.textBaseline='middle';
+          ctx.font='bold '+(Math.max(5, Math.min(40, parseFloat(inpNoteTextSize.value)||10))/sc)+'px Arial';
+          ctx.fillText('Nota: '+ann.nota, quad.cx, quad.cy);
+          ctx.restore();
+        }});
+      }});
     }}
     ctx.save();
     ctx.shadowColor=isActive ? 'rgba(0,160,255,0.6)' : 'rgba(255,140,0,0.45)';
@@ -15945,33 +19069,38 @@ function drawGridRecord(gridName, rec, isActive) {{
 
 function drawGrid() {{
   const activeRecord = {{
-    points: clonePoints(points),
-    annotations: cloneAnnotations(annotations),
+    points: points,
+    annotations: annotations,
     rows: parseInt(inpRows.value)||1,
     cols: parseInt(inpCols.value)||1
   }};
-  savedGrids[activeGridName] = activeRecord;
   const names = Object.keys(savedGrids);
   names.forEach(name => {{
     if(name !== activeGridName) drawGridRecord(name, savedGrids[name], false);
   }});
   drawGridRecord(activeGridName, activeRecord, true);
-  updateGridSelect();
 }}
 
 function resize() {{ cv.width=vc.clientWidth; cv.height=vc.clientHeight; if(imgW) draw(); }}
 
 function draw() {{
+  requestDraw();
+}}
+
+function drawNow() {{
   ctx.clearRect(0,0,cv.width,cv.height);
   ctx.save();
   ctx.translate(ox,oy); ctx.scale(sc,sc);
   ctx.imageSmoothingEnabled=sc<2; ctx.imageSmoothingQuality='high';
-  ctx.drawImage(img,0,0);
+  drawImageViewport();
   drawGrid();
   ctx.restore();
   zb.textContent=Math.round(sc*100)+'%';
   updatePopupPosition();
-  renderAssessmentPanel();
+  if(assessmentDirty) {{
+    renderAssessmentPanel();
+    assessmentDirty = false;
+  }}
 }}
 
 function fitScreen() {{
@@ -16025,6 +19154,7 @@ function setAnnotation(r,c,nota,obs) {{
     nota: nota,
     obs: obs !== undefined ? obs : (prev.obs || '')
   }};
+  markAssessmentDirty();
   saveActiveGrid(false);
 }}
 
@@ -16032,6 +19162,7 @@ function clearAnnotation(r,c) {{
   if(!annotations[r]) return;
   delete annotations[r][c];
   if(Object.keys(annotations[r]).length===0) delete annotations[r];
+  markAssessmentDirty();
   saveActiveGrid(false);
 }}
 
@@ -16169,6 +19300,7 @@ async function ensureChecklistExcelStyles() {{
 }}
 
 btnExport.onclick = async () => {{
+  saveActiveGrid(false);
   const nome = prompt('Digite o nome do arquivo Excel:', 'checklist_notas_parcelas');
   if(nome === null) return;
   const safeName = (nome.trim() || 'checklist_notas_parcelas')
@@ -16380,10 +19512,10 @@ btnQuickNote.onclick=()=>{{
   vc.style.cursor=quickNoteMode?'cell':'grab';
 }};
 
-btnClear.onclick=()=>{{ points=[]; annotations={{}}; closePopup(); saveActiveGrid(false); draw(); }};
+btnClear.onclick=()=>{{ points=[]; annotations={{}}; markAssessmentDirty(); closePopup(); saveActiveGrid(false); draw(); }};
 
-inpRows.addEventListener('input',()=>{{ saveActiveGrid(false); draw(); }});
-inpCols.addEventListener('input',()=>{{ saveActiveGrid(false); draw(); }});
+inpRows.addEventListener('input',()=>{{ markAssessmentDirty(); saveActiveGrid(false); draw(); }});
+inpCols.addEventListener('input',()=>{{ markAssessmentDirty(); saveActiveGrid(false); draw(); }});
 inpIdTextSize.addEventListener('input',draw);
 inpNoteTextSize.addEventListener('input',draw);
 cbShowSummary.addEventListener('change', draw);
@@ -16404,16 +19536,22 @@ updateGridSelect();
 </body>
 </html>
 """
-                render_tmg_ortho_viewer_component(chk_viewer_slot, chk_viewer, height=980, scrolling=True)
+                components.html(chk_viewer, height=980, scrolling=True)
 
         else:
-            render_tmg_ortho_empty_frame(
-                "Visualizador de Ortofoto · Anotação de Parcelas",
-                "Nenhuma ortofoto carregada",
-                "PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW",
-                "🗺️",
-                706,
-            )
+            st.markdown("""
+            <div style='height:706px;border:1px dashed #2e2e2e;border-radius:12px;background:#0d0d0d;
+                        display:flex;flex-direction:column;align-items:center;justify-content:center;
+                        gap:12px;color:#333;'>
+                <div style='font-size:3rem;'>🗺️</div>
+                <div style='font-size:0.9rem;letter-spacing:2px;text-transform:uppercase;'>
+                    Nenhuma ortofoto carregada
+                </div>
+                <div style='font-size:0.75rem;color:#2a2a2a;'>
+                    PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
     # ==========================================
     # GRID COM OPÇÕES DE EXPORTAÇÃO E SHAPEFILE[cite: 1]
@@ -16438,18 +19576,18 @@ updateGridSelect();
                 app_rerun()
 
         if orto_file or grid_prefill_available:
-            grid_viewer_slot = st.empty()
-            if orto_file:
-                file_bytes, orto_nome_exibicao = _uploaded_ortho_bytes(orto_file)
-            else:
-                file_bytes = Path(grid_prefill_path).read_bytes()
-                orto_nome_exibicao = grid_prefill_name or Path(grid_prefill_path).name
-            # Atualizado Unpack para obter Metadata Espacial para o SHP
-            b64, dims, err, spatial_meta = processar_ortofoto(file_bytes, orto_nome_exibicao, viewer_slot=grid_viewer_slot, viewer_height=720, viewer_title="Visualizador de Ortofoto")
-            st.session_state.spatial_meta = spatial_meta
+            with st.container():
+                if orto_file:
+                    file_bytes, orto_nome_exibicao = _uploaded_ortho_bytes(orto_file)
+                else:
+                    file_bytes = Path(grid_prefill_path).read_bytes()
+                    orto_nome_exibicao = grid_prefill_name or Path(grid_prefill_path).name
+                # Atualizado Unpack para obter Metadata Espacial para o SHP
+                b64, dims, err, spatial_meta = processar_ortofoto(file_bytes, orto_nome_exibicao)
+                st.session_state.spatial_meta = spatial_meta
 
             if err:
-                render_tmg_ortho_error_frame("Visualizador de Ortofoto", f"Erro ao processar imagem: {err}", "Tente importar outra ortofoto.", 720, container=grid_viewer_slot)
+                st.error(f"Erro ao processar imagem: {err}")
             else:
                 w, h = dims
                 st.markdown(
@@ -16917,12 +20055,6 @@ function drawGrid() {{
     }});
 }}
 
-function resize() {{
-  cv.width  = vc.clientWidth;
-  cv.height = vc.clientHeight;
-  if (imgW) draw();
-}}
-
 function draw() {{
   ctx.clearRect(0, 0, cv.width, cv.height);
   ctx.save();
@@ -16934,6 +20066,12 @@ function draw() {{
   drawGrid();
   ctx.restore();
   zb.textContent = Math.round(sc * 100) + '%';
+}}
+
+function resize() {{
+  cv.width  = vc.clientWidth;
+  cv.height = vc.clientHeight;
+  if (imgW) draw();
 }}
 
 function fitScreen() {{
@@ -17104,7 +20242,7 @@ window.addEventListener('resize', resize);
 </body>
 </html>
 """
-                render_tmg_ortho_viewer_component(grid_viewer_slot, viewer_html, height=720, scrolling=False)
+                components.html(viewer_html, height=720, scrolling=False)
 
                 # ---------------------------------------------------------
                 # ADIÇÃO: MÓDULO ROBUSTO DE EXPORTAÇÃO SHAPEFILE (GEOPANDAS)
@@ -17214,13 +20352,28 @@ window.addEventListener('resize', resize);
                     st.info("Aguardando desenho do Grid e clique em Exportar Shapefile no visualizador...")
 
         else:
-            render_tmg_ortho_empty_frame(
-                "Visualizador de Ortofoto",
-                "Nenhuma ortofoto carregada",
-                "PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW",
-                "🗺️",
-                706,
-            )
+            st.markdown("""
+            <div style='
+                height: 706px;
+                border: 1px dashed #2e2e2e;
+                border-radius: 12px;
+                background: #0d0d0d;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                gap: 12px;
+                color: #333;
+            '>
+                <div style='font-size:3rem;'>🗺️</div>
+                <div style='font-size:0.9rem;letter-spacing:2px;text-transform:uppercase;'>
+                    Nenhuma ortofoto carregada
+                </div>
+                <div style='font-size:0.75rem;color:#2a2a2a;'>
+                    PNG · JPG · TIF · GeoTIFF · JP2 · IMG · ECW
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
     # ==========================================
     # ANALISE DE MARCACAO DE GRID
@@ -17463,6 +20616,29 @@ window.addEventListener('resize', resize);
     elif st.session_state.pagina_ativa == 'Ortomosaicos':
         _render_orthomosaic_generator()
 
+    # MARCADOR DE KML
+    elif st.session_state.pagina_ativa == 'MarcadorKML':
+        render_marcador_kml()
+
+    # CRIADOR DE MAPA
+    elif st.session_state.pagina_ativa == 'CriadorMapa':
+        if HAS_MAP_CREATOR_MODULE and render_map_creator_module is not None:
+            logo_src = ""
+            try:
+                if LOGO_PATH.exists():
+                    logo_src = _img_to_base64_css(LOGO_PATH)
+            except Exception:
+                logo_src = ""
+            render_map_creator_module(
+                theme_primary=THEME_PRIMARY_COLOR,
+                theme_soft=THEME_PRIMARY_SOFT,
+                theme_rgb=THEME_PRIMARY_RGB,
+                logo_src=logo_src,
+                system_name="TMG Sistema de Análise",
+            )
+        else:
+            st.error(f"Não foi possível carregar o Criador de Mapa: {MAP_CREATOR_MODULE_ERROR}")
+
     # ==========================================
     # NOVO - VISUALIZADOR DE RESULTADOS
     # ==========================================
@@ -17499,12 +20675,9 @@ window.addEventListener('resize', resize);
         for col, (_, label, sub_page, button_key) in zip(vcols, visible_phenotyping_buttons):
             with col:
                 if st.button(label, key=button_key, use_container_width=True):
-                    _mark_tmg_visualizador_transition(sub_page)
                     st.session_state.visualizador_sub = sub_page
-                    app_rerun()
 
         st.markdown("---")
-        _tmg_visualizador_transition_slot = render_tmg_visualizador_transition_loading()
 
         # NOVO - Sub-visualizações
         if st.session_state.visualizador_sub == "Contagem":
@@ -17524,11 +20697,11 @@ window.addEventListener('resize', resize);
             cnt_bytes, cnt_name = _uploaded_ortho_bytes(cnt_file)
 
             if cnt_bytes:
-                cnt_viewer_slot = st.empty()
-                cnt_b64, cnt_dims, cnt_err, cnt_spatial = processar_ortofoto(cnt_bytes, cnt_name, viewer_slot=cnt_viewer_slot, viewer_height=720, viewer_title="Contagem de Plantas por Parcela")
+                with st.container():
+                    cnt_b64, cnt_dims, cnt_err, cnt_spatial = processar_ortofoto(cnt_bytes, cnt_name, preview_profile="contagem")
 
                 if cnt_err:
-                    render_tmg_ortho_error_frame("Contagem de Plantas por Parcela", f"Erro: {cnt_err}", "Tente importar outra ortofoto.", 720, container=cnt_viewer_slot)
+                    st.error(f"Erro: {cnt_err}")
                 else:
                     cw_cnt, ch_cnt = cnt_dims
                     cnt_storage_id = json.dumps(_tv_hash_bytes(cnt_bytes)[:32])
@@ -17735,7 +20908,7 @@ window.addEventListener('resize', resize);
 const IMG_B64 = '{cnt_b64}';
 const vc    = document.getElementById('vc');
 const cv    = document.getElementById('cv');
-const ctx   = cv.getContext('2d', {{ alpha:false }});
+const ctx   = cv.getContext('2d', {{ alpha:false, desynchronized:true }});
 const zb    = document.getElementById('zbadge');
 const coordEl = document.getElementById('coord');
 
@@ -17775,7 +20948,7 @@ let imgW = 0, imgH = 0;
 let viewW = 0, viewH = 0, canvasDpr = 1;
 let redrawPending = false;
 let imageNeedsRedraw = true;
-const MAX_CANVAS_PIXELS = 2600000;
+const MAX_CANVAS_PIXELS = 3600000;
 
 let plantCenters = [];
 let manualMarks = [];
@@ -17783,17 +20956,22 @@ let parcelCounts = {{}};
 let savedGrids = {{}};
 let activeGridName = 'Grid 1';
 let suppressPersist = false;
+let countingBusy = false;
+
+function nextFrame() {{
+  return new Promise(resolve => requestAnimationFrame(resolve));
+}}
 
 const img = new Image();
 img.decoding = 'async';
 const bgCv = document.createElement('canvas');
-const bgCtx = bgCv.getContext('2d', {{ alpha:false }});
+const bgCtx = bgCv.getContext('2d', {{ alpha:false, desynchronized:true }});
 
 function resizeCanvasIfNeeded() {{
   const rect = vc.getBoundingClientRect();
   const nextW = Math.max(1, Math.floor(rect.width || vc.clientWidth || 1));
   const nextH = Math.max(1, Math.floor(rect.height || vc.clientHeight || 1));
-  let nextDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  let nextDpr = Math.min(window.devicePixelRatio || 1, 1.75);
   const targetPixels = nextW * nextH * nextDpr * nextDpr;
   if (targetPixels > MAX_CANVAS_PIXELS) {{
     nextDpr = Math.max(1, Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, nextW * nextH)));
@@ -18170,142 +21348,179 @@ function exportContagemExcel(exportAll=false) {{
   XLSX.writeFile(wb, exportAll ? 'contagem_plantas_todos_grids.xlsx' : 'contagem_plantas_' + safeFilePart(activeGridName) + '.xlsx', {{bookType:'xlsx',cellStyles:true}});
 }}
 
-function countPlantsInGrid() {{
+async function countPlantsInGrid() {{
   if (points.length < 4) {{
     alert('Marque os 4 cantos do grid primeiro!');
     return;
   }}
+  if (countingBusy) return;
+  countingBusy = true;
+  btnCountPlants.disabled = true;
+  btnCountAuto.disabled = true;
+  btnCountPlants.style.opacity = '0.55';
+  btnCountAuto.style.opacity = '0.55';
+  countPanel.style.display = 'block';
+  totalCountEl.textContent = '...';
+  countInfoEl.textContent = 'Preparando recorte da ortofoto...';
+  await nextFrame();
 
-  const R = parseInt(inpRows.value) || 1;
-  const C = parseInt(inpCols.value) || 1;
-  const p0=points[0], p1=points[1], p2=points[2], p3=points[3];
+  try {{
+    const R = parseInt(inpRows.value) || 1;
+    const C = parseInt(inpCols.value) || 1;
+    const p0=points[0], p1=points[1], p2=points[2], p3=points[3];
 
-  // Bounding box do polígono
-  const xs = points.map(p=>p.x), ys = points.map(p=>p.y);
-  const minX = Math.max(0, Math.floor(Math.min(...xs)));
-  const maxX = Math.min(imgW, Math.ceil(Math.max(...xs)));
-  const minY = Math.max(0, Math.floor(Math.min(...ys)));
-  const maxY = Math.min(imgH, Math.ceil(Math.max(...ys)));
-  const w = maxX - minX;
-  const h = maxY - minY;
-  if (w <= 0 || h <= 0) {{
-    alert('A área do grid está fora da ortofoto.');
-    return;
-  }}
+    // Bounding box do polígono
+    const xs = points.map(p=>p.x), ys = points.map(p=>p.y);
+    const minX = Math.max(0, Math.floor(Math.min(...xs)));
+    const maxX = Math.min(imgW, Math.ceil(Math.max(...xs)));
+    const minY = Math.max(0, Math.floor(Math.min(...ys)));
+    const maxY = Math.min(imgH, Math.ceil(Math.max(...ys)));
+    const w = maxX - minX;
+    const h = maxY - minY;
+    if (w <= 0 || h <= 0) {{
+      alert('A área do grid está fora da ortofoto.');
+      return;
+    }}
 
-  // Extrair somente a região do grid, evitando travar com ortofotos grandes.
-  const MAX_ANALYSIS_PIXELS = 8000000;
-  const processScale = Math.min(1, Math.sqrt(MAX_ANALYSIS_PIXELS / Math.max(1, w * h)));
-  const scanW = Math.max(1, Math.round(w * processScale));
-  const scanH = Math.max(1, Math.round(h * processScale));
-  const tempCv = document.createElement('canvas');
-  tempCv.width = scanW; tempCv.height = scanH;
-  const tempCtx = tempCv.getContext('2d', {{ willReadFrequently:true }});
-  tempCtx.imageSmoothingEnabled = processScale < 1;
-  tempCtx.imageSmoothingQuality = 'high';
-  tempCtx.drawImage(img, minX, minY, w, h, 0, 0, scanW, scanH);
+    // Extrair somente a região do grid, evitando travar com ortofotos grandes.
+    const MAX_ANALYSIS_PIXELS = 4200000;
+    const processScale = Math.min(1, Math.sqrt(MAX_ANALYSIS_PIXELS / Math.max(1, w * h)));
+    const scanW = Math.max(1, Math.round(w * processScale));
+    const scanH = Math.max(1, Math.round(h * processScale));
+    const tempCv = document.createElement('canvas');
+    tempCv.width = scanW; tempCv.height = scanH;
+    const tempCtx = tempCv.getContext('2d', {{ willReadFrequently:true }});
+    tempCtx.imageSmoothingEnabled = processScale < 1;
+    tempCtx.imageSmoothingQuality = 'high';
+    tempCtx.drawImage(img, minX, minY, w, h, 0, 0, scanW, scanH);
+    countInfoEl.textContent = 'Analisando em alta qualidade (' + scanW + '×' + scanH + ' px)...';
+    await nextFrame();
 
-  const imgData = tempCtx.getImageData(0, 0, scanW, scanH);
-  const data = imgData.data;
+    const imgData = tempCtx.getImageData(0, 0, scanW, scanH);
+    const data = imgData.data;
 
-  plantCenters = [];
+    plantCenters = [];
 
-  // Detecção HSV simplificada (verde)
-  // Converter RGB para HSV e detectar plantas
-  const visited = new Uint8Array(scanW * scanH);
-  const minArea = Math.max(8, Math.round(25 * processScale * processScale));
-  const maxFloodArea = Math.max(minArea + 1, Math.round(2000 * processScale * processScale));
+    // Detecção HSV simplificada (verde), em lotes, para manter o visualizador responsivo.
+    const totalPixels = scanW * scanH;
+    const visited = new Uint8Array(totalPixels);
+    const minArea = Math.max(8, Math.round(25 * processScale * processScale));
+    const maxFloodArea = Math.max(minArea + 1, Math.round(1800 * processScale * processScale));
+    const yieldEveryRows = Math.max(18, Math.floor(scanH / 28));
 
-  for (let y = 0; y < scanH; y++) {{
-    for (let x = 0; x < scanW; x++) {{
-      const idx = (y * scanW + x) * 4;
-      const r2 = data[idx], g = data[idx+1], b = data[idx+2];
-
-      // RGB para HSV
-      const max2 = Math.max(r2, g, b), min2 = Math.min(r2, g, b);
-      const diff = max2 - min2;
-      let hue = 0, sat = 0, val = max2;
-      if (diff > 0) {{
-        if (max2 === r2) hue = 60 * (((g - b) / diff) % 6);
-        else if (max2 === g) hue = 60 * ((b - r2) / diff + 2);
-        else hue = 60 * ((r2 - g) / diff + 4);
-        if (hue < 0) hue += 360;
-        sat = (diff / max2) * 255;
+    for (let y = 0; y < scanH; y++) {{
+      if (y % yieldEveryRows === 0) {{
+        countInfoEl.textContent = 'Detectando plantas... ' + Math.round((y / Math.max(1, scanH)) * 100) + '%';
+        await nextFrame();
       }}
-      val = val;
-      hue = hue / 2; // 0-180 range like OpenCV
+      for (let x = 0; x < scanW; x++) {{
+        const pixelPos = y * scanW + x;
+        if (visited[pixelPos]) continue;
+        const idx = pixelPos * 4;
+        const r2 = data[idx], g = data[idx+1], b = data[idx+2];
 
-      // Filtro verde (H:30-90, S:40-255, V:40-255)
-      if (hue >= 30 && hue <= 90 && sat >= 40 && val >= 40) {{
-        const absX = minX + x / processScale, absY = minY + y / processScale;
-        if (pointInPolygon(absX, absY, points) && !visited[y * scanW + x]) {{
-          // Flood-fill simples para agrupar pixels conectados
-          let area = 0, sumX = 0, sumY = 0;
-          const stack = [[x, y]];
-          while (stack.length > 0 && area < maxFloodArea) {{
-            const [sx, sy] = stack.pop();
-            if (sx < 0 || sx >= scanW || sy < 0 || sy >= scanH) continue;
-            if (visited[sy * scanW + sx]) continue;
-            const si = (sy * scanW + sx) * 4;
-            const sr = data[si], sg = data[si+1], sb = data[si+2];
-            const smax = Math.max(sr,sg,sb), smin = Math.min(sr,sg,sb);
-            const sdiff = smax - smin;
-            let sh = 0, ss = 0;
-            if (sdiff > 0) {{
-              if (smax === sr) sh = 60*(((sg-sb)/sdiff)%6);
-              else if (smax === sg) sh = 60*((sb-sr)/sdiff+2);
-              else sh = 60*((sr-sg)/sdiff+4);
-              if (sh < 0) sh += 360;
-              ss = (sdiff/smax)*255;
+        const max2 = Math.max(r2, g, b), min2 = Math.min(r2, g, b);
+        const diff = max2 - min2;
+        let hue = 0, sat = 0, val = max2;
+        if (diff > 0) {{
+          if (max2 === r2) hue = 60 * (((g - b) / diff) % 6);
+          else if (max2 === g) hue = 60 * ((b - r2) / diff + 2);
+          else hue = 60 * ((r2 - g) / diff + 4);
+          if (hue < 0) hue += 360;
+          sat = (diff / max2) * 255;
+        }}
+        hue = hue / 2;
+
+        if (hue >= 30 && hue <= 90 && sat >= 40 && val >= 40) {{
+          const absX = minX + x / processScale, absY = minY + y / processScale;
+          if (pointInPolygon(absX, absY, points)) {{
+            let area = 0, sumX = 0, sumY = 0;
+            const stack = [pixelPos];
+            while (stack.length > 0 && area < maxFloodArea) {{
+              const pos = stack.pop();
+              if (pos < 0 || pos >= totalPixels) continue;
+              if (visited[pos]) continue;
+              visited[pos] = 1;
+              const sx = pos % scanW;
+              const sy = (pos / scanW) | 0;
+              const si = pos * 4;
+              const sr = data[si], sg = data[si+1], sb = data[si+2];
+              const smax = Math.max(sr,sg,sb), smin = Math.min(sr,sg,sb);
+              const sdiff = smax - smin;
+              let sh = 0, ss = 0;
+              if (sdiff > 0) {{
+                if (smax === sr) sh = 60*(((sg-sb)/sdiff)%6);
+                else if (smax === sg) sh = 60*((sb-sr)/sdiff+2);
+                else sh = 60*((sr-sg)/sdiff+4);
+                if (sh < 0) sh += 360;
+                ss = (sdiff/smax)*255;
+              }}
+              sh = sh/2;
+              if (sh < 30 || sh > 90 || ss < 40 || smax < 40) continue;
+              area++; sumX += sx; sumY += sy;
+              if (sx + 1 < scanW) stack.push(pos + 1);
+              if (sx > 0) stack.push(pos - 1);
+              if (sy + 1 < scanH) stack.push(pos + scanW);
+              if (sy > 0) stack.push(pos - scanW);
             }}
-            sh = sh/2;
-            if (sh < 30 || sh > 90 || ss < 40 || smax < 40) continue;
-            visited[sy * scanW + sx] = 1;
-            area++; sumX += sx; sumY += sy;
-            stack.push([sx+1,sy],[sx-1,sy],[sx,sy+1],[sx,sy-1]);
-          }}
-          if (area >= minArea) {{
-            plantCenters.push({{ x: Math.round(minX + (sumX/area) / processScale), y: Math.round(minY + (sumY/area) / processScale) }});
+            if (area >= minArea) {{
+              plantCenters.push({{ x: Math.round(minX + (sumX/area) / processScale), y: Math.round(minY + (sumY/area) / processScale) }});
+            }}
+          }} else {{
+            visited[pixelPos] = 1;
           }}
         }}
       }}
     }}
-  }}
 
-  // Adicionar marcas manuais que estão dentro do polígono
-  for (const m of manualMarks) {{
-    if (pointInPolygon(m.x, m.y, points)) {{
-      plantCenters.push(m);
-    }}
-  }}
+    countInfoEl.textContent = 'Somando plantas por parcela...';
+    await nextFrame();
 
-  // Contar por parcela
-  parcelCounts = {{}};
-  for (let r2 = 0; r2 < R; r2++) {{
-    for (let c = 0; c < C; c++) {{
-      const u0=c/C, u1=(c+1)/C, v0=r2/R, v1=(r2+1)/R;
-      const tl=bilerp(p0,p1,p2,p3,u0,v0);
-      const tr=bilerp(p0,p1,p2,p3,u1,v0);
-      const br=bilerp(p0,p1,p2,p3,u1,v1);
-      const bl=bilerp(p0,p1,p2,p3,u0,v1);
-      const poly = [tl, tr, br, bl];
-      let cnt = 0;
-      for (const p of plantCenters) {{
-        if (pointInPolygon(p.x, p.y, poly)) cnt++;
+    // Adicionar marcas manuais que estão dentro do polígono
+    for (const m of manualMarks) {{
+      if (pointInPolygon(m.x, m.y, points)) {{
+        plantCenters.push(m);
       }}
-      const dispLabel = R - r2;
-      const tiroLabel = C - c;
-      parcelCounts[dispLabel + '_' + tiroLabel] = cnt;
     }}
+
+    // Contar por parcela
+    parcelCounts = {{}};
+    for (let r2 = 0; r2 < R; r2++) {{
+      for (let c = 0; c < C; c++) {{
+        const u0=c/C, u1=(c+1)/C, v0=r2/R, v1=(r2+1)/R;
+        const tl=bilerp(p0,p1,p2,p3,u0,v0);
+        const tr=bilerp(p0,p1,p2,p3,u1,v0);
+        const br=bilerp(p0,p1,p2,p3,u1,v1);
+        const bl=bilerp(p0,p1,p2,p3,u0,v1);
+        const poly = [tl, tr, br, bl];
+        let cnt = 0;
+        for (const p of plantCenters) {{
+          if (pointInPolygon(p.x, p.y, poly)) cnt++;
+        }}
+        const dispLabel = R - r2;
+        const tiroLabel = C - c;
+        parcelCounts[dispLabel + '_' + tiroLabel] = cnt;
+      }}
+    }}
+
+    // Atualizar painel
+    countPanel.style.display = 'block';
+    totalCountEl.textContent = plantCenters.length;
+    countInfoEl.textContent = 'Grid ' + R + '×' + C + ' | Dentro da área marcada';
+
+    requestDraw();
+    saveActiveGrid(false);
+  }} catch(err) {{
+    console.error('Erro na contagem automática:', err);
+    alert('Não foi possível concluir a contagem automática. Tente reduzir a área do grid ou usar marcação manual.');
+    countInfoEl.textContent = 'Contagem interrompida.';
+  }} finally {{
+    countingBusy = false;
+    btnCountPlants.disabled = false;
+    btnCountAuto.disabled = false;
+    btnCountPlants.style.opacity = '1';
+    btnCountAuto.style.opacity = '1';
   }}
-
-  // Atualizar painel
-  countPanel.style.display = 'block';
-  totalCountEl.textContent = plantCenters.length;
-  countInfoEl.textContent = 'Grid ' + R + '×' + C + ' | Dentro da área marcada';
-
-  requestDraw();
-  saveActiveGrid(false);
 }}
 
 function drawAll() {{
@@ -18682,30 +21897,25 @@ new ResizeObserver(() => {{
 </body>
 </html>
 """
-                    render_tmg_ortho_viewer_component(cnt_viewer_slot, cnt_viewer, height=720, scrolling=False)
+                    components.html(cnt_viewer, height=720, scrolling=False)
 
             else:
-                render_tmg_ortho_empty_frame(
-                    "Contagem de Plantas por Parcela",
-                    "Carregue uma ortofoto para iniciar a contagem",
-                    "Marque 4 pontos do grid → Clique em Contar → Exporte CSV",
-                    "🌱",
-                    706,
-                )
+                st.markdown("""
+                <div style='height:706px;border:1px dashed #2e2e2e;border-radius:12px;background:#0d0d0d;
+                            display:flex;flex-direction:column;align-items:center;justify-content:center;
+                            gap:12px;color:#333;'>
+                    <div style='font-size:3rem;'>🌱</div>
+                    <div style='font-size:0.85rem;letter-spacing:2px;text-transform:uppercase;color:#555;'>
+                        Carregue uma ortofoto para iniciar a contagem
+                    </div>
+                    <div style='font-size:0.75rem;color:#444;'>
+                        Marque 4 pontos do grid → Clique em Contar → Exporte CSV
+                    </div>
+                </div>""", unsafe_allow_html=True)
             # FIM NOVO - MÓDULO CONTAGEM DE PLANTAS
 
         elif st.session_state.visualizador_sub == "Maturação":
-            st.markdown("""
-            <div style='background:#1e1e1e;border:1px solid #333;border-radius:15px;padding:30px;text-align:center;'>
-                <div style='font-size:3rem;margin-bottom:12px;'>🌱</div>
-                <div style='color:#ff8c00;font-weight:700;font-size:1.2rem;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;'>
-                    Maturação
-                </div>
-                <div style='color:#666;font-size:0.85rem;'>
-                    Módulo de análise de maturação por parcela.<br>
-                    Funcionalidade em desenvolvimento — dados serão exibidos aqui.
-                </div>
-            </div>""", unsafe_allow_html=True)
+            render_maturacao_temporal_soja()
 
         elif st.session_state.visualizador_sub == "Pendoamento":
             # O pendoamento usa somente o seletor/visualizador único de até 10 ortofotos abaixo.
@@ -18713,11 +21923,11 @@ new ResizeObserver(() => {{
             pend_bytes, pend_name = _uploaded_ortho_bytes(pend_file)
 
             if pend_bytes:
-                pend_viewer_slot = st.empty()
-                pend_b64, pend_dims, pend_err, pend_spatial = processar_ortofoto(pend_bytes, pend_name, viewer_slot=pend_viewer_slot, viewer_height=740, viewer_title="Pendoamento")
+                with st.container():
+                    pend_b64, pend_dims, pend_err, pend_spatial = processar_ortofoto(pend_bytes, pend_name)
 
                 if pend_err:
-                    render_tmg_ortho_error_frame("Pendoamento", f"Erro: {pend_err}", "Tente importar outra ortofoto.", 740, container=pend_viewer_slot)
+                    st.error(f"Erro: {pend_err}")
                 else:
                     pw, ph = pend_dims
                     st.markdown(
@@ -19632,7 +22842,7 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                         .replace("__PEND_B64__", pend_b64)
                         .replace("__PEND_IMAGE_NAME__", json.dumps(pend_file.name, ensure_ascii=False))
                     )
-                    render_tmg_ortho_viewer_component(pend_viewer_slot, pend_viewer, height=740, scrolling=False)
+                    components.html(pend_viewer, height=740, scrolling=False)
 
             if False:
                 st.markdown("""
@@ -19997,68 +23207,68 @@ new ResizeObserver(()=>drawAll()).observe(vc);
                 if "pend_yolo_apply_training" not in st.session_state:
                     st.session_state["pend_yolo_apply_training"] = bool(yolo_counts_for_viewer.get("total_images", 0))
                 apply_training_enabled = bool(st.session_state.get("pend_yolo_apply_training", False))
-                cron_viewer_slot = st.empty()
-                total_cron_entries = max(1, len(cron_entries))
-                for idx_cron, item in enumerate(cron_entries, start=1):
-                    cron_name = item["name"]
-                    try:
-                        raw = item["raw"]
-                        b64, dims, err, spatial = processar_ortofoto(raw, cron_name, viewer_slot=cron_viewer_slot, viewer_height=870, viewer_title="Pendoamento")
-                        if err:
-                            cron_errors.append(f"{cron_name}: {err}")
-                            continue
+                with st.container():
+                    total_cron_entries = max(1, len(cron_entries))
+                    for idx_cron, item in enumerate(cron_entries, start=1):
+                        cron_name = item["name"]
                         try:
-                            detector_signature = f"{assinatura_modelo_yolo_pendao()}|{assinatura_referencias_treino_yolo()}|apply:{int(apply_training_enabled)}"
-                            pendao_result = preparar_deteccoes_pendoamento_hibrido(raw, cron_name, tuple(dims), detector_signature, apply_training_enabled)
-                            pendao_detections = pendao_result.get("detections", [])
-                            pendao_training_detections = pendao_result.get("training_detections", [])
-                            pendao_status = pendao_result.get("status", "")
-                            pendao_mode = pendao_result.get("mode", "OpenCV parametrizado TMG")
-                            pendao_counts = pendao_result.get("counts", {})
-                            pendao_training_status = pendao_result.get("training_status", "")
-                            pendao_training_counts = pendao_result.get("training_counts", {})
-                            pendao_backend_ready = bool(pendao_result.get("backend_ready", True))
-                            if pendao_status and any(token in pendao_status.lower() for token in ("não instalado", "nao instalado", "falhou", "instale opencv-python")):
+                            raw = item["raw"]
+                            b64, dims, err, spatial = processar_ortofoto(raw, cron_name)
+                            if err:
+                                cron_errors.append(f"{cron_name}: {err}")
+                                continue
+                            try:
+                                detector_signature = f"{assinatura_modelo_yolo_pendao()}|{assinatura_referencias_treino_yolo()}|apply:{int(apply_training_enabled)}"
+                                pendao_result = preparar_deteccoes_pendoamento_hibrido(raw, cron_name, tuple(dims), detector_signature, apply_training_enabled)
+                                pendao_detections = pendao_result.get("detections", [])
+                                pendao_training_detections = pendao_result.get("training_detections", [])
+                                pendao_status = pendao_result.get("status", "")
+                                pendao_mode = pendao_result.get("mode", "OpenCV parametrizado TMG")
+                                pendao_counts = pendao_result.get("counts", {})
+                                pendao_training_status = pendao_result.get("training_status", "")
+                                pendao_training_counts = pendao_result.get("training_counts", {})
+                                pendao_backend_ready = bool(pendao_result.get("backend_ready", True))
+                                if pendao_status and any(token in pendao_status.lower() for token in ("não instalado", "nao instalado", "falhou", "instale opencv-python")):
+                                    cron_errors.append(f"{cron_name}: {pendao_status}")
+                            except Exception as det_exc:
+                                pendao_detections = []
+                                pendao_training_detections = []
+                                pendao_status = f"OpenCV indisponível ({det_exc}). Instale opencv-python."
+                                pendao_mode = "OpenCV indisponível"
+                                pendao_counts = {}
+                                pendao_training_status = ""
+                                pendao_training_counts = {}
+                                pendao_backend_ready = False
                                 cron_errors.append(f"{cron_name}: {pendao_status}")
-                        except Exception as det_exc:
-                            pendao_detections = []
-                            pendao_training_detections = []
-                            pendao_status = f"OpenCV indisponível ({det_exc}). Instale opencv-python."
-                            pendao_mode = "OpenCV indisponível"
-                            pendao_counts = {}
-                            pendao_training_status = ""
-                            pendao_training_counts = {}
-                            pendao_backend_ready = False
-                            cron_errors.append(f"{cron_name}: {pendao_status}")
-                        orig_width = int(spatial.get("orig_width", dims[0]) or dims[0]) if spatial else int(dims[0])
-                        orig_height = int(spatial.get("orig_height", dims[1]) or dims[1]) if spatial else int(dims[1])
-                        training_marks = marcas_treinamento_yolo_preview(
-                            cron_name,
-                            item["date"],
-                            tuple(dims),
-                            (orig_width, orig_height),
-                        )
-                        cron_orthos.append({
-                            "order": int(item["idx"]),
-                            "name": cron_name,
-                            "date": item["date"],
-                            "b64": b64,
-                            "width": int(dims[0]),
-                            "height": int(dims[1]),
-                            "advanced_detections": pendao_detections,
-                            "training_detections": pendao_training_detections,
-                            "detector_status": pendao_status,
-                            "detector_mode": pendao_mode,
-                            "detector_counts": pendao_counts,
-                            "training_status": pendao_training_status,
-                            "training_counts": pendao_training_counts,
-                            "backend_ready": pendao_backend_ready,
-                            "training_marks": training_marks,
-                            "orig_width": orig_width,
-                            "orig_height": orig_height,
-                        })
-                    except Exception as exc:
-                        cron_errors.append(f"{cron_name}: {exc}")
+                            orig_width = int(spatial.get("orig_width", dims[0]) or dims[0]) if spatial else int(dims[0])
+                            orig_height = int(spatial.get("orig_height", dims[1]) or dims[1]) if spatial else int(dims[1])
+                            training_marks = marcas_treinamento_yolo_preview(
+                                cron_name,
+                                item["date"],
+                                tuple(dims),
+                                (orig_width, orig_height),
+                            )
+                            cron_orthos.append({
+                                "order": int(item["idx"]),
+                                "name": cron_name,
+                                "date": item["date"],
+                                "b64": b64,
+                                "width": int(dims[0]),
+                                "height": int(dims[1]),
+                                "advanced_detections": pendao_detections,
+                                "training_detections": pendao_training_detections,
+                                "detector_status": pendao_status,
+                                "detector_mode": pendao_mode,
+                                "detector_counts": pendao_counts,
+                                "training_status": pendao_training_status,
+                                "training_counts": pendao_training_counts,
+                                "backend_ready": pendao_backend_ready,
+                                "training_marks": training_marks,
+                                "orig_width": orig_width,
+                                "orig_height": orig_height,
+                            })
+                        except Exception as exc:
+                            cron_errors.append(f"{cron_name}: {exc}")
 
                 for message in cron_errors:
                     st.warning(message)
@@ -22182,7 +25392,7 @@ new ResizeObserver(() => drawAll()).observe(viewer);
                         .replace("__DEPLOY_FILL_ACTIVE__", DEPLOY_BAR_THEME.get("fill_active", "linear-gradient(90deg,#00e5ff 0%,#0E3A70 48%,#00ff9d 100%)"))
                         .replace("__DEPLOY_FILL_SHADOW__", DEPLOY_BAR_THEME.get("fill_shadow", "inset 0 1px 0 rgba(255,255,255,.46), 0 0 16px rgba(0,229,255,.56), 0 0 22px rgba(0,255,157,.22)"))
                     )
-                    render_tmg_ortho_viewer_component(cron_viewer_slot, cron_html, height=870, scrolling=False)
+                    components.html(cron_html, height=870, scrolling=False)
             else:
                 empty_cards = []
                 for slot_idx in range(10):
@@ -22224,11 +25434,11 @@ new ResizeObserver(() => drawAll()).observe(viewer);
             qual_bytes, qual_name = _uploaded_ortho_bytes(qual_file)
 
             if qual_bytes:
-                qual_viewer_slot = st.empty()
-                qual_b64, qual_dims, qual_err, qual_spatial = processar_ortofoto(qual_bytes, qual_name, viewer_slot=qual_viewer_slot, viewer_height=740, viewer_title="Qualidade de Parcelas")
+                with st.container():
+                    qual_b64, qual_dims, qual_err, qual_spatial = processar_ortofoto(qual_bytes, qual_name)
 
                 if qual_err:
-                    render_tmg_ortho_error_frame("Qualidade de Parcelas", f"Erro: {qual_err}", "Tente importar outra ortofoto.", 740, container=qual_viewer_slot)
+                    st.error(f"Erro: {qual_err}")
                 else:
                     qw, qh = qual_dims
                     st.markdown(
@@ -24446,16 +27656,21 @@ new ResizeObserver(()=>drawAll()).observe(vc);
 </body>
 </html>
 """
-                    render_tmg_ortho_viewer_component(qual_viewer_slot, qual_viewer, height=740, scrolling=False)
+                    components.html(qual_viewer, height=740, scrolling=False)
 
             else:
-                render_tmg_ortho_empty_frame(
-                    "Qualidade de Parcelas",
-                    "Carregue uma ortofoto para análise de qualidade",
-                    "Marque o grid → Detecte Falhas → Exporte relatório",
-                    "✅",
-                    740,
-                )
+                st.markdown("""
+                <div style='height:740px;border:1px dashed #2e2e2e;border-radius:12px;background:#0d0d0d;
+                            display:flex;flex-direction:column;align-items:center;justify-content:center;
+                            gap:12px;color:#333;'>
+                    <div style='font-size:3rem;'>✅</div>
+                    <div style='font-size:0.85rem;letter-spacing:2px;text-transform:uppercase;color:#555;'>
+                        Carregue uma ortofoto para análise de qualidade
+                    </div>
+                    <div style='font-size:0.75rem;color:#444;'>
+                        Marque o grid → Detecte Falhas → Exporte relatório
+                    </div>
+                </div>""", unsafe_allow_html=True)
             # FIM NOVO - MÓDULO QUALIDADE DE PARCELA
 
         else:
@@ -24588,6 +27803,75 @@ html body div[data-testid="stTextArea"] textarea:disabled {{
     color:rgba(255,255,255,.86) !important;
     -webkit-text-fill-color:rgba(255,255,255,.86) !important;
     opacity:1 !important;
+}}
+html body .stApp div[data-testid="stTextInput"] [data-baseweb="base-input"],
+html body .stApp div[data-testid="stNumberInput"] [data-baseweb="base-input"],
+html body .stApp div[data-testid="stDateInput"] [data-baseweb="base-input"],
+html body .stApp div[data-testid="stTimeInput"] [data-baseweb="base-input"],
+html body .stApp div[data-testid="stTextInput"] [data-baseweb="input"] > div,
+html body .stApp div[data-testid="stNumberInput"] [data-baseweb="input"] > div,
+html body .stApp div[data-testid="stDateInput"] [data-baseweb="input"] > div,
+html body .stApp div[data-testid="stTimeInput"] [data-baseweb="input"] > div,
+html body .stApp div[data-testid="stTextInput"] > div > div,
+html body .stApp div[data-testid="stNumberInput"] > div > div,
+html body .stApp div[data-testid="stDateInput"] > div > div,
+html body .stApp div[data-testid="stTimeInput"] > div > div {{
+    background:
+        linear-gradient(120deg, rgba(255,255,255,.10), transparent 32%),
+        linear-gradient(180deg, #09243b 0%, #061b2e 100%) !important;
+    background-color:#071f35 !important;
+    border-color:rgba({THEME_PRIMARY_RGB}, .72) !important;
+    color:#ffffff !important;
+    -webkit-text-fill-color:#ffffff !important;
+    box-shadow:
+        inset 0 0 0 1px rgba({THEME_PRIMARY_RGB}, .18),
+        inset 0 0 18px rgba({THEME_PRIMARY_RGB}, .10) !important;
+}}
+html body .stApp input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+html body .stApp textarea,
+html body .stApp select,
+html body .stApp div[data-testid="stTextInput"] input,
+html body .stApp div[data-testid="stNumberInput"] input,
+html body .stApp div[data-testid="stDateInput"] input,
+html body .stApp div[data-testid="stTimeInput"] input,
+html body .stApp div[data-testid="stTextArea"] textarea {{
+    background:#071f35 !important;
+    background-image:linear-gradient(180deg, #09243b 0%, #061b2e 100%) !important;
+    color:#ffffff !important;
+    -webkit-text-fill-color:#ffffff !important;
+    caret-color:var(--tmg-primary-soft) !important;
+    color-scheme:dark !important;
+    -webkit-box-shadow:
+        0 0 0 1000px #071f35 inset,
+        inset 0 0 8px rgba({THEME_PRIMARY_RGB}, .14) !important;
+    box-shadow:
+        0 0 0 1000px #071f35 inset,
+        inset 0 0 8px rgba({THEME_PRIMARY_RGB}, .14) !important;
+}}
+html body .stApp input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):focus,
+html body .stApp textarea:focus,
+html body .stApp select:focus {{
+    outline:none !important;
+    border-color:var(--tmg-primary-soft) !important;
+    -webkit-box-shadow:
+        0 0 0 1000px #071f35 inset,
+        0 0 0 1px rgba({THEME_PRIMARY_RGB}, .56),
+        0 0 18px rgba({THEME_PRIMARY_RGB}, .48) !important;
+    box-shadow:
+        0 0 0 1000px #071f35 inset,
+        0 0 0 1px rgba({THEME_PRIMARY_RGB}, .56),
+        0 0 18px rgba({THEME_PRIMARY_RGB}, .48) !important;
+}}
+html body .stApp input::placeholder,
+html body .stApp textarea::placeholder {{
+    color:rgba(224,247,255,.78) !important;
+    -webkit-text-fill-color:rgba(224,247,255,.78) !important;
+    opacity:1 !important;
+}}
+html body .stApp input[type="date"]::-webkit-calendar-picker-indicator,
+html body .stApp input[type="time"]::-webkit-calendar-picker-indicator {{
+    filter:invert(1) brightness(1.65) drop-shadow(0 0 5px rgba({THEME_PRIMARY_RGB}, .74)) !important;
+    opacity:.95 !important;
 }}
 html body div[data-baseweb="popover"],
 html body div[data-baseweb="menu"],
@@ -24826,9 +28110,32 @@ html body div[data-testid="stDataEditor"] * {{
     color:#ffffff !important;
     border-color:rgba({THEME_PRIMARY_RGB}, .22) !important;
 }}
+html body div[data-testid="stDataFrame"] [role="grid"],
+html body div[data-testid="stDataEditor"] [role="grid"],
+html body div[data-testid="stDataFrame"] [class*="glide"],
+html body div[data-testid="stDataEditor"] [class*="glide"],
+html body div[data-testid="stDataFrame"] [class*="dvn"],
+html body div[data-testid="stDataEditor"] [class*="dvn"] {{
+    background:
+        linear-gradient(180deg, rgba(12,48,78,.96), rgba(4,20,36,.96)) !important;
+    color:#f5fbff !important;
+    border-color:rgba({THEME_PRIMARY_RGB}, .34) !important;
+}}
+html body div[data-testid="stDataFrame"] canvas,
+html body div[data-testid="stDataEditor"] canvas {{
+    background-color:#0b2a45 !important;
+    box-shadow:inset 0 0 0 1px rgba({THEME_PRIMARY_RGB}, .24) !important;
+}}
+html body div[data-testid="stDataFrame"] [data-testid="stElementToolbar"],
+html body div[data-testid="stDataEditor"] [data-testid="stElementToolbar"] {{
+    background:rgba(2,14,36,.88) !important;
+    border:1px solid rgba({THEME_PRIMARY_RGB}, .34) !important;
+    border-radius:10px !important;
+}}
 html body table {{
     color:#ffffff !important;
-    background:rgba(2,14,36,.72) !important;
+    background:
+        linear-gradient(180deg, rgba(12,48,78,.92), rgba(4,20,36,.94)) !important;
     border-color:rgba({THEME_PRIMARY_RGB}, .32) !important;
 }}
 html body thead,
@@ -24840,10 +28147,16 @@ html body th {{
     text-shadow:0 1px 0 rgba(0,0,0,.82), 0 0 8px rgba({THEME_PRIMARY_RGB}, .26) !important;
 }}
 html body tbody tr:nth-child(odd) {{
-    background:rgba(2,14,36,.52) !important;
+    background:rgba(8,34,58,.78) !important;
 }}
 html body tbody tr:nth-child(even) {{
-    background:rgba(13,43,69,.44) !important;
+    background:rgba(15,56,88,.72) !important;
+}}
+html body tbody td,
+html body table td {{
+    color:#f5fbff !important;
+    -webkit-text-fill-color:#f5fbff !important;
+    border-color:rgba({THEME_PRIMARY_RGB}, .24) !important;
 }}
 html body tbody tr:hover {{
     background:rgba({THEME_PRIMARY_RGB}, .22) !important;
@@ -24885,10 +28198,6 @@ html body pre {{
 </style>
 """, unsafe_allow_html=True)
 
-try:
-    clear_tmg_visualizador_transition_loading(locals().get("_tmg_visualizador_transition_slot"))
-except Exception:
-    pass
 clear_tmg_page_transition_loading(_tmg_page_transition_slot)
 
 # ==========================================

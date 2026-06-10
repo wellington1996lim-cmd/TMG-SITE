@@ -12,6 +12,10 @@ env/
 .pytest_cache/
 .ruff_cache/
 .streamlit/secrets.toml
+tmg_config/runtime_optimization.json
 tmg_data/tmp/
+data/
+database/
+logs/
 Ultralytics/**/settings.json
 Ultralytics/**/persistent_cache.json

@@ -1,10 +1,24 @@
 [server]
-port = 8501
 headless = true
-maxUploadSize = 2048
+port = 8501
+maxUploadSize = 8000
 maxMessageSize = 2048
 enableWebsocketCompression = true
 enableXsrfProtection = true
+fileWatcherType = "none"
+runOnSave = false
 
 [browser]
 gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = true
+
+[theme]
+base = "dark"
+primaryColor = "#00E5FF"
+backgroundColor = "#020E24"
+secondaryBackgroundColor = "#0B2A45"
+textColor = "#F5FBFF"
+font = "sans serif"
